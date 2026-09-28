@@ -1,0 +1,754 @@
+/*--------------------------------------------------------------
+# Whiteboard
+--------------------------------------------------------------*/
+
+#whiteboard {
+    --wb-accent: var(--room-switch-accent, #4678f9);
+    --wb-toolbar-surface: rgba(18, 18, 21, 0.88);
+    --wb-control-surface: rgba(255, 255, 255, 0.06);
+    z-index: 13;
+    position: fixed;
+    margin: auto;
+    padding: 10px;
+    max-width: 100vw;
+    max-height: 100vh;
+    width: var(--wb-width);
+    height: var(--wb-height);
+    background: var(--wb-bg);
+    border: var(--border);
+    box-shadow: var(--box-shadow);
+    border-radius: 10px;
+    /* center */
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    /* fade in */
+    -webkit-animation: fadeIn ease-in 1;
+    -moz-animation: fadeIn ease-in 1;
+    animation: fadeIn ease-in 1;
+    -webkit-animation-fill-mode: forwards;
+    -moz-animation-fill-mode: forwards;
+    animation-fill-mode: forwards;
+    -webkit-animation-duration: 1s;
+    -moz-animation-duration: 1s;
+    animation-duration: 1s;
+    overflow: visible;
+    box-sizing: border-box;
+}
+
+.whiteboard-canvas-area {
+    position: relative;
+}
+
+.whiteboard-participant-labels {
+    position: absolute;
+    z-index: 3;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.whiteboard-author-label,
+.whiteboard-participant-label {
+    position: absolute;
+    z-index: 3;
+    max-width: 180px;
+    padding: 4px 8px;
+    overflow: hidden;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.82);
+    border-radius: 4px;
+    opacity: 1;
+    transform: translate(-50%, calc(-100% - 6px));
+    transition: opacity 180ms ease-out;
+}
+
+.whiteboard-participant-label.is-hiding {
+    opacity: 0;
+}
+
+.whiteboard-participant-label.is-active::before {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 5px;
+    content: '';
+    background: #63e6be;
+    border-radius: 50%;
+}
+
+.whiteboard-header {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 48px;
+    padding: 5px 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    background: var(--wb-toolbar-surface);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.24);
+    backdrop-filter: blur(14px);
+    color: #ffffff;
+    cursor: move;
+}
+
+.whiteboard-header-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 0 4px;
+}
+
+.whiteboard-title-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--wb-accent) 14%, transparent);
+    color: var(--wb-accent);
+}
+
+.whiteboard-title-text {
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0;
+}
+
+.whiteboard-header-options {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    min-width: 0;
+}
+
+.whiteboard-tool-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-height: 36px;
+    padding: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    background: var(--wb-control-surface);
+}
+
+#whiteboardUnlockBtn,
+#whiteboardLockBtn {
+    display: none;
+    margin-left: 3px;
+    margin-right: 3px;
+}
+
+.whiteboard-header-title button,
+.whiteboard-header-options button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 0.88rem;
+    background: transparent;
+    color: #fff;
+    border: none !important;
+    border-radius: 6px;
+    cursor: pointer;
+    transition:
+        background 0.18s ease,
+        color 0.18s ease,
+        box-shadow 0.18s ease;
+}
+
+.whiteboard-header-title button:hover,
+.whiteboard-header-options button:hover {
+    background: rgba(255, 255, 255, 0.11);
+}
+
+.whiteboard-header-title button:focus-visible,
+.whiteboard-header-options button:focus-visible,
+.whiteboard-color-control:focus-within {
+    outline: 2px solid var(--wb-accent);
+    outline-offset: 2px;
+}
+
+.whiteboard-header-options button.is-active,
+.whiteboard-header-options button[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--wb-accent) 18%, transparent);
+    color: var(--wb-accent) !important;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wb-accent) 40%, transparent);
+}
+
+.whiteboard-color-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 7px;
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.68);
+    font-size: 0.65rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.whiteboard-color-control:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+}
+
+.whiteboard-close-button:hover {
+    background: rgba(255, 92, 92, 0.18) !important;
+    color: #ff8a8a !important;
+}
+
+.whiteboard-responsive-action span {
+    display: none;
+}
+
+.whiteboard-responsive-action i {
+    pointer-events: none;
+}
+
+.whiteboardColorPicker {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding: 0;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.28);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+    background: transparent;
+    cursor: pointer;
+    transition:
+        box-shadow 0.2s,
+        border 0.2s,
+        transform 0.2s;
+    display: inline-block;
+    vertical-align: middle;
+}
+.whiteboardColorPicker:hover {
+    box-shadow: 0 0 0 2px rgba(102, 190, 255, 0.18);
+    border: 2px solid #66beff;
+    transform: scale(1.12);
+}
+.whiteboardColorPicker::-webkit-color-swatch {
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+}
+.whiteboardColorPicker::-webkit-color-swatch-wrapper {
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+}
+.whiteboardColorPicker::-moz-color-swatch {
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+}
+.whiteboardColorPicker::-moz-color-swatch-wrapper {
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+}
+.whiteboardColorPicker::color-swatch {
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+}
+.whiteboardColorPicker::color-swatch-wrapper {
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+}
+
+.hidden {
+    display: none;
+}
+
+.show {
+    display: block;
+}
+
+/* Styles for the dropdown button */
+.whiteboard-dropdown {
+    margin-left: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.whiteboard-dropdown-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+/* Styles for the dropdown menu container */
+.whiteboard-dropdown-menu {
+    z-index: 12;
+    position: absolute;
+    margin-top: 5px;
+    top: 100%;
+    right: 0;
+    display: none;
+    min-width: 220px;
+    padding: 6px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    max-height: var(--whiteboard-dropdown-max-height, calc(100dvh - 80px)) !important;
+    overscroll-behavior-y: contain;
+    scrollbar-width: thin;
+}
+
+/* Styles for dropdown menu items */
+.whiteboard-dropdown-menu .app-dropdown-action {
+    display: flex;
+    justify-content: flex-start;
+    width: 100%;
+    font-size: 0.8em;
+    min-height: 38px;
+    padding: 9px 10px;
+}
+
+.whiteboard-dropdown-menu .app-dropdown-action:hover {
+    color: #ffffff;
+}
+
+/* Styles for icons and SVGs inside buttons */
+.whiteboard-dropdown-menu .app-dropdown-action i,
+.whiteboard-dropdown-menu .app-dropdown-action svg {
+    width: 18px;
+    min-width: 18px;
+    text-align: center;
+    flex: 0 0 18px;
+    margin-right: 0;
+}
+
+.whiteboard-menu-switch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-width: 210px;
+    padding: 8px 12px;
+    color: #fff;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.whiteboard-menu-switch.hidden {
+    display: none;
+}
+
+.whiteboard-menu-switch > span:first-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.whiteboard-menu-switch .toggle {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+/* Whiteboard Shortcuts Styles */
+#whiteboardShortcutsContent {
+    display: none;
+}
+
+.wb-shortcuts-container {
+    text-align: left;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: var(--body-bg);
+    padding: 0.5rem 0.7rem;
+    border-radius: 10px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    max-width: 340px;
+    margin: 0 auto;
+    font-size: 0.85em;
+    max-height: 70vh;
+}
+
+.wb-shortcuts-title {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text-color);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border-color, #e0e0e0);
+}
+
+.wb-shortcuts-title:first-child {
+    margin-top: 0;
+}
+
+.wb-shortcuts-title i {
+    color: var(--text-color);
+    font-size: 1rem;
+}
+
+.wb-shortcuts-code {
+    background: var(--body-bg);
+    padding: 0.5rem 0.5rem;
+    border-radius: 6px;
+    white-space: pre;
+    overflow-x: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--text-color);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.13);
+    filter: brightness(0.92);
+}
+
+.wb-shortcuts-text {
+    color: #66beff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    letter-spacing: 0.02em;
+    background: linear-gradient(135deg, rgba(102, 190, 255, 0.11), rgba(102, 190, 255, 0.06));
+    padding: 4px 10px;
+    border-radius: 6px;
+    display: inline-block;
+    box-shadow: 0 1px 4px rgba(102, 190, 255, 0.07);
+}
+
+.wb-shortcuts-list {
+    list-style: none;
+    padding-left: 0;
+    background: var(--body-bg);
+    border-radius: 6px;
+    padding: 0.3rem 0.2rem;
+    filter: brightness(0.97);
+}
+
+.wb-shortcuts-list li {
+    margin: 0.3rem 0;
+    padding: 0.3rem 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+    color: var(--text-color);
+    font-weight: 500;
+    font-size: 0.85rem;
+    transition: all 0.2s ease;
+}
+
+.wb-shortcuts-list li:hover {
+    background: rgba(0, 0, 0, 0.04);
+    border-left: 2px solid var(--border-color, #e0e0e0);
+}
+
+/* Sticky Note Dialog Styles */
+.sticky-note-form {
+    display: flex;
+    background: var(--body-bg);
+    flex-direction: column;
+    gap: 1.2rem;
+    padding: 1.2rem;
+    border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    border: 1px solid rgba(255, 215, 0, 0.18);
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.sticky-note-colors-row {
+    display: flex;
+    gap: 1rem;
+    width: 100%;
+    flex-wrap: wrap;
+}
+
+.sticky-note-textarea {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid rgba(255, 215, 0, 0.3);
+    border-radius: 10px;
+    background: rgba(255, 235, 59, 0.07);
+    color: var(--text-color, #ffffff);
+    font-size: 1rem;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    resize: vertical;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 8px rgba(255, 215, 0, 0.08);
+    box-sizing: border-box;
+}
+
+.sticky-note-color-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 120px;
+}
+
+.sticky-note-color-label {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text-color, #ffffff);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.sticky-note-color-input {
+    width: 100%;
+    height: 50px;
+    border: none !important;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 1px 4px rgba(255, 215, 0, 0.07);
+}
+
+.sticky-note-color-input:hover {
+    transform: scale(1.01);
+}
+
+.sticky-note-color-input::-webkit-color-swatch-wrapper {
+    padding: 4px;
+    border-radius: 10px;
+}
+
+.sticky-note-color-input::-webkit-color-swatch {
+    border: none;
+    border-radius: 8px;
+}
+
+.sticky-note-color-input::-moz-color-swatch {
+    border: none;
+    border-radius: 8px;
+}
+
+/* Responsive styles for small screens */
+@media (max-width: 600px) {
+    .sticky-note-form {
+        padding: 0.7rem;
+        border-radius: 8px;
+        gap: 0.7rem;
+    }
+    .sticky-note-colors-row {
+        flex-direction: column;
+        gap: 0.7rem;
+    }
+    .sticky-note-color-group {
+        min-width: 0;
+    }
+    .sticky-note-textarea {
+        font-size: 0.95rem;
+        padding: 8px;
+    }
+    .sticky-note-color-input {
+        height: 38px;
+        border-radius: 8px;
+    }
+}
+
+/* Bottom-right Secondary Drag Handle */
+.whiteboard-bottom-handle {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 32px;
+    height: 32px;
+    background-color: rgba(44, 44, 44, 0.85);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-top-left-radius: 8px;
+    border-bottom-right-radius: 10px;
+    cursor: move;
+    z-index: 100;
+    opacity: 0;
+    transition:
+        background-color 0.2s ease,
+        opacity 0.3s ease-in-out;
+}
+
+.whiteboard-bottom-handle:hover {
+    background-color: rgb(75, 75, 75);
+    opacity: 1;
+}
+
+/* Bottom-left Secondary Drag Handle */
+.whiteboard-bottom-left-handle {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 32px;
+    height: 32px;
+    background-color: rgba(44, 44, 44, 0.85);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 10px;
+    cursor: move;
+    z-index: 100;
+    opacity: 0;
+    transition:
+        background-color 0.2s ease,
+        opacity 0.3s ease-in-out;
+}
+
+.whiteboard-bottom-left-handle:hover {
+    background-color: rgb(75, 75, 75);
+    opacity: 1;
+}
+
+#drag-handle-bottom-right:hover,
+#drag-handle-bottom-left:hover {
+    opacity: 1;
+}
+
+/* Keep primary drawing tools visible and move secondary actions into overflow. */
+@media (max-width: 768px) {
+    #whiteboard {
+        padding: 5px;
+        border-radius: 8px;
+    }
+
+    .whiteboard-header {
+        gap: 4px;
+        min-height: 38px;
+        padding: 2px;
+    }
+
+    .whiteboard-title-text,
+    .whiteboard-color-control > span {
+        display: none;
+    }
+
+    .whiteboard-title-mark {
+        width: 28px;
+        height: 28px;
+        flex-basis: 28px;
+    }
+
+    .whiteboard-header-title {
+        gap: 2px;
+        padding: 0;
+    }
+
+    .whiteboard-tool-group {
+        min-height: 30px;
+        padding: 0;
+        border: none;
+        background: transparent;
+    }
+
+    .whiteboard-canvas-tools {
+        order: 2;
+    }
+
+    .whiteboard-drawing-tools {
+        order: 1;
+    }
+
+    .whiteboard-history-tools {
+        order: 3;
+    }
+
+    .whiteboard-dropdown {
+        order: 4;
+    }
+
+    .whiteboard-close-button {
+        order: 5;
+    }
+
+    .whiteboard-header-title button,
+    .whiteboard-header-options button,
+    .whiteboard-dropdown-toggle {
+        padding: 5px;
+        font-size: 0.75rem;
+        min-width: 28px;
+        height: 28px;
+    }
+
+    .whiteboard-dropdown {
+        height: 28px;
+    }
+
+    .whiteboardColorPicker {
+        width: 18px;
+        height: 18px;
+    }
+
+    .whiteboard-color-control {
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        justify-content: center;
+    }
+
+    #whiteboardResponsiveActionsMenu {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        margin-bottom: 4px;
+        padding-bottom: 4px;
+    }
+
+    #whiteboardResponsiveActionsMenu:empty {
+        display: none;
+    }
+
+    #whiteboardResponsiveActionsMenu .whiteboard-responsive-action {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 12px;
+        width: 100%;
+        min-width: 0;
+        height: auto;
+        padding: 10px 12px;
+        border-radius: 10px;
+        font-size: 0.8em;
+        text-align: left;
+        line-height: 1.35;
+    }
+
+    #whiteboardResponsiveActionsMenu .whiteboard-responsive-action i {
+        width: 18px;
+        min-width: 18px;
+        text-align: center;
+        flex: 0 0 18px;
+    }
+
+    #whiteboardResponsiveActionsMenu .whiteboard-responsive-action span {
+        display: inline;
+        font-weight: normal;
+    }
+}
+
+/* Hide secondary drag handles on touch/mobile devices (no hover, dragElement is mouse-only) */
+@media (hover: none), (pointer: coarse) {
+    .whiteboard-bottom-handle,
+    .whiteboard-bottom-left-handle {
+        display: none;
+    }
+}
