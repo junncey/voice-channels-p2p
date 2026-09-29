@@ -163,6 +163,8 @@ class ChannelStore {
         this.filePath = filePath;
         this.defaultModerator = String(defaultModerator || '');
         this.channels = [];
+        /** id -> ephemeral channel definition (see getTemp) */
+        this.temps = new Map();
         this.load({ createIfMissing: autoInit });
     }
 
@@ -224,6 +226,52 @@ class ChannelStore {
         return this.channels.some((ch) => ch.id === id);
     }
 
+    // ----- temporary (in-memory) channels -----
+    // Spawned on first join for ids that aren't in the persistent registry.
+    // Never written to channels.json; removed when the last peer leaves.
+
+    getTemp(id) {
+        return this.temps.get(id) || null;
+    }
+
+    isTemp(id) {
+        return this.temps.has(id);
+    }
+
+    getOrCreateTemp(id, { maxParticipants = 8 } = {}) {
+        let channel = this.temps.get(id);
+        if (!channel) {
+            const now = new Date().toISOString();
+            channel = {
+                id,
+                name: id,
+                description: '',
+                public: true,
+                maxParticipants,
+                hosts: [],
+                temporary: true,
+                createdAt: now,
+                updatedAt: now,
+            };
+            this.temps.set(id, channel);
+            log.info('Temp channel created', { id });
+        }
+        return channel;
+    }
+
+    removeTempIfEmpty(id, onlineCount = 0) {
+        if (this.temps.has(id) && onlineCount <= 0) {
+            this.temps.delete(id);
+            log.info('Temp channel removed (empty)', { id });
+        }
+    }
+
+    listTemps({ onlineOf = null } = {}) {
+        return [...this.temps.values()].map((ch) =>
+            this.sanitize(ch, { online: onlineOf ? onlineOf(ch.id) : null }),
+        );
+    }
+
     /** Raw definition (includes password hashes) — server-side use only. */
     get(id) {
         return this.channels.find((ch) => ch.id === id) || null;
@@ -239,6 +287,7 @@ class ChannelStore {
             public: channel.public !== false,
             maxParticipants: channel.maxParticipants || 8,
             hosts: Array.isArray(channel.hosts) ? channel.hosts.map((h) => h.username) : [],
+            temporary: channel.temporary === true,
             createdAt: channel.createdAt,
             updatedAt: channel.updatedAt,
         };

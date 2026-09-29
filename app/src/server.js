@@ -268,10 +268,12 @@ app.get('/', (req, res) => {
     res.sendFile(views.index);
 });
 
-// Voice channel page — the channel must exist in the persistent registry.
+// Voice channel page — registered channels always resolve; any other valid id
+// resolves when temporary rooms are enabled (the room is spawned on first join)
 app.get('/c/:channelId', (req, res) => {
     const { channelId } = req.params;
-    if (!channelStore.exists(channelId)) {
+    const known = channelStore.exists(channelId) || channelStore.isTemp(channelId);
+    if (!known && !(channelsCfg.tempRooms && channelStore.isValidId(channelId))) {
         return res.status(404).sendFile(views.notFound);
     }
     res.sendFile(views.channel);
@@ -301,18 +303,38 @@ app.get('/:roomId', (req, res) => {
 // Public API
 // ---------------------------------------------------------------------------
 
-// Public channels with online counts (homepage)
+// Public channels with online counts (homepage); active temporary rooms are
+// appended with a `temporary` flag so visitors can discover and join them
 app.get('/api/channels', (req, res) => {
     res.json({
-        channels: channelStore.list({ includePrivate: false, onlineOf: (id) => getPeerCount(id) }),
+        channels: [
+            ...channelStore.list({ includePrivate: false, onlineOf: (id) => getPeerCount(id) }),
+            ...channelStore.listTemps({ onlineOf: (id) => getPeerCount(id) }),
+        ],
     });
 });
 
 // Channel metadata for the channel page (works for unlisted channels too)
 app.get('/api/channels/:channelId', (req, res) => {
-    const channel = channelStore.get(req.params.channelId);
-    if (!channel) return res.status(404).json({ error: 'Channel not found' });
-    res.json(channelStore.sanitize(channel, { includePrivate: true, online: getPeerCount(channel.id) }));
+    const id = req.params.channelId;
+    const channel = channelStore.get(id) || channelStore.getTemp(id);
+    if (channel) {
+        return res.json(channelStore.sanitize(channel, { includePrivate: true, online: getPeerCount(id) }));
+    }
+    // unknown id: with temp rooms enabled, any valid id MAY become a room the
+    // moment someone joins — serve a virtual preview instead of a 404
+    if (channelsCfg.tempRooms && channelStore.isValidId(id)) {
+        return res.json({
+            id,
+            name: id,
+            description: '',
+            public: true,
+            maxParticipants: 8,
+            hosts: [],
+            temporary: true,
+        });
+    }
+    return res.status(404).json({ error: 'Channel not found' });
 });
 
 // Host login -> JWT used as peer_token when joining the channel socket room
@@ -512,8 +534,12 @@ io.sockets.on('connect', async (socket) => {
             return log.debug('[' + socket.id + '] [Warning] already joined', channel);
         }
 
-        // Channel must be registered — guests can no longer spawn ad-hoc rooms
-        const channelDef = channelStore.get(channel);
+        // Channel must be registered — or, with temporary rooms enabled, any
+        // valid id spawns an ephemeral in-memory room
+        let channelDef = channelStore.get(channel);
+        if (!channelDef && channelsCfg.tempRooms) {
+            channelDef = channelStore.getOrCreateTemp(channel);
+        }
         if (!channelDef) {
             log.warn('[' + socket.id + '] channel not found in registry', { channel });
             return socket.emit('channelNotFound');
@@ -884,6 +910,8 @@ io.sockets.on('connect', async (socket) => {
                 delete peers[channel];
                 delete presenters[channel];
                 delete channels[channel]; // clean up to prevent memory leaks
+                // an empty temporary room is gone for good
+                channelStore.removeTempIfEmpty(channel, 0);
             }
         } catch (err) {
             log.error('Remove Peer', toJson(err));

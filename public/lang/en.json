@@ -148,5 +148,9 @@
     "channel.renameLabel": "New nickname",
     "channel.renameSubmit": "Save",
     "channel.renamedYou": "The host changed your nickname to {name}",
-    "chat.renamed": "{old} was renamed to {name} by the host"
+    "chat.renamed": "{old} was renamed to {name} by the host",
+    "index.createTemp": "Create a temporary room",
+    "index.tempBadge": "Temporary",
+    "channel.tempBadge": "Temporary room",
+    "chat.imageTooMany": "Up to 6 images per message"
 }

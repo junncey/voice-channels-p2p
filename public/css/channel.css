@@ -818,3 +818,49 @@ body {
         max-width: 96%;
     }
 }
+
+/* pending image tray above the chat composer */
+.chat-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border-soft);
+    background: var(--bg-1);
+}
+
+.chat-attachment {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-s);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+}
+
+.chat-attachment img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.chat-attachment-remove {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 18px;
+    height: 18px;
+    font-size: 11px;
+    line-height: 18px;
+    text-align: center;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 0 0 0 var(--radius-s);
+}
+
+.chat-attachment-remove:hover {
+    background: var(--danger);
+    color: #2b0a09;
+}

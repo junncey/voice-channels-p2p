@@ -76,6 +76,30 @@ describe('test-channelStore', () => {
             store = newStore('crud');
         });
 
+        it('should manage temporary channels in memory only', () => {
+            store.create({ id: 'persisted', name: 'kept' });
+            const temp = store.getOrCreateTemp('quick-room');
+            temp.temporary.should.be.true();
+            store.getOrCreateTemp('quick-room').should.equal(temp); // created once
+            store.isTemp('quick-room').should.be.true();
+            store.isTemp('persisted').should.be.false();
+
+            // sanitized with the temporary flag, listed separately
+            store.sanitize(temp).temporary.should.be.true();
+            store.sanitize(store.get('persisted')).temporary.should.be.false();
+            store.listTemps().map((ch) => ch.id).should.eql(['quick-room']);
+
+            // never written to disk
+            const raw = JSON.parse(fs.readFileSync(store.filePath, 'utf8'));
+            raw.channels.map((ch) => ch.id).should.eql(['persisted']);
+
+            // removed only when empty
+            store.removeTempIfEmpty('quick-room', 1);
+            store.isTemp('quick-room').should.be.true();
+            store.removeTempIfEmpty('quick-room', 0);
+            store.isTemp('quick-room').should.be.false();
+        });
+
         it('should create a valid channel and never expose hashes', () => {
             const res = store.create({
                 id: 'good-id_1',

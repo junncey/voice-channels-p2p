@@ -17,8 +17,22 @@ boot();
 async function boot() {
     await initI18n();
     bindClearData();
+    bindCreateTemp();
     await load();
     setInterval(load, POLL_MS);
+}
+
+// ----- temporary rooms: spawn one by visiting a fresh /c/<id>; the server
+// creates it in memory on first join and drops it when the last peer leaves -----
+
+function bindCreateTemp() {
+    $('#createTempBtn').addEventListener('click', () => {
+        const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'; // same unambiguous set as the server
+        const bytes = crypto.getRandomValues(new Uint8Array(8));
+        let id = '';
+        for (let i = 0; i < 8; i++) id += alphabet[bytes[i] % alphabet.length];
+        location.href = `/c/${id}`;
+    });
 }
 
 async function load() {
@@ -81,6 +95,9 @@ function renderCard(channel) {
             'div',
             { class: 'channel-card-top' },
             el('h3', { text: channel.name || channel.id }),
+            channel.temporary
+                ? el('span', { class: 'badge temp', text: t('index.tempBadge') })
+                : null,
             el(
                 'span',
                 { class: 'channel-online' + (busy ? ' busy' : '') },

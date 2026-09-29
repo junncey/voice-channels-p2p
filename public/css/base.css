@@ -220,6 +220,11 @@ select {
     color: var(--warn);
 }
 
+.badge.temp {
+    background: rgba(108, 178, 255, 0.14);
+    color: var(--info);
+}
+
 .badge.on {
     background: var(--accent-dim);
     color: var(--accent);

@@ -148,5 +148,9 @@
     "channel.renameLabel": "新昵称",
     "channel.renameSubmit": "保存",
     "channel.renamedYou": "你的昵称已被主持人修改为 {name}",
-    "chat.renamed": "{old} 已被主持人重命名为 {name}"
+    "chat.renamed": "{old} 已被主持人重命名为 {name}",
+    "index.createTemp": "创建临时房间",
+    "index.tempBadge": "临时",
+    "channel.tempBadge": "临时房间",
+    "chat.imageTooMany": "一次最多发送 6 张图片"
 }

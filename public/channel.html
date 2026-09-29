@@ -18,7 +18,7 @@
                     </svg>
                 </button>
                 <div class="channel-titles">
-                    <h1 id="channelName">…</h1>
+                    <h1><span id="channelName">…</span><span id="tempBadge" class="badge temp hidden" data-i18n="channel.tempBadge">临时房间</span></h1>
                     <p id="channelDesc"></p>
                 </div>
             </div>
@@ -74,6 +74,7 @@
                     <h2 data-i18n="channel.chatPanel">文字聊天</h2>
                 </div>
                 <div id="chatMessages" class="chat-messages"></div>
+                <div id="chatAttachments" class="chat-attachments hidden"></div>
                 <form id="chatForm" class="chat-form" autocomplete="off">
                     <button type="button" id="imageBtn" class="icon-btn chat-image-btn" data-i18n-title="chat.sendImage" aria-label="send image">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -204,7 +205,7 @@
             </div>
         </div>
 
-        <input type="file" id="imageFileInput" accept="image/*" hidden />
+        <input type="file" id="imageFileInput" accept="image/*" multiple hidden />
 
         <div id="toasts" class="toasts"></div>
 

@@ -157,6 +157,7 @@ async function boot() {
 
     $('#channelName').textContent = channelMeta.name || channelId;
     $('#channelDesc').textContent = channelMeta.description || '';
+    $('#tempBadge').classList.toggle('hidden', !channelMeta.temporary);
     $('#joinChannelName').textContent = `# ${channelMeta.name || channelId}`;
     document.title = `${channelMeta.name || channelId} · ${t('app.name')}`;
 
@@ -1217,25 +1218,49 @@ function savePeerVolume(name, volume) {
 // chat + image sending
 // ---------------------------------------------------------------------------
 
-function onChatSubmit(event) {
+async function onChatSubmit(event) {
     event.preventDefault();
+    if (!joined) return;
     const input = $('#chatInput');
     const text = input.value.trim().slice(0, 500);
-    if (!text || !joined) return;
+    const images = [...pendingImages];
+    if (!text && !images.length) return;
     input.value = '';
-    mesh.sendChat({ type: 'chat', from: selfName, msg: text });
-    chat.add({ name: selfName, text, self: true });
+    clearPendingImages(); // the tray is emptied up-front; failures toast per image
+
+    if (text) {
+        mesh.sendChat({ type: 'chat', from: selfName, msg: text });
+        chat.add({ name: selfName, text, self: true });
+    }
+    for (const item of images) {
+        let payload;
+        try {
+            payload = await fileToImageMessage(item.file);
+        } catch (err) {
+            const key = err?.message === 'too-large' ? 'chat.imageTooLarge' : 'chat.imageUnsupported';
+            toast(t(key), 'warn');
+            continue;
+        }
+        sendImageData({
+            send: (frame) => mesh.sendChat(frame),
+            from: selfName,
+            mime: payload.mime,
+            dataUrl: payload.dataUrl,
+        });
+        chat.addImage({ name: selfName, self: true, src: payload.dataUrl, alt: t('chat.image') });
+    }
 }
 
 function bindImageUi() {
     $('#imageBtn').addEventListener('click', () => $('#imageFileInput').click());
     $('#imageFileInput').addEventListener('change', (event) => {
-        const file = event.target.files && event.target.files[0];
+        const files = [...(event.target.files || [])];
         event.target.value = ''; // allow re-picking the same file
-        if (file) sendImageFile(file);
+        for (const file of files) addPendingImage(file);
     });
 
-    // paste an image straight from the clipboard, wherever the focus is
+    // pasted images land in the composer tray, so text or more images can be
+    // added before everything goes out together
     window.addEventListener('paste', (event) => {
         if (!joined) return;
         const items = event.clipboardData?.items;
@@ -1245,7 +1270,7 @@ function bindImageUi() {
                 const file = item.getAsFile();
                 if (file) {
                     event.preventDefault();
-                    sendImageFile(file);
+                    addPendingImage(file);
                     return;
                 }
             }
@@ -1253,23 +1278,54 @@ function bindImageUi() {
     });
 }
 
-async function sendImageFile(file) {
+// ----- pending image tray (composer attachments) -----
+
+const MAX_PENDING_IMAGES = 6;
+let pendingImages = []; // {id, file, url}
+let pendingImageSeq = 0;
+
+function addPendingImage(file) {
     if (!joined) return;
-    let payload;
-    try {
-        payload = await fileToImageMessage(file);
-    } catch (err) {
-        const key = err?.message === 'too-large' ? 'chat.imageTooLarge' : 'chat.imageUnsupported';
-        toast(t(key), 'warn');
-        return;
-    }
-    sendImageData({
-        send: (frame) => mesh.sendChat(frame),
-        from: selfName,
-        mime: payload.mime,
-        dataUrl: payload.dataUrl,
-    });
-    chat.addImage({ name: selfName, self: true, src: payload.dataUrl, alt: t('chat.image') });
+    if (!file || !file.type.startsWith('image/')) return toast(t('chat.imageUnsupported'), 'warn');
+    if (file.size > 8 * 1024 * 1024) return toast(t('chat.imageTooLarge'), 'warn');
+    if (pendingImages.length >= MAX_PENDING_IMAGES) return toast(t('chat.imageTooMany'), 'warn');
+    pendingImages.push({ id: ++pendingImageSeq, file, url: URL.createObjectURL(file) });
+    renderPendingImages();
+}
+
+function removePendingImage(id) {
+    const index = pendingImages.findIndex((item) => item.id === id);
+    if (index === -1) return;
+    URL.revokeObjectURL(pendingImages[index].url);
+    pendingImages.splice(index, 1);
+    renderPendingImages();
+}
+
+function clearPendingImages() {
+    for (const item of pendingImages) URL.revokeObjectURL(item.url);
+    pendingImages = [];
+    renderPendingImages();
+}
+
+function renderPendingImages() {
+    const tray = $('#chatAttachments');
+    tray.replaceChildren(
+        ...pendingImages.map((item) =>
+            el(
+                'div',
+                { class: 'chat-attachment' },
+                el('img', { src: item.url, alt: t('chat.image') }),
+                el('button', {
+                    class: 'chat-attachment-remove',
+                    type: 'button',
+                    text: '✕',
+                    'aria-label': 'remove image',
+                    onclick: () => removePendingImage(item.id),
+                })
+            )
+        )
+    );
+    tray.classList.toggle('hidden', !pendingImages.length);
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,6 +1373,7 @@ function teardown() {
     joined = false;
     socket?.disconnect();
     teardownMedia();
+    clearPendingImages();
     for (const peerId of [...members.keys()]) dropPeer(peerId, { silent: true });
 }
 
