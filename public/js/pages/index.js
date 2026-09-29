@@ -57,6 +57,10 @@ function bindClearData() {
     $('#clearAllBtn').addEventListener('click', () => {
         localStorage.removeItem(NICK_KEY);
         for (const key of CONFIG_KEYS) localStorage.removeItem(key);
+        // persisted host logins (one key per channel) go with "everything"
+        for (const key of Object.keys(localStorage)) {
+            if (key.startsWith('vc_host_token_')) localStorage.removeItem(key);
+        }
         close();
         toast(t('index.cleared'), 'ok');
     });

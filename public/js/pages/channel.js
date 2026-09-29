@@ -74,7 +74,47 @@ let joinLockOn = false;
 let localStream = null;
 let rawMicStream = null; // straight from getUserMedia, before the input gain
 let micProcessed = false; // outgoing track comes from the gain pipeline
-let hostToken = sessionStorage.getItem(HOST_TOKEN_PREFIX + channelId) || '';
+let hostToken = loadHostToken();
+
+// ----- host login persistence -----
+// The host token lives in localStorage so the login survives browser restarts
+// (the server re-grants presenter status on every join). Tokens stored in
+// sessionStorage by older versions are promoted on sight; expired ones are
+// dropped locally so the join never has to fail because of them.
+
+function hostTokenKey() {
+    return HOST_TOKEN_PREFIX + channelId;
+}
+
+function jwtExpiresAt(token) {
+    try {
+        const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+        return typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
+    } catch {
+        return 0;
+    }
+}
+
+function loadHostToken() {
+    const key = hostTokenKey();
+    let token = localStorage.getItem(key) || sessionStorage.getItem(key);
+    sessionStorage.removeItem(key);
+    if (token && jwtExpiresAt(token) <= Date.now()) {
+        localStorage.removeItem(key);
+        token = null;
+    }
+    if (token) localStorage.setItem(key, token);
+    return token || '';
+}
+
+function saveHostToken(token) {
+    localStorage.setItem(hostTokenKey(), token);
+}
+
+function clearHostToken() {
+    localStorage.removeItem(hostTokenKey());
+    sessionStorage.removeItem(hostTokenKey());
+}
 
 /** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
 const members = new Map();
@@ -190,6 +230,11 @@ async function join({ textOnly: asTextOnly }) {
     const nick = $('#nickInput').value.trim().slice(0, 24);
     if (!nick) return showJoinError(t('channel.errors.nickRequired'));
 
+    // release anything a previous attempt left behind (e.g. the stale-token
+    // retry after 'unauthorized' joins a second time)
+    teardownMedia();
+    for (const peerId of [...members.keys()]) dropPeer(peerId, { silent: true });
+
     selfName = nick;
     selfUuid = crypto.randomUUID();
     localStorage.setItem(NICK_KEY, nick);
@@ -244,15 +289,7 @@ function localLevelCb({ level }) {
 }
 
 function registerSocketHandlers() {
-    socket.on('connect', () => {
-        socket.emit('join', {
-            channel: channelId,
-            peer_uuid: selfUuid,
-            peer_name: selfName,
-            peer_token: hostToken || undefined,
-            peer_audio: onAir(),
-        });
-    });
+    socket.on('connect', emitJoin);
 
     socket.on('serverInfo', (cfg) => {
         if (!joined) {
@@ -338,12 +375,18 @@ function registerSocketHandlers() {
     socket.on('roomIsJoinLocked', () => showJoinError(t('channel.errors.roomIsJoinLocked')));
     socket.on('roomIsLocked', () => showJoinError(t('channel.errors.roomIsLocked')));
     socket.on('unauthorized', () => {
-        if (hostToken) {
-            sessionStorage.removeItem(HOST_TOKEN_PREFIX + channelId);
-            hostToken = '';
-            $('#hostReadyHint').classList.add('hidden');
+        if (!hostToken) return showJoinError(t('channel.errors.unauthorized'));
+        // persisted token no longer accepted (expired or the host was removed
+        // from the channel config) — drop it and carry on as a guest
+        clearHostToken();
+        hostToken = '';
+        $('#hostReadyHint').classList.add('hidden');
+        toast(t('channel.hostTokenExpired'), 'warn');
+        if (joined) emitJoin(); // reconnect of an established session: rejoin without the token
+        else {
+            socket.disconnect();
+            join({ textOnly: false });
         }
-        showJoinError(t('channel.errors.unauthorized'));
     });
 
     socket.on('disconnect', () => {
@@ -355,6 +398,16 @@ function registerSocketHandlers() {
             if (peerId !== socket.id) dropPeer(peerId, { silent: true });
         }
         toast(t('channel.errors.disconnected'), 'warn');
+    });
+}
+
+function emitJoin() {
+    socket.emit('join', {
+        channel: channelId,
+        peer_uuid: selfUuid,
+        peer_name: selfName,
+        peer_token: hostToken || undefined,
+        peer_audio: onAir(),
     });
 }
 
@@ -1170,7 +1223,7 @@ async function onHostLoginSubmit(event) {
     $('#hostLoginError').textContent = '';
     try {
         const { token } = await api.hostLogin(channelId, username, password);
-        sessionStorage.setItem(HOST_TOKEN_PREFIX + channelId, token);
+        saveHostToken(token);
         hostToken = token;
         $('#hostReadyHint').classList.remove('hidden');
         closeHostModal();

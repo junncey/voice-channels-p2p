@@ -140,5 +140,6 @@
     "common.loading": "加载中…",
     "common.error": "出错了，请稍后重试",
     "common.confirm": "确认",
-    "channel.guest": "游客"
+    "channel.guest": "游客",
+    "channel.hostTokenExpired": "主持人登录已过期，已改为游客身份加入"
 }

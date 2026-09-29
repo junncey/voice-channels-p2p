@@ -140,5 +140,6 @@
     "common.loading": "Loading…",
     "common.error": "Something went wrong, try again later",
     "common.confirm": "Confirm",
-    "channel.guest": "guest"
+    "channel.guest": "guest",
+    "channel.hostTokenExpired": "Host login expired — joined as a guest"
 }

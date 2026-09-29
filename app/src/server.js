@@ -116,8 +116,8 @@ if (!consoleEnabled) {
 }
 
 /** Sign admin / host tokens with the dedicated console secret. */
-function signConsoleToken(payload) {
-    return jwt.sign(payload, channelsCfg.adminJwtSecret, { expiresIn: channelsCfg.adminJwtExp || '24h' });
+function signConsoleToken(payload, expiresIn) {
+    return jwt.sign(payload, channelsCfg.adminJwtSecret, { expiresIn: expiresIn || channelsCfg.adminJwtExp || '24h' });
 }
 
 /** @returns {object|null} decoded payload or null when invalid/expired */
@@ -339,7 +339,7 @@ app.post('/api/host/login', loginLimiter, (req, res) => {
     }
 
     log.info('Host login ok', { channelId, username: host.username });
-    res.json({ token: signConsoleToken({ role: 'host', channelId, username: host.username }) });
+    res.json({ token: signConsoleToken({ role: 'host', channelId, username: host.username }, channelsCfg.hostJwtExp) });
 });
 
 // ---------------------------------------------------------------------------

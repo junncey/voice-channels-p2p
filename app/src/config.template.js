@@ -97,6 +97,9 @@ module.exports = {
         adminPassword: process.env.CHANNEL_ADMIN_PASSWORD || '',
         adminJwtSecret: process.env.CHANNEL_ADMIN_JWT_SECRET || '',
         adminJwtExp: process.env.CHANNEL_ADMIN_JWT_EXP || '24h',
+        // Host tokens are persisted in the browser so the login survives restarts,
+        // hence a much longer lifetime than admin console sessions.
+        hostJwtExp: process.env.CHANNEL_HOST_JWT_EXP || '30d',
         // Shared-secret password accepted as host login for channels that don't
         // configure their own hosts (username is free-form). Leave empty to
         // disable the fallback.
