@@ -47,6 +47,7 @@ const sinkSupported = typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in 
 const defaultAudioSettings = {
     micDeviceId: '',
     spkDeviceId: '',
+    micVolume: 1, // input gain 0..2 = 0%..200%
     volume: 1,
     noiseSuppression: true,
     echoCancellation: true,
@@ -71,6 +72,8 @@ let lastOnAir = false; // last peerStatus(audio) we broadcast
 let isPresenter = false;
 let joinLockOn = false;
 let localStream = null;
+let rawMicStream = null; // straight from getUserMedia, before the input gain
+let micProcessed = false; // outgoing track comes from the gain pipeline
 let hostToken = sessionStorage.getItem(HOST_TOKEN_PREFIX + channelId) || '';
 
 /** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
@@ -194,13 +197,14 @@ async function join({ textOnly: asTextOnly }) {
 
     if (!textOnly) {
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: buildAudioConstraints() });
+            rawMicStream = await navigator.mediaDevices.getUserMedia({ audio: buildAudioConstraints() });
         } catch {
             textOnly = true;
             toast(t('channel.errors.micDenied'), 'warn');
         }
     }
-    if (localStream) localStream.getTracks().forEach((track) => (track.enabled = true));
+    if (rawMicStream) rawMicStream.getTracks().forEach((track) => (track.enabled = true));
+    localStream = rawMicStream;
 
     hub = new AudioHub();
     try {
@@ -208,7 +212,6 @@ async function join({ textOnly: asTextOnly }) {
     } catch {
         /* speaking indicators degrade to off, voice still works */
     }
-    if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);
     if (hub.ctx) {
         // the context may start suspended (autoplay policy — e.g. auto-join on
         // page load with no user gesture): peers play through <audio> elements
@@ -218,6 +221,8 @@ async function join({ textOnly: asTextOnly }) {
         window.addEventListener('pointerdown', resume, { once: true });
         window.addEventListener('keydown', resume, { once: true });
     }
+    syncMicPipeline(); // may swap localStream to the gain-processed stream
+    if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);
     applySpeaker(); // route Web Audio playback to the chosen output from the start
 
     socket = io({ transports: ['websocket'] });
@@ -675,6 +680,33 @@ function buildAudioConstraints() {
  * Re-acquire the mic with the current settings (device switch or processing
  * toggle) and hot-swap the outgoing track — no renegotiation involved.
  */
+/**
+ * Point the outgoing track at the gain-processed mic stream while the shared
+ * AudioContext runs; a suspended context would emit silence, so the raw track
+ * goes out instead until the context resumes (statechange re-runs this).
+ */
+function syncMicPipeline() {
+    if (!rawMicStream) return;
+    const wantProcessed = !!hub?.ctx && hub.ctx.state === 'running';
+    if (wantProcessed === micProcessed) return;
+    const live = onAir();
+    if (wantProcessed) {
+        const processed = hub.attachMic(rawMicStream, settings.micVolume);
+        if (!processed) return;
+        processed.getAudioTracks().forEach((track) => (track.enabled = live));
+        localStream = processed;
+        micProcessed = true;
+        mesh?.replaceAudioTrack(processed.getAudioTracks()[0], processed);
+    } else {
+        hub?.detachMic();
+        rawMicStream.getAudioTracks().forEach((track) => (track.enabled = live));
+        localStream = rawMicStream;
+        micProcessed = false;
+        mesh?.replaceAudioTrack(rawMicStream.getAudioTracks()[0], rawMicStream);
+    }
+    if (hub?.ctx) hub.watch('self', localStream, localLevelCb);
+}
+
 async function reacquireMic() {
     const hadStream = !!localStream;
     const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
@@ -683,13 +715,23 @@ async function reacquireMic() {
     micOn = hadStream ? micOn : true;
     textOnly = false;
     track.enabled = onAir();
-    mesh?.replaceAudioTrack(track, stream);
-    localStream?.getTracks().forEach((old) => old.stop());
-    localStream = stream;
     if (hub) await hub.ensureContext().catch(() => {});
-    if (hub?.ctx) hub.watch('self', stream, localLevelCb);
+
+    // rebuild the input-gain pipeline around the new capture; the previous mic
+    // (raw capture + processed track) is stopped after the hot-swap
+    const oldRaw = rawMicStream;
+    const oldOut = localStream;
+    hub?.detachMic();
+    micProcessed = false;
+    rawMicStream = stream;
+    localStream = stream;
+    syncMicPipeline(); // upgrades to the processed track when possible
+    if (!micProcessed) mesh?.replaceAudioTrack(track, stream);
+    if (hub?.ctx) hub.watch('self', localStream, localLevelCb);
     ensureSelfMember();
     applyMicState();
+    oldOut?.getTracks().forEach((old) => old.stop());
+    oldRaw?.getTracks().forEach((old) => old.stop());
     refreshDeviceSelects(); // labels become available after permission is granted
 }
 
@@ -732,14 +774,21 @@ function webAudioPlayback() {
     return !!hub?.ctx && hub.ctx.state === 'running' && typeof hub.ctx.setSinkId === 'function';
 }
 
-/** Context became audible — move peers from the <audio> fallback to gain nodes. */
+/** Context state flipped — move playback/mic between the gain path and raw paths. */
 function onCtxStateChange() {
     if (webAudioPlayback()) {
         for (const [peerId, audio] of [...audioEls]) {
             if (audio.srcObject) attachRemoteAudio(peerId, audio.srcObject);
         }
         applySpeaker();
+    } else {
+        // suspended (again): the gain graph would be silent — play through elements
+        for (const [peerId, player] of [...(hub?.players?.entries() || [])]) {
+            const stream = player.src.mediaStream;
+            if (stream) attachRemoteAudio(peerId, stream);
+        }
     }
+    syncMicPipeline(); // raw track <-> gain-processed track
 }
 
 /** total gain for a remote peer: per-user volume × master volume */
@@ -852,6 +901,13 @@ function bindSettingsUi() {
         applyMicState();
     });
 
+    $('#micVolumeSlider').addEventListener('input', (event) => {
+        settings.micVolume = Number(event.target.value) / 100;
+        $('#micVolumeVal').textContent = `${event.target.value}%`;
+        hub?.setMicGain(settings.micVolume); // takes effect immediately, no renegotiation
+        saveAudioSettings();
+    });
+
     $('#volumeSlider').addEventListener('input', (event) => {
         settings.volume = Number(event.target.value) / 100;
         $('#volumeVal').textContent = `${event.target.value}%`;
@@ -875,6 +931,9 @@ function openSettings() {
     const pct = Math.round(settings.volume * 100);
     $('#volumeSlider').value = String(pct);
     $('#volumeVal').textContent = `${pct}%`;
+    const micPct = Math.round(settings.micVolume * 100);
+    $('#micVolumeSlider').value = String(micPct);
+    $('#micVolumeVal').textContent = `${micPct}%`;
     refreshDeviceSelects();
     $('#settingsModal').classList.remove('hidden');
 }
@@ -1137,7 +1196,10 @@ function teardownMedia() {
     stopMicTest();
     mesh?.close();
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
+    if (rawMicStream) rawMicStream.getTracks().forEach((track) => track.stop());
+    rawMicStream = null;
     localStream = null;
+    micProcessed = false;
     hub?.destroy();
     hub = null;
 }
@@ -1195,7 +1257,22 @@ if (location.hash === '#debug') {
     window.__vcDebug = () => ({
         mode: webAudioPlayback() ? 'webaudio' : 'element',
         ctxState: hub?.ctx?.state ?? null,
-        levels: hub ? Object.fromEntries([...hub.watchers.entries()].map(([k, w]) => [k, w.lastLevel ?? null])) : null,
+        ctxTime: hub?.ctx?.currentTime ?? null,
+        micRaw: hub?.mic?.raw.getAudioTracks().map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`).join(',') ?? null,
+        micProcessed,
+        micVolume: settings.micVolume,
+        micGain: hub?.mic?.gain.gain.value ?? null,
+        // live sampling (not the throttled _tick values) — readable in background tabs
+        levels: hub
+            ? Object.fromEntries(
+                  [...hub.watchers.entries()].map(([k, w]) => {
+                      w.analyser.getByteFrequencyData(w.data);
+                      let sum = 0;
+                      for (let i = 0; i < w.data.length; i++) sum += w.data[i] * w.data[i];
+                      return [k, Math.sqrt(sum / w.data.length) / 255];
+                  }),
+              )
+            : null,
         tracks: hub
             ? [...hub.players.entries()].map(([k, p]) => ({
                   peer: k,
@@ -1221,19 +1298,27 @@ if (location.hash === '#debug') {
     // WebRTC chain without depending on acoustic mic/speaker hardware
     window.__vcTone = async (ms = 3000) => {
         if (!mesh || !hub?.ctx || !localStream) return 'not-ready';
-        const dest = hub.ctx.createMediaStreamDestination();
         const osc = hub.ctx.createOscillator();
         osc.frequency.value = 880;
         const g = hub.ctx.createGain();
         g.gain.value = 0.7;
-        osc.connect(g).connect(dest);
         const an = hub.ctx.createAnalyser();
         an.fftSize = 512;
-        hub.ctx.createMediaStreamSource(dest.stream).connect(an);
+        osc.connect(g);
+        g.connect(an);
+        let restore = null;
+        if (micProcessed && hub.mic) {
+            g.connect(hub.mic.gain); // rides the input-gain pipeline
+        } else {
+            const dest = hub.ctx.createMediaStreamDestination();
+            g.connect(dest);
+            mesh.replaceAudioTrack(dest.stream.getAudioTracks()[0], dest.stream);
+            restore = () => mesh.replaceAudioTrack(localStream.getAudioTracks()[0], localStream);
+        }
         const data = new Uint8Array(an.frequencyBinCount);
         window.__vcToneLevel = 0;
-        mesh.replaceAudioTrack(dest.stream.getAudioTracks()[0], dest.stream);
         osc.start();
+        osc.stop(hub.ctx.currentTime + ms / 1000); // audio-clock schedule: background-tab timer throttling can't stall it
         const t0 = Date.now();
         while (Date.now() - t0 < ms) {
             await new Promise((r) => setTimeout(r, 300));
@@ -1242,8 +1327,8 @@ if (location.hash === '#debug') {
             for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
             window.__vcToneLevel = Math.sqrt(sum / data.length) / 255;
         }
-        osc.stop();
-        mesh.replaceAudioTrack(localStream.getAudioTracks()[0], localStream);
+        g.disconnect();
+        if (restore) restore();
         return 'done';
     };
     window.__vcStats = async () => {
@@ -1295,4 +1380,37 @@ if (location.hash === '#debug') {
     };
     // probe: force the AudioContext suspended/running to test the fallback migration
     window.__vcCtx = (op) => (op === 'suspend' ? hub?.ctx?.suspend() : hub?.ctx?.resume());
+    // probe: persistent tap on the outgoing (post-gain) mic stream; sync read, external pacing
+    window.__vcOutTap = () => {
+        if (!hub?.ctx || !hub.mic) return null;
+        if (!window.__outTap || window.__outTapKey !== hub.mic) {
+            try {
+                window.__outTap?.src.disconnect();
+            } catch {
+                /* stale tap */
+            }
+            const src = hub.ctx.createMediaStreamSource(hub.mic.stream);
+            const an = hub.ctx.createAnalyser();
+            an.fftSize = 2048;
+            src.connect(an);
+            window.__outTap = { src, an, data: new Float32Array(an.fftSize) };
+            window.__outTapKey = hub.mic;
+        }
+        const { an, data } = window.__outTap;
+        an.getFloatTimeDomainData(data); // linear scale — the dB-mapped byte readout hides gain changes
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+        return Number(Math.sqrt(sum / data.length).toFixed(4));
+    };
+    // probe: linear RMS of the first remote peer stream (receive side)
+    window.__vcPeerRms = () => {
+        const w = hub?.watchers && [...hub.watchers.entries()].find(([k]) => k !== 'self');
+        if (!w) return null;
+        const an = w[1].analyser;
+        const data = new Float32Array(an.fftSize);
+        an.getFloatTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+        return Number(Math.sqrt(sum / data.length).toFixed(4));
+    };
 }

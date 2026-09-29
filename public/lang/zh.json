@@ -74,6 +74,7 @@
     "settings.title": "音频设置",
     "settings.mic": "麦克风",
     "settings.micDevice": "输入设备",
+    "settings.micVolume": "输入音量",
     "settings.spk": "扬声器",
     "settings.spkDevice": "输出设备",
     "settings.volume": "音量",

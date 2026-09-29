@@ -18,6 +18,8 @@ export class AudioHub {
         this.players = new Map();
         /** key -> muted <audio> keeping remote track delivery alive (see _prime) */
         this.primers = new Map();
+        /** local mic pipeline: { raw, src, gain, dest, stream } or null */
+        this.mic = null;
         this.timer = null;
     }
 
@@ -140,6 +142,49 @@ export class AudioHub {
         this._unprime(key);
     }
 
+    // ----- local mic input gain (0..2 = 0%..200% of the captured level) -----
+
+    /**
+     * Route the raw capture through a gain node and return the processed
+     * stream whose track replaces the outgoing one. Returns null when the
+     * graph can't be built (caller keeps sending the raw stream).
+     * @param {MediaStream} rawStream straight from getUserMedia
+     * @param {number} gainValue initial gain (settings.micVolume)
+     */
+    attachMic(rawStream, gainValue = 1) {
+        if (!this.ctx || !rawStream || !rawStream.getAudioTracks().length) return null;
+        this.detachMic();
+        try {
+            const src = this.ctx.createMediaStreamSource(rawStream);
+            const gain = this.ctx.createGain();
+            gain.gain.value = gainValue;
+            const dest = this.ctx.createMediaStreamDestination();
+            src.connect(gain).connect(dest);
+            this.mic = { raw: rawStream, src, gain, dest, stream: dest.stream };
+            return dest.stream;
+        } catch {
+            this.mic = null;
+            return null;
+        }
+    }
+
+    setMicGain(value) {
+        if (!this.mic || !this.ctx) return;
+        this.mic.gain.gain.setTargetAtTime(value, this.ctx.currentTime, 0.02);
+    }
+
+    detachMic() {
+        if (!this.mic) return;
+        try {
+            this.mic.src.disconnect();
+            this.mic.gain.disconnect();
+        } catch {
+            /* already disconnected */
+        }
+        this.mic.stream.getTracks().forEach((track) => track.stop());
+        this.mic = null;
+    }
+
     /**
      * Route Web Audio playback to a specific output device (Chromium only).
      * @returns {Promise<boolean>} whether the sink could be applied
@@ -183,6 +228,7 @@ export class AudioHub {
         this._stop();
         for (const key of [...this.watchers.keys()]) this.unwatch(key);
         for (const key of [...this.players.keys()]) this.stopPeer(key);
+        this.detachMic();
         if (this.ctx) this.ctx.close().catch(() => {});
         this.ctx = null;
     }}

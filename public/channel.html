@@ -140,6 +140,11 @@
                             <div id="micDeviceSelect" class="dropdown-root"></div>
                         </div>
                         <div class="level-meter" aria-hidden="true"><div id="settingsMicBar"></div></div>
+                        <div class="volume-row">
+                            <label for="micVolumeSlider" data-i18n="settings.micVolume">输入音量</label>
+                            <input type="range" id="micVolumeSlider" min="0" max="200" step="5" />
+                            <span id="micVolumeVal" class="volume-val">100%</span>
+                        </div>
                         <label class="switch-row">
                             <span data-i18n="settings.noiseSuppression">噪声抑制</span>
                             <input type="checkbox" id="nsToggle" class="switch" />
