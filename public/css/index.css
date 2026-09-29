@@ -1,0 +1,204 @@
+/* ============================================================
+   Homepage — public channel list
+   ============================================================ */
+
+.page {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 20px 60px;
+}
+
+.topbar {
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text-1);
+    letter-spacing: 0.02em;
+}
+
+.brand:hover {
+    color: var(--text-1);
+}
+
+.brand-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-m);
+    background: var(--accent-dim);
+    color: var(--accent);
+}
+
+.topbar-link {
+    font-size: 13px;
+    color: var(--text-3);
+    transition: color var(--speed) var(--ease);
+}
+
+.topbar-link:hover {
+    color: var(--text-1);
+}
+
+.hero {
+    padding: 64px 0 44px;
+    text-align: center;
+}
+
+.hero h1 {
+    font-size: clamp(24px, 4.5vw, 34px);
+    font-weight: 800;
+    letter-spacing: 0.01em;
+}
+
+.hero p {
+    margin-top: 10px;
+    color: var(--text-2);
+    font-size: 14px;
+    letter-spacing: 0.08em;
+}
+
+.channels-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin: 8px 0 16px;
+    border-bottom: 1px solid var(--border-soft);
+    padding-bottom: 10px;
+}
+
+.channels-head h2 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-2);
+    letter-spacing: 0.06em;
+}
+
+.channels-status {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+.channel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+.channel-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 18px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-l);
+    background: var(--bg-1);
+    transition:
+        border-color var(--speed) var(--ease),
+        transform var(--speed) var(--ease),
+        box-shadow var(--speed) var(--ease);
+}
+
+.channel-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-1);
+}
+
+.channel-card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.channel-card h3 {
+    font-size: 16px;
+    font-weight: 700;
+    word-break: break-word;
+}
+
+.channel-card-desc {
+    font-size: 13px;
+    color: var(--text-2);
+    min-height: 20px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.channel-card-foot {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.channel-id-tag {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.channel-online {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.channel-online .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.channel-online.busy .dot {
+    background: var(--warn);
+    box-shadow: none;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 60px 0;
+    color: var(--text-2);
+}
+
+.empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: var(--bg-1);
+    border: 1px solid var(--border-soft);
+    color: var(--text-3);
+    margin-bottom: 16px;
+}
+
+.empty-hint {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--text-3);
+}

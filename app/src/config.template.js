@@ -120,6 +120,25 @@ module.exports = {
     presenters: parseJsonEnv(process.env.PRESENTERS, []),
 
     // ==========================================
+    // [CUSTOM] Persistent channels (持久化频道 + 网页管理后台)
+    // ==========================================
+    // Channels live in app/src/channels.json, managed at runtime via the /admin
+    // console. The admin console and every /api/admin/* route stay completely
+    // DISABLED (404) until BOTH a password and a dedicated JWT secret are
+    // configured — there are no insecure defaults. Mount channels.json as a
+    // volume when running in Docker so the registry survives restarts.
+    channels: {
+        adminPassword: process.env.CHANNEL_ADMIN_PASSWORD || '',
+        adminJwtSecret: process.env.CHANNEL_ADMIN_JWT_SECRET || '',
+        adminJwtExp: process.env.CHANNEL_ADMIN_JWT_EXP || '24h',
+        // Shared-secret password accepted as host login for channels that don't
+        // configure their own hosts (username is free-form). Same caveat as
+        // `presenters` above: leave empty to disable the fallback.
+        defaultModerator: process.env.DEFAULT_CHANNEL_MODERATOR || '',
+        autoInit: process.env.AUTO_INIT_CHANNELS ? getEnvBoolean(process.env.AUTO_INIT_CHANNELS) : true,
+    },
+
+    // ==========================================
     // API
     // ==========================================
     api: {

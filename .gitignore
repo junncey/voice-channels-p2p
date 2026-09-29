@@ -24,3 +24,4 @@ output
 env.txt
 
 .idea
+app/src/channels.json

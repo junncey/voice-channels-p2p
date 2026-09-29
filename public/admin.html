@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>频道管理</title>
+        <link rel="icon" href="/images/favicon.ico" />
+        <link rel="stylesheet" href="/css/tokens.css" />
+        <link rel="stylesheet" href="/css/base.css" />
+        <link rel="stylesheet" href="/css/admin.css" />
+    </head>
+    <body>
+        <div class="page">
+            <!-- 登录视图 -->
+            <div id="loginView" class="login-view hidden">
+                <div class="modal login-modal">
+                    <h2 data-i18n="admin.loginTitle">管理员登录</h2>
+                    <form id="loginForm">
+                        <div class="field">
+                            <label for="adminPass" data-i18n="admin.password">管理密码</label>
+                            <input id="adminPass" class="input" type="password" maxlength="64" autocomplete="current-password" />
+                        </div>
+                        <p id="loginError" class="login-error" role="alert"></p>
+                        <button type="submit" class="btn primary login-btn" data-i18n="admin.login">登录</button>
+                    </form>
+                    <a class="login-back" href="/" data-i18n="admin.back">返回首页</a>
+                </div>
+            </div>
+
+            <!-- 控制台视图 -->
+            <div id="consoleView" class="hidden">
+                <header class="admin-topbar">
+                    <h1 data-i18n="admin.title">频道管理</h1>
+                    <div class="admin-topbar-actions">
+                        <a href="/" class="btn ghost sm" data-i18n="admin.back">返回首页</a>
+                        <button id="logoutBtn" class="btn ghost sm" data-i18n="admin.logout">退出登录</button>
+                    </div>
+                </header>
+
+                <div class="admin-toolbar">
+                    <button id="newChannelBtn" class="btn primary">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                            <path d="M12 5v14M5 12h14" />
+                        </svg>
+                        <span data-i18n="admin.newChannel">新建频道</span>
+                    </button>
+                    <span id="loadError" class="admin-error"></span>
+                </div>
+
+                <div class="table-wrap">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th data-i18n="admin.table.name">名称</th>
+                                <th data-i18n="admin.table.id">链接 ID</th>
+                                <th data-i18n="admin.table.public">可见性</th>
+                                <th data-i18n="admin.table.online">在线</th>
+                                <th data-i18n="admin.table.hosts">主持人</th>
+                                <th data-i18n="admin.table.updated">更新时间</th>
+                                <th data-i18n="admin.table.actions">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="channelRows"></tbody>
+                    </table>
+                    <div id="adminEmpty" class="empty-state hidden">
+                        <p data-i18n="admin.empty">还没有频道，点击「新建频道」创建第一个</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 新建/编辑弹窗 -->
+        <div id="editorModal" class="overlay hidden">
+            <div class="modal editor-modal">
+                <h2 id="editorTitle" data-i18n="admin.newChannel">新建频道</h2>
+                <form id="editorForm">
+                    <div class="field" id="idField">
+                        <label for="fId" data-i18n="admin.field.id">频道 ID（链接 /c/…，创建后不可修改）</label>
+                        <input id="fId" class="input" maxlength="32" autocomplete="off" spellcheck="false" />
+                        <span class="field-hint" data-i18n="admin.idHint">3-32 位字母、数字、- 或 _</span>
+                    </div>
+                    <div class="field">
+                        <label for="fName" data-i18n="admin.field.name">频道名称</label>
+                        <input id="fName" class="input" maxlength="64" />
+                    </div>
+                    <div class="field">
+                        <label for="fDesc" data-i18n="admin.field.description">描述（可选）</label>
+                        <input id="fDesc" class="input" maxlength="200" />
+                    </div>
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="fMax" data-i18n="admin.field.maxParticipants">人数上限（语音 mesh 建议 ≤ 8）</label>
+                            <input id="fMax" class="input" type="number" min="2" max="16" value="8" />
+                        </div>
+                        <div class="field check-field">
+                            <label>
+                                <input id="fPublic" type="checkbox" checked />
+                                <span data-i18n="admin.field.public">在首页公开显示</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label data-i18n="admin.field.hosts">主持人（登录后获得主持人权限）</label>
+                        <div id="hostRows" class="host-rows"></div>
+                        <button type="button" id="addHostBtn" class="btn ghost sm" data-i18n="admin.addHost">添加主持人</button>
+                    </div>
+                    <p id="editorError" class="login-error" role="alert"></p>
+                    <div class="modal-actions">
+                        <button type="button" id="editorCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                        <button type="submit" id="editorSubmit" class="btn primary" data-i18n="admin.create">创建</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 删除确认 -->
+        <div id="confirmModal" class="overlay hidden">
+            <div class="modal">
+                <h2 data-i18n="admin.deleteTitle">删除频道</h2>
+                <p id="confirmText" class="confirm-text"></p>
+                <div class="modal-actions">
+                    <button id="confirmCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                    <button id="confirmOk" class="btn danger" data-i18n="common.confirm">确认</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="toasts" class="toasts"></div>
+        <script type="module" src="/js/pages/admin.js"></script>
+    </body>
+</html>

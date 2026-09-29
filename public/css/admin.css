@@ -1,0 +1,223 @@
+/* ============================================================
+   Admin console
+   ============================================================ */
+
+.page {
+    max-width: 1060px;
+    margin: 0 auto;
+    padding: 0 20px 60px;
+}
+
+.login-view {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 70vh;
+}
+
+.login-modal {
+    text-align: center;
+}
+
+.login-error {
+    min-height: 18px;
+    font-size: 12.5px;
+    color: var(--danger);
+    margin-bottom: 8px;
+}
+
+.login-btn {
+    width: 100%;
+}
+
+.login-back {
+    display: inline-block;
+    margin-top: 16px;
+    font-size: 12.5px;
+    color: var(--text-3);
+}
+
+.login-back:hover {
+    color: var(--text-1);
+}
+
+/* ---------- console ---------- */
+
+.admin-topbar {
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.admin-topbar h1 {
+    font-size: 17px;
+    font-weight: 800;
+}
+
+.admin-topbar-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.admin-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 6px 0 14px;
+}
+
+.admin-error {
+    font-size: 12.5px;
+    color: var(--danger);
+}
+
+.table-wrap {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-l);
+    background: var(--bg-1);
+    overflow-x: auto;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+    min-width: 760px;
+}
+
+.admin-table th {
+    text-align: left;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-3);
+    letter-spacing: 0.05em;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    white-space: nowrap;
+}
+
+.admin-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    vertical-align: middle;
+}
+
+.admin-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.admin-table tbody tr:hover {
+    background: var(--bg-2);
+}
+
+.admin-table .name-cell {
+    font-weight: 700;
+}
+
+.admin-table .id-cell {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-2);
+}
+
+.admin-table .count-cell {
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.admin-table .count-cell.zero {
+    color: var(--text-3);
+    font-weight: 500;
+}
+
+.admin-table .hosts-cell {
+    color: var(--text-2);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.admin-table .updated-cell {
+    color: var(--text-3);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.admin-table .actions-cell {
+    white-space: nowrap;
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 60px 0;
+    color: var(--text-2);
+}
+
+/* ---------- editor modal ---------- */
+
+.editor-modal {
+    max-width: 480px;
+    max-height: 88vh;
+    overflow-y: auto;
+}
+
+.field-row {
+    display: flex;
+    gap: 14px;
+    align-items: end;
+}
+
+.field-row .field {
+    flex: 1;
+}
+
+.check-field {
+    padding-bottom: 14px;
+}
+
+.check-field label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-1);
+}
+
+.check-field input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+}
+
+.host-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.host-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.host-row .input {
+    flex: 1;
+}
+
+.host-row .btn {
+    flex: 0 0 auto;
+}
+
+.confirm-text {
+    color: var(--text-2);
+    margin-bottom: 18px;
+}

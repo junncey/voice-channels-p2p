@@ -1,297 +1,84 @@
-<div align="center">
-    <a href="https://p2p.mirotalk.com" target="_blank">
-        <img src="public/images/mirotalk-icon.png">
-    </a>
-</div>
+# 语音频道 · Voice Channels（基于 MiroTalk P2P 的语音房定制版）
 
-<h1 align="center">MiroTalk P2P - Open Source Self-Hosted WebRTC P2P Video Conferencing</h1>
+自托管的**持久化语音频道**服务：管理员在网页后台创建频道并配置主持人，游客点开链接即可加入语音与文字聊天。媒体与聊天全部走浏览器间 **P2P 直连**（mesh WebRTC + DataChannel），服务器只做信令与频道管理，不留存任何聊天内容。
 
-<h3 align="center">Open Source Peer-to-Peer Video Conferencing You Can Self-Host in Minutes</h3>
+> 本项目基于开源项目 [MiroTalk P2P](https://github.com/miroslavpejic85/mirotalk)（AGPLv3）深度定制：移除视频/白板/文件等会议功能，重写全部前端，新增持久化频道、网页管理后台与按频道配置的主持人体系。
 
-<h4 align="center">Free, Secure, Fast Real-Time Communication - up to 8K, 60fps. Works in All Browsers and Platforms.</h4>
+## 功能
 
-<br />
+- **持久化频道** — 频道保存在 `app/src/channels.json`，重启不丢；链接永久有效（`/c/<id>`）
+- **网页管理后台** — `/admin` 创建/编辑/删除频道，设置公开性、人数上限、主持人账号密码（scrypt 哈希存储）
+- **主持人（按频道配置）** — 主持人在频道页登录后获得：静音成员、移出成员、锁定频道（禁止新加入）
+- **游客直接加入** — 打开链接 → 输入昵称 → 仅请求麦克风权限即可进入；麦克风不可用时可「仅文字模式」加入
+- **频道页布局** — 左侧语音成员列表（说话光环动效、麦克风状态），右侧文字对话窗口；移动端自动上下堆叠
+- **纯 P2P** — 语音走 mesh WebRTC，聊天走 DataChannel，服务器不中继、不存储聊天记录
+- 前端为原生 HTML/CSS/JS（ES Modules），无构建步骤，中文优先（可加 `?lang=en`）
 
-<div align="center">
-
-[![GitHub Stars](https://img.shields.io/github/stars/miroslavpejic85/mirotalk?style=social)](https://github.com/miroslavpejic85/mirotalk/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/miroslavpejic85/mirotalk?style=social)](https://github.com/miroslavpejic85/mirotalk/network/members)
-
-<a href="https://choosealicense.com/licenses/agpl-3.0/">![License: AGPLv3](https://img.shields.io/badge/License-AGPLv3_Open_Source-blue.svg)</a>
-<a href="https://hub.docker.com/r/mirotalk/p2p">![Docker Pulls](https://img.shields.io/docker/pulls/mirotalk/p2p)</a>
-<a href="https://github.com/miroslavpejic85/mirotalk/commits/master">![Last Commit](https://img.shields.io/github/last-commit/miroslavpejic85/mirotalk)</a>
-<a href="https://discord.gg/rgGYfeYW3N">![Discord](https://img.shields.io/badge/Discord-Community-5865F2?logo=discord&logoColor=white)</a>
-<a href="https://www.linkedin.com/in/miroslav-pejic-976a07101/">![Author](https://img.shields.io/badge/Author-Miroslav_Pejic-brightgreen.svg)</a>
-
-</div>
-
-<br />
-
-<p align="center"><strong>MiroTalk P2P</strong> is a <strong>self-hosted, open-source video conferencing</strong> platform using direct <strong>peer-to-peer WebRTC connections</strong> for fast, secure, real-time communication. Deploy on your own server in minutes. Enjoy unlimited rooms, no time limits, end-to-end privacy, and a rich feature set - all under your control.</p>
-
-<p align="center">
-    <a href="https://p2p.mirotalk.com">Try Live Demo</a> · <a href="https://p2p.mirotalk.com/privacy">Privacy</a> · <a href="https://docs.mirotalk.com/mirotalk-p2p/self-hosting/">Documentation</a> · <a href="https://discord.gg/rgGYfeYW3N">Discord</a> · <a href="https://github.com/sponsors/miroslavpejic85">Sponsor</a>
-</p>
-
-<br />
-
-<p align="center">
-    <a href="https://p2p.mirotalk.com/">
-        <img src="public/images/mirotalk-github.gif" alt="MiroTalk P2P - Open Source Video Conferencing">
-    </a>
-</p>
-
-<p align="center">Proudly sponsored by</p>
-
-<h1 align=center><a href="https://www.recall.ai/?utm_source=github&utm_medium=sponsorship&utm_campaign=miroslavpejic85-mirotalk">Recall.ai</a> - API for meeting recording</h1>
-<p align="center">An API for recording Zoom, Google Meet, Microsoft Teams, and in-person meetings.</p>
-
-<hr />
-
-<br />
-
-<details>
-<summary>✨ Why MiroTalk P2P?</summary>
-
-<br/>
-
-|                    | MiroTalk P2P                                                                                                                                        | Other Solutions             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| 💰 **Cost**        | Free & Open Source (AGPLv3). [One-time fee licenses](https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661) available | Paid plans                  |
-| 🏠 **Self-hosted** | ✅ Full control over your data                                                                                                                      | ❌ Cloud only               |
-| 🔒 **Privacy**     | Your server, your rules                                                                                                                             | Third-party data processing |
-| ⏱️ **Time limits** | Unlimited                                                                                                                                           | 40-60 min on free tiers     |
-| 🏢 **Rooms**       | Unlimited concurrent rooms                                                                                                                          | Limited                     |
-| 🎥 **Resolution**  | Up to 8K @ 60fps                                                                                                                                    | Up to 1080p                 |
-| 🌍 **Languages**   | 133 languages                                                                                                                                       | ~30-80                      |
-| 🔌 **API**         | Full REST API included                                                                                                                              | Paid add-on                 |
-| 🤖 **AI Features** | ChatGPT (OpenAI) integration                                                                                                                        | Paid AI add-ons             |
-| 🧩 **Rebrand**     | Full source code, white-label ready                                                                                                                 | Limited branding options    |
-| 📦 **Deploy**      | Docker, Node.js, one-click install                                                                                                                  | N/A (SaaS only)             |
-
-</details>
-
-<details>
-<summary>🚀 Features</summary>
-
-<br/>
-
-- 🎥 Video up to **8K @ 60fps** · Screen sharing · Recording · Picture-in-Picture
-- 💬 Chat with Markdown & emoji · Collaborative whiteboard · File sharing
-- 🤖 ChatGPT (OpenAI) integration · Speech recognition
-- 🔒 OIDC auth · [Host protection](https://docs.mirotalk.com/mirotalk-p2p/host-protection/) · JWT credentials · Room passwords · Peer-to-peer encryption
-- 🔌 REST API · Slack & Mattermost · Embeddable [iframe](https://docs.mirotalk.com/mirotalk-p2p/integration/#iframe) & [widget](https://docs.mirotalk.com/mirotalk-p2p/integration/#widgets-integration) · 133 languages
-
-**[See all features →](https://docs.mirotalk.com/overview/)**
-
-</details>
-
-<details open>
-<summary>⚡ Quick start</summary>
-
-<br/>
-
-**Start in 6 commands:**
+## 快速开始
 
 ```bash
-git clone https://github.com/miroslavpejic85/mirotalk.git
-cd mirotalk
-cp .env.template .env
-cp app/src/config.template.js app/src/config.js
+cp .env.template .env      # 编辑 .env，至少设置 CHANNEL_ADMIN_PASSWORD / CHANNEL_ADMIN_JWT_SECRET
 npm install
-npm start
+npm start                  # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) - done!
+1. 打开 `http://localhost:3000/admin`，用 `CHANNEL_ADMIN_PASSWORD` 登录
+2. 新建频道：填写 ID（链接后缀）、名称、人数上限（语音 mesh 建议 ≤ 8）、主持人账号密码
+3. 公开频道显示在首页；隐藏频道仅限通过 `/c/<id>` 链接访问
+4. 主持人在频道页点「主持人登录」输入账号密码获得主持人权限
 
-</details>
+## 环境变量（频道相关）
 
-<details>
-<summary>🐳 Docker</summary>
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `CHANNEL_ADMIN_PASSWORD` | 管理后台登录密码（**留空则 /admin 与 /api/admin/* 全部 404**） | 空 |
+| `CHANNEL_ADMIN_JWT_SECRET` | 管理/主持人 JWT 签名密钥（留空则后台禁用） | 空 |
+| `CHANNEL_ADMIN_JWT_EXP` | 令牌有效期 | `24h` |
+| `DEFAULT_CHANNEL_MODERATOR` | 未配置主持人的频道的共享主持人密码（留空禁用） | 空 |
+| `AUTO_INIT_CHANNELS` | 首次启动自动创建空 channels.json | `true` |
 
-<br/>
+其余通用配置（端口、STUN/TURN、CORS、IP 白名单等）见 `.env.template`。
 
-![docker](public/images/docker.png)
-
-**Prerequisites:** Install [Docker Engine](https://docs.docker.com/engine/install/) and [Docker Compose](https://docs.docker.com/compose/install/) - Image available on [Docker Hub](https://hub.docker.com/r/mirotalk/p2p)
+## Docker
 
 ```bash
-git clone https://github.com/miroslavpejic85/mirotalk.git
-cd mirotalk
-cp .env.template .env
-cp app/src/config.template.js app/src/config.js
-cp docker-compose.template.yml docker-compose.yml
-docker-compose pull    # optional: pull official image
-docker-compose up      # add -d to run in background
+docker build -t mirotalk/p2p:latest .
+docker run -d -p 3000:3000 \
+  -v ./.env:/src/.env:ro \
+  -v ./app/src/channels.json:/src/app/src/channels.json \
+  --name mirotalk mirotalk/p2p:latest
 ```
 
-Open [http://localhost:3000](http://localhost:3000) - done!
+必须挂载 `channels.json`，否则容器重建后频道注册表会丢失（compose 模板见 `docker-compose.template.yml`）。
 
-> **Note:**
-> Edit `app/src/config.js`, `.env`, and `docker-compose.yml` to customize your setup.
+## 架构
 
-</details>
+```
+public/                     全新前端（无构建）
+  index.html / channel.html / admin.html / 404.html
+  css/  tokens(设计变量) base(通用组件) + 每页样式
+  js/core/   api(REST) webrtc(mesh+DataChannel) audio(说话检测) chat i18n utils
+  js/pages/  index channel admin 控制器
+  lang/      zh / en 词典
 
-<details>
-<summary>📚 Documentation</summary>
+app/src/
+  server.js                路由 + REST + Socket.IO 信令（join/addPeer/relaySDP/relayICE…）
+  channelStore.js          持久化频道注册表（原子写盘 + scrypt 哈希）
+  config.js                环境变量集中读取（由 config.template.js 生成）
+  channels.json            运行时数据（gitignore，Docker 需挂载卷）
+```
 
-<br/>
+- **信令**：`join` → 服务端对每对成员互发 `addPeer` → 新成员发起 offer → `relaySDP`/`relayICE` 纯转发
+- **聊天**：每条连接上的 `mirotalk_chat_channel` DataChannel 直发，仅在线成员可见（不存历史）
+- **主持人判定**：仅凭 `/api/host/login` 签发的本频道 host JWT；「首人即主持人」已废除
+- **人数上限**：服务端按频道 `maxParticipants` 硬校验（主持人不受限）
 
-For detailed guides and references, visit the **[official documentation](https://docs.mirotalk.com)**:
+## 测试
 
-- [Our Story](https://docs.mirotalk.com/story/)
-- [About](https://docs.mirotalk.com/mirotalk-p2p/)
-- [Self-Hosting Guide](https://docs.mirotalk.com/mirotalk-p2p/self-hosting/)
-- [Automation-scripts](https://docs.mirotalk.com/scripts/about/)
-- [Configurations](https://docs.mirotalk.com/mirotalk-p2p/configurations/)
-- [Rebranding](https://docs.mirotalk.com/mirotalk-p2p/rebranding/)
-- [Host Protection Mode](https://docs.mirotalk.com/mirotalk-p2p/host-protection/)
-- [Integration](https://docs.mirotalk.com/mirotalk-p2p/integration/)
-- [Direct Room Join](https://docs.mirotalk.com/mirotalk-p2p/join-room/)
-- [REST API Documentation](https://docs.mirotalk.com/mirotalk-p2p/api/)
-- [Ngrok](https://docs.mirotalk.com/mirotalk-p2p/ngrok/)
-- [Updates](https://docs.mirotalk.com/mirotalk-p2p/updates/)
-- [WebHook](https://docs.mirotalk.com/mirotalk-p2p/webhook/)
+```bash
+npm test        # mocha：channelStore 单测 + validate/xss 回归
+```
 
-</details>
+## 许可
 
-<details open>
-<summary>☁️ Recommended Hosting Providers</summary>
-
-<br/>
-
-| Provider                                                                                       | Description                                                                                                                                             | Link                                                                |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| [![Cloudron](public/sponsors/Cloudron.png)](https://www.cloudron.io/)                          | One-click install from the [Cloudron App Store](https://www.cloudron.io/store/index.html). Automates deployment, updates, backups, and user management. | [Get Started](https://www.cloudron.io/)                             |
-| [![Hetzner](public/sponsors/Hetzner.png)](https://www.hetzner.com)                             | High-performance cloud servers and dedicated root servers with top-tier reliability. Powers our live demo.                                              | [Explore Hetzner](https://www.hetzner.com/cloud)                    |
-| [![Netcup](public/sponsors/Netcup.png)](https://www.netcup.com/en/?ref=309627)                 | Enterprise-grade performance at unbeatable prices. Scalable and reliable.                                                                               | [Explore Netcup](https://www.netcup.com/en/?ref=309627)             |
-| [![Hostinger](public/advertisers/Hostinger.png)](https://hostinger.com/?REFERRALCODE=MIROTALK) | Fast, reliable hosting with 24/7 support and great performance.                                                                                         | [Check out Hostinger](https://hostinger.com/?REFERRALCODE=MIROTALK) |
-| [![Contabo](public/advertisers/Contabo.png)](https://www.dpbolvw.net/click-101027391-14462707) | Top-tier German hosting, dedicated servers, VPS, and web hosting at unbeatable prices.                                                                  | [Explore Contabo](https://www.dpbolvw.net/click-101027391-14462707) |
-
-To set up your own instance of `MiroTalk P2P` on a dedicated cloud server, please refer to our comprehensive [self-hosting documentation](https://docs.mirotalk.com/mirotalk-p2p/self-hosting/).
-
-</details>
-
-<details>
-<summary>🙏 Credits</summary>
-
-<br/>
-
-- ianramzy (html [template](https://cruip.com/demos/neon/))
-- vasanthv (webrtc-logic)
-- fabric.js (whiteboard)
-- [DiceBear](https://www.dicebear.com/) (random avatars)
-- [Image by ddraw on Freepik](https://www.freepik.com/free-vector/collection-female-male-avatars_1105371.htm) (avatar illustrations)
-
-</details>
-
-<details>
-<summary>🤝 Contributing</summary>
-
-<br/>
-
-Contributions are welcome and greatly appreciated! Whether it's bug fixes, features, or documentation - every contribution helps.
-
-1. Fork the repository
-2. Create your feature branch
-3. Run `npm run lint` before committing
-4. Submit a pull request
-
-Have questions? Join our [Discord community](https://discord.gg/rgGYfeYW3N)!
-
-</details>
-
-<details>
-<summary>📄 License</summary>
-
-<br/>
-
-[![AGPLv3](public/images/AGPLv3.png)](LICENSE)
-
-MiroTalk P2P is free and open-source under the terms of AGPLv3 (GNU Affero General Public License v3.0). Please `respect the license conditions`, In particular `modifications need to be free as well and made available to the public`. Get a quick overview of the license at [Choose an open source license](https://choosealicense.com/licenses/agpl-3.0/).
-
-To obtain a [MiroTalk P2P license](https://docs.mirotalk.com/license/licensing-options/) with terms different from the AGPLv3, you can conveniently make your [purchase on CodeCanyon](https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661). This allows you to tailor the licensing conditions to better suit your specific requirements.
-
-</details>
-
-<details open>
-<summary>❤️ Support the project</summary>
-
-<br/>
-
-Do you find MiroTalk P2P indispensable for your needs? Join us in supporting this transformative project by [becoming a backer or sponsor](https://github.com/sponsors/miroslavpejic85). By doing so, not only will your logo prominently feature here, but you'll also drive the growth and sustainability of MiroTalk P2P. Your support is vital in ensuring that this valuable platform continues to thrive and remain accessible for all. Make an impact - back MiroTalk P2P today and be part of this exciting journey!
-
-|                                                                                |                                                                                                                    |                                                                                                                                   |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| [![EvoPlat](public/sponsors/EvoPlat.png)](https://evoplat.com)                 | [![Cloudron](public/sponsors/Cloudron.png)](https://cloudron.io)                                                   | [![EffectsSDK](public/sponsors/EffectsSDK.png)](https://effectssdk.ai/)                                                           |
-| [![QuestionPro](public/sponsors/QuestionPro.png)](https://www.questionpro.com) | [![TestMuAI](public/sponsors/TestMuAIBlack.svg)](https://www.testmuai.com/?utm_medium=sponsor&utm_source=mirotalk) | [![BrowserStack](public/sponsors/BrowserStack.png)](https://www.browserstack.com)                                                 |
-| [![CrystalSound](public/sponsors/CrystalSound.png)](https://crystalsound.ai)   | [![Netcup](public/sponsors/Netcup.png)](https://www.netcup.com/en/?ref=309627)                                     | [![LiveAvatar](public/sponsors/LiveAvatarByHeyGen.png)](https://www.liveavatar.com/?utm_medium=sponsership&utm_campaign=mirotalk) |
-| [![ApiSmart](public/sponsors/ApiSmart.png)](https://www.apismart.ai)           |                                                                                                                    |                                                                                                                                   |
-
-</details>
-
-<details>
-<summary>🙏 Past Sponsors</summary>
-
-<br/>
-
-We are grateful to our past sponsors for their support!
-
-|                                                                              |                                                                 |                                                                         |
-| ---------------------------------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [![Hetzner](public/sponsors/HetznerLogo.png)](https://www.hetzner.com/cloud) | [![Kiquix](public/sponsors/KiquixLogo.png)](https://kiquix.com) | [![BroadcastX](public/sponsors/BroadcastX.png)](https://broadcastx.de/) |
-| [![LuvLounge](public/sponsors/LuvLounge.png)](https://luvlounge.ca)          |                                                                 |                                                                         |
-
-</details>
-
-<details>
-<summary>📢 Advertisers</summary>
-
----
-
-|                                                                                                |                                                                                                |                                                                                 |
-| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| [![Hostinger](public/advertisers/Hostinger.png)](https://hostinger.com/?REFERRALCODE=MIROTALK) | [![Contabo](public/advertisers/Contabo.png)](https://www.dpbolvw.net/click-101027391-14462707) | [![Rambox](public/advertisers/RamboxLogo.png)](https://rambox.app?via=mirotalk) |
-
----
-
-</details>
-
-<details open>
-<summary>✨ EffectsSDK</summary>
-
-[![EffectsSDK](public/sponsors/EffectsSDK.png)](https://effectssdk.ai/)
-
-Enhance your video conferencing with **advanced virtual backgrounds** and **noise suppression**. EffectsSDK offers powerful SDKs and plugins for fast integration.
-
-- 🎥 [AI Video Effects Extension](https://chromewebstore.google.com/detail/effetti-webcam-ai-+-regis/iedbphhbpflhgpihkcceocomcdnemcbj): Virtual backgrounds and effects for your webcam
-- 🔊 [Noise Cancelling Extension](https://chromewebstore.google.com/detail/noise-cancelling-app/njmhcidcdbaannpafjdljminaigdgolj): Clearer audio with background noise reduction
-- 🛠️ [Integrate EffectsSDK](https://github.com/EffectsSDK): SDKs and plugins for custom solutions
-
-</details>
-
-<br />
-
----
-
-This project is tested with [BrowserStack](https://www.browserstack.com).
-
----
-
-<p align="center">🌐 Explore the full MiroTalk suite (SFU, P2P, BRO, C2C, WEB, CME, ADM) → <a href="https://docs.mirotalk.com/sites/overview/"><strong>MiroTalk Overview</strong></a></p>
-
----
-
-<p align="center">
-  Built with ❤️ by <a href="https://www.linkedin.com/in/miroslav-pejic-976a07101/">Miroslav</a> and the open-source community
-</p>
-
-<h2 align="center">Contributors</h2>
-
-<p align="center">Thanks to all the amazing people who have contributed to MiroTalk P2P 💙</p>
-
-<p align="center">
-  <a href="https://github.com/miroslavpejic85/mirotalk/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=miroslavpejic85/mirotalk" />
-  </a>
-</p>
+AGPL-3.0（继承自 MiroTalk P2P，作者 [Miroslav Pejic](https://github.com/miroslavpejic85)）。

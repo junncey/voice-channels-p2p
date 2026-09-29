@@ -1,0 +1,48 @@
+/* ============================================================
+   Design tokens — voice channel edition
+   ============================================================ */
+
+:root {
+    /* surfaces */
+    --bg-0: #0d1117;
+    --bg-1: #131a23;
+    --bg-2: #1a2330;
+    --bg-3: #222d3d;
+    --border: #2a3648;
+    --border-soft: #202a39;
+
+    /* text */
+    --text-1: #e9eef6;
+    --text-2: #9fabbd;
+    --text-3: #67748a;
+
+    /* accent (speaking / online) */
+    --accent: #3ddc97;
+    --accent-strong: #5ceaa9;
+    --accent-dim: rgba(61, 220, 151, 0.14);
+    --accent-glow: rgba(61, 220, 151, 0.45);
+
+    /* status */
+    --danger: #ff7a76;
+    --danger-dim: rgba(255, 122, 118, 0.14);
+    --warn: #ffc45e;
+    --warn-dim: rgba(255, 196, 94, 0.14);
+    --info: #6cb2ff;
+
+    /* geometry */
+    --radius-s: 8px;
+    --radius-m: 12px;
+    --radius-l: 18px;
+    --header-h: 60px;
+
+    /* effects */
+    --shadow-1: 0 10px 32px rgba(0, 0, 0, 0.38);
+    --speed: 0.18s;
+    --ease: cubic-bezier(0.33, 1, 0.68, 1);
+
+    /* type */
+    --font:
+        system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB',
+        'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
+}

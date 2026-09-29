@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>语音频道</title>
+        <link rel="icon" href="/images/favicon.ico" />
+        <link rel="stylesheet" href="/css/tokens.css" />
+        <link rel="stylesheet" href="/css/base.css" />
+        <link rel="stylesheet" href="/css/index.css" />
+    </head>
+    <body>
+        <div class="page">
+            <header class="topbar">
+                <a class="brand" href="/">
+                    <span class="brand-mark">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                            <line x1="12" y1="19" x2="12" y2="22" />
+                        </svg>
+                    </span>
+                    <span data-i18n="app.brand">语音频道</span>
+                </a>
+                <nav class="topbar-nav">
+                    <a href="/admin" class="topbar-link" data-i18n="index.adminEntry">管理后台</a>
+                </nav>
+            </header>
+
+            <main class="hero">
+                <h1 data-i18n="app.tagline">点开链接，加入语音与文字聊天</h1>
+                <p data-i18n="app.heroSub">无需安装 · 无需注册 · 端到端直连</p>
+            </main>
+
+            <section class="channels-section">
+                <div class="channels-head">
+                    <h2 data-i18n="index.title">频道</h2>
+                    <span id="statusHint" class="channels-status"></span>
+                </div>
+                <div id="channelGrid" class="channel-grid"></div>
+                <div id="emptyState" class="empty-state hidden">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                            <line x1="12" y1="19" x2="12" y2="22" />
+                        </svg>
+                    </div>
+                    <p data-i18n="index.empty">暂无公开频道</p>
+                    <p class="empty-hint" data-i18n="index.emptyHint"></p>
+                </div>
+            </section>
+        </div>
+
+        <script type="module" src="/js/pages/index.js"></script>
+    </body>
+</html>
