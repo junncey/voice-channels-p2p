@@ -189,6 +189,12 @@ function bindUi() {
     $('#hostCancelBtn').addEventListener('click', closeHostModal);
     $('#hostLoginForm').addEventListener('submit', onHostLoginSubmit);
 
+    $('#renameCancelBtn').addEventListener('click', closeRenameModal);
+    $('#renameForm').addEventListener('submit', onRenameSubmit);
+    $('#renameModal').addEventListener('click', (event) => {
+        if (event.target === $('#renameModal')) closeRenameModal();
+    });
+
     $('#copyLinkBtn').addEventListener('click', async () => {
         const ok = await copyText(`${location.origin}/c/${channelId}`);
         if (ok) toast(t('channel.copied'), 'ok');
@@ -339,12 +345,34 @@ function registerSocketHandlers() {
         updateMicIconNode(peer_id, status === true);
     });
 
-    socket.on('peerName', ({ peer_id, peer_name }) => {
+    socket.on('peerName', ({ peer_id, peer_name, peer_name_old }) => {
+        if (!peer_name) return;
         const member = members.get(peer_id);
-        if (member && peer_name) {
+        const old = member?.peer_name;
+        if (member && old && old !== peer_name) {
+            // per-user volume memory is keyed by display name — follow the rename
+            if (peerVolumes[old] !== undefined && peerVolumes[old] !== 1) {
+                savePeerVolume(peer_name, peerVolumes[old]);
+            }
+            savePeerVolume(old, 1); // drop the stale key
             member.peer_name = peer_name;
-            renderMembers();
+            if (peerVolumes[peer_name] !== undefined) member.volume = peerVolumes[peer_name];
+        } else if (member) {
+            member.peer_name = peer_name;
         }
+        if (peer_id === socket.id) {
+            // the host renamed ME — accept it and persist for the next visit
+            selfName = peer_name;
+            localStorage.setItem(NICK_KEY, peer_name);
+            $('#nickInput').value = peer_name;
+            toast(t('channel.renamedYou', { name: peer_name }), 'ok');
+        } else if (joined && member && (peer_name_old || old)) {
+            chat.add({
+                text: t('chat.renamed', { old: peer_name_old || old, name: peer_name }),
+                system: true,
+            });
+        }
+        renderMembers();
     });
 
     socket.on('peerAction', ({ peer_id, peer_action }) => {
@@ -587,6 +615,11 @@ function renderMembers() {
                         { class: 'member-actions' },
                         el('button', {
                             class: 'btn ghost sm',
+                            text: t('channel.renameMember'),
+                            onclick: () => renamePeer(peerId),
+                        }),
+                        el('button', {
+                            class: 'btn ghost sm',
                             text: t('channel.muteMember'),
                             onclick: () => mutePeer(peerId),
                         }),
@@ -646,6 +679,43 @@ function kickPeer(peerId) {
         peer_id: peerId,
         peer_kicked_reason: 'removed by host',
     });
+}
+
+// ----- host renames a member's joined nickname -----
+
+let renameTarget = null; // peerId the rename modal is editing
+
+function renamePeer(peerId) {
+    renameTarget = peerId;
+    $('#renameInput').value = members.get(peerId)?.peer_name || '';
+    $('#renameError').textContent = '';
+    $('#renameModal').classList.remove('hidden');
+    $('#renameInput').focus();
+    $('#renameInput').select();
+}
+
+function closeRenameModal() {
+    renameTarget = null;
+    $('#renameModal').classList.add('hidden');
+}
+
+function onRenameSubmit(event) {
+    event.preventDefault();
+    const name = $('#renameInput').value.trim().slice(0, 24);
+    if (!name) {
+        $('#renameError').textContent = t('channel.errors.nickRequired');
+        return;
+    }
+    if (renameTarget && members.get(renameTarget)?.peer_name !== name) {
+        socket.emit('peerRename', {
+            room_id: channelId,
+            peer_name: selfName,
+            peer_uuid: selfUuid,
+            peer_id: renameTarget,
+            peer_name_new: name,
+        });
+    }
+    closeRenameModal();
 }
 
 function updateHeaderActions() {

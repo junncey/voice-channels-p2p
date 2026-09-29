@@ -142,5 +142,11 @@
     "common.confirm": "确认",
     "channel.guest": "游客",
     "channel.hostTokenExpired": "主持人登录已过期，已改为游客身份加入",
-    "admin.created": "已创建频道 #{id}"
+    "admin.created": "已创建频道 #{id}",
+    "channel.renameMember": "重命名",
+    "channel.renameTitle": "修改昵称",
+    "channel.renameLabel": "新昵称",
+    "channel.renameSubmit": "保存",
+    "channel.renamedYou": "你的昵称已被主持人修改为 {name}",
+    "chat.renamed": "{old} 已被主持人重命名为 {name}"
 }

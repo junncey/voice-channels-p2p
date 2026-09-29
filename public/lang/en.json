@@ -142,5 +142,11 @@
     "common.confirm": "Confirm",
     "channel.guest": "guest",
     "channel.hostTokenExpired": "Host login expired — joined as a guest",
-    "admin.created": "Channel #{id} created"
+    "admin.created": "Channel #{id} created",
+    "channel.renameMember": "Rename",
+    "channel.renameTitle": "Change nickname",
+    "channel.renameLabel": "New nickname",
+    "channel.renameSubmit": "Save",
+    "channel.renamedYou": "The host changed your nickname to {name}",
+    "chat.renamed": "{old} was renamed to {name} by the host"
 }

@@ -128,6 +128,24 @@
             </div>
         </div>
 
+        <!-- 主持人重命名成员弹窗 -->
+        <div id="renameModal" class="overlay hidden">
+            <div class="modal">
+                <h2 data-i18n="channel.renameTitle">修改昵称</h2>
+                <form id="renameForm">
+                    <div class="field">
+                        <label for="renameInput" data-i18n="channel.renameLabel">新昵称</label>
+                        <input id="renameInput" class="input" maxlength="24" autocomplete="off" />
+                    </div>
+                    <p id="renameError" class="join-error" role="alert"></p>
+                    <div class="modal-actions">
+                        <button type="button" id="renameCancelBtn" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                        <button type="submit" class="btn primary" data-i18n="channel.renameSubmit">保存</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
         <!-- 音频设置弹窗 -->
         <div id="settingsModal" class="overlay hidden">
             <div class="modal settings-modal">

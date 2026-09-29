@@ -730,6 +730,42 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
+     * Host renames another peer (moderation). The renamed peer receives the
+     * same peerName broadcast as everyone else and accepts the new name.
+     */
+    socket.on('peerRename', async (cfg) => {
+        const config = checkXSS(cfg);
+        if (!Validate.isValidData(config)) return;
+
+        const { room_id, peer_id, peer_name, peer_uuid, peer_name_new } = config;
+
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('peerRename blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
+        if (!isPeerPresenter(room_id, socket.id, peer_name, peer_uuid)) {
+            log.debug('peerRename blocked: sender is not the presenter', { room_id, socket_id: socket.id });
+            return;
+        }
+
+        const name = typeof peer_name_new === 'string' ? peer_name_new.trim().slice(0, 24) : '';
+        if (!name || !peers[room_id]?.[peer_id]) return;
+
+        const old = peers[room_id][peer_id]['peer_name'];
+        peers[room_id][peer_id]['peer_name'] = name;
+        if (presenters[room_id] && presenters[room_id][peer_id]) {
+            presenters[room_id][peer_id]['peer_name'] = name;
+        }
+        log.info('[' + socket.id + '] host renamed peer', { room_id, peer_id, from: old, to: name });
+
+        // everyone INCLUDING the host gets the update — the host's member list
+        // and the chat notice must follow too (sendToRoom would skip the sender)
+        for (const sid in channels[room_id]) {
+            await channels[room_id][sid].emit('peerName', { peer_id, peer_name: name, peer_name_old: old });
+        }
+    });
+
+    /**
      * Relay audio status to peers
      */
     socket.on('peerStatus', async (cfg) => {
