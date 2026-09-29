@@ -228,10 +228,15 @@ async function onEditorSubmit(event) {
     if (!editingId) body.id = $('#fId').value.trim();
 
     try {
-        if (editingId) await api.adminUpdateChannel(editingId, body);
-        else await api.adminCreateChannel(body);
+        if (editingId) {
+            await api.adminUpdateChannel(editingId, body);
+            toast(t('admin.saved'), 'ok');
+        } else {
+            const { channel } = await api.adminCreateChannel(body);
+            // surface the id — it may have been auto-generated
+            toast(t('admin.created', { id: channel.id }), 'ok');
+        }
         closeEditor();
-        toast(t('admin.saved'), 'ok');
         load();
     } catch (err) {
         $('#editorError').textContent = err.message || t('common.error');

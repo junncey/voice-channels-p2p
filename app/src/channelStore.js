@@ -79,7 +79,10 @@ function validateDefinition(input, { partial = false } = {}) {
 
     if (!partial || input.id !== undefined) {
         const id = typeof input.id === 'string' ? input.id.trim() : '';
-        if (!CHANNEL_ID_PATTERN.test(id)) {
+        // empty id on CREATE means "auto-generate"; updates ignore the id field
+        if (!id && partial) {
+            errors.push(`id must match ${CHANNEL_ID_PATTERN} (3-32 chars: letters, digits, -, _)`);
+        } else if (id && !CHANNEL_ID_PATTERN.test(id)) {
             errors.push(`id must match ${CHANNEL_ID_PATTERN} (3-32 chars: letters, digits, -, _)`);
         } else {
             value.id = id;
@@ -202,6 +205,21 @@ class ChannelStore {
         return typeof id === 'string' && CHANNEL_ID_PATTERN.test(id);
     }
 
+    /**
+     * Random 8-char id for channels created without an explicit one, e.g.
+     * "k7x2m9qa". The alphabet drops look-alikes (0/o, 1/l/i) so the id stays
+     * readable when spoken or typed from the /c/<id> link.
+     */
+    generateId() {
+        const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+        for (;;) {
+            let id = '';
+            const bytes = crypto.randomBytes(8);
+            for (let i = 0; i < 8; i++) id += alphabet[bytes[i] % alphabet.length];
+            if (!this.exists(id)) return id;
+        }
+    }
+
     exists(id) {
         return this.channels.some((ch) => ch.id === id);
     }
@@ -246,13 +264,14 @@ class ChannelStore {
         if (this.channels.length >= MAX_CHANNELS) {
             return { ok: false, errors: [`registry full (max ${MAX_CHANNELS} channels)`] };
         }
-        if (this.exists(value.id)) {
-            return { ok: false, errors: [`channel id already exists: ${value.id}`] };
+        const id = value.id || this.generateId();
+        if (this.exists(id)) {
+            return { ok: false, errors: [`channel id already exists: ${id}`] };
         }
 
         const now = new Date().toISOString();
         const channel = {
-            id: value.id,
+            id,
             name: value.name,
             description: value.description || '',
             public: value.public !== false,

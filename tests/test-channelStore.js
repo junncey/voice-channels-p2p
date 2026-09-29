@@ -96,6 +96,23 @@ describe('test-channelStore', () => {
             }
         });
 
+        it('should auto-generate a valid unique id when id is empty or omitted', () => {
+            const a = store.create({ id: '', name: 'auto A' });
+            a.ok.should.be.true();
+            store.isValidId(a.channel.id).should.be.true();
+            a.channel.id.should.have.length(8);
+            store.exists(a.channel.id).should.be.true();
+
+            const b = store.create({ name: 'auto B' });
+            b.ok.should.be.true();
+            store.isValidId(b.channel.id).should.be.true();
+            b.channel.id.should.not.equal(a.channel.id);
+        });
+
+        it('should still reject an invalid explicit id (auto only applies to empty)', () => {
+            store.create({ id: 'x', name: 'too short' }).ok.should.be.false();
+        });
+
         it('should reject duplicate ids and enforce field limits', () => {
             store.create({ id: 'dup', name: 'first' }).ok.should.be.true();
             store.create({ id: 'dup', name: 'second' }).ok.should.be.false();

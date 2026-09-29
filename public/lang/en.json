@@ -115,7 +115,7 @@
     "admin.table.hosts": "Hosts",
     "admin.table.updated": "Updated",
     "admin.table.actions": "Actions",
-    "admin.field.id": "Channel ID (link /c/…, immutable after creation)",
+    "admin.field.id": "Channel ID (optional — auto-generated when empty; immutable after create)",
     "admin.field.name": "Channel name",
     "admin.field.description": "Description (optional)",
     "admin.field.public": "List publicly on the homepage",
@@ -135,11 +135,12 @@
     "admin.publicNo": "Unlisted",
     "admin.saved": "Saved",
     "admin.deleted": "Deleted",
-    "admin.idHint": "3-32 chars: letters, digits, - or _",
+    "admin.idHint": "3-32 chars: letters, digits, - or _; leave empty to auto-generate",
     "admin.loadError": "Failed to load",
     "common.loading": "Loading…",
     "common.error": "Something went wrong, try again later",
     "common.confirm": "Confirm",
     "channel.guest": "guest",
-    "channel.hostTokenExpired": "Host login expired — joined as a guest"
+    "channel.hostTokenExpired": "Host login expired — joined as a guest",
+    "admin.created": "Channel #{id} created"
 }

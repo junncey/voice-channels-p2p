@@ -115,7 +115,7 @@
     "admin.table.hosts": "主持人",
     "admin.table.updated": "更新时间",
     "admin.table.actions": "操作",
-    "admin.field.id": "频道 ID（链接 /c/…，创建后不可修改）",
+    "admin.field.id": "频道 ID（可选，留空自动生成；创建后不可修改）",
     "admin.field.name": "频道名称",
     "admin.field.description": "描述（可选）",
     "admin.field.public": "在首页公开显示",
@@ -135,11 +135,12 @@
     "admin.publicNo": "隐藏",
     "admin.saved": "已保存",
     "admin.deleted": "已删除",
-    "admin.idHint": "3-32 位字母、数字、- 或 _",
+    "admin.idHint": "3-32 位字母、数字、- 或 _；留空自动生成",
     "admin.loadError": "加载失败",
     "common.loading": "加载中…",
     "common.error": "出错了，请稍后重试",
     "common.confirm": "确认",
     "channel.guest": "游客",
-    "channel.hostTokenExpired": "主持人登录已过期，已改为游客身份加入"
+    "channel.hostTokenExpired": "主持人登录已过期，已改为游客身份加入",
+    "admin.created": "已创建频道 #{id}"
 }
