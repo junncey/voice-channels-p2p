@@ -49,6 +49,16 @@ function verifyPassword(password, stored) {
     }
 }
 
+function constantTimeEquals(a, b) {
+    const bufA = Buffer.from(String(a ?? ''));
+    const bufB = Buffer.from(String(b ?? ''));
+    if (bufA.length !== bufB.length) {
+        crypto.timingSafeEqual(bufA, bufA);
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+}
+
 function isPlainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -303,7 +313,7 @@ class ChannelStore {
             return null;
         }
 
-        if (this.defaultModerator && password === this.defaultModerator) {
+        if (this.defaultModerator && constantTimeEquals(password, this.defaultModerator)) {
             return { username: (username || 'moderator').trim().slice(0, 32) };
         }
         return null;

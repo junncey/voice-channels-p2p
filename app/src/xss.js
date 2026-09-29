@@ -62,7 +62,7 @@ const checkXSS = (dataObject) => {
         return sanitizeData(dataObject);
     } catch (error) {
         log.error('Sanitization error:', error);
-        return dataObject; // Return original data in case of error
+        return null; // fail closed: un-sanitizable data is never passed through
     }
 };
 

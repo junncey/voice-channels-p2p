@@ -25,6 +25,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 
@@ -210,7 +211,27 @@ if (ipWhitelist.enabled && !trustProxy) {
     }
 }
 
-app.use(helmet.noSniff());
+app.use(
+    helmet.contentSecurityPolicy({
+        useDefaults: false,
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'"],
+            // 404.html carries an inline <style> block; inline styles cannot execute script
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            // chat images travel as data: URLs; audio playback may use blob:
+            imgSrc: ["'self'", 'data:'],
+            mediaSrc: ["'self'", 'blob:', 'data:'],
+            connectSrc: ["'self'"], // socket.io websocket (same-origin) is covered by 'self'
+            fontSrc: ["'self'"],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"],
+            formAction: ["'self'"],
+        },
+    }),
+    helmet.noSniff(),
+    helmet.referrerPolicy({ policy: 'no-referrer' })
+);
 app.use(applyEmbedHeaders);
 
 const staticOptions = {
@@ -384,7 +405,7 @@ app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
 app.get('/api/v1/stats', (req, res) => {
     const api_key_secret = config.api.keySecret;
     const { authorization } = req.headers;
-    if (!api_key_secret || authorization !== api_key_secret) {
+    if (!api_key_secret || !safeEqualStrings(authorization, api_key_secret)) {
         return res.status(403).json({ error: 'Unauthorized!' });
     }
     let totalRooms = 0;
@@ -476,9 +497,11 @@ io.sockets.on('connect', async (socket) => {
         const config = checkXSS(cfg);
 
         if (!Validate.isValidData(config)) return;
-        log.debug('[' + socket.id + '] join', config);
+        // never log credentials (host JWT / room password)
+        const { peer_token, channel_password, ...joinLogData } = config;
+        log.debug('[' + socket.id + '] join', joinLogData);
 
-        const { channel, channel_password, peer_uuid, peer_name, peer_token } = config;
+        const { channel, peer_uuid, peer_name } = config;
 
         if (!Validate.isValidRoomName(channel) || !channelStore.isValidId(channel)) {
             log.warn('[' + socket.id + '] invalid channel id', { channel });
@@ -519,7 +542,7 @@ io.sockets.on('connect', async (socket) => {
 
         // Room-level locks (read before any room structure is created so a
         // rejected join never leaves an empty room behind)
-        const roomLocked = peers[channel]?.['lock'] === true && peers[channel]?.['password'] != channel_password;
+        const roomLocked = peers[channel]?.['lock'] === true && !safeEqualStrings(peers[channel]?.['password'], channel_password);
         if (roomLocked) {
             log.debug('[' + socket.id + '] [Warning] room is locked', { channel });
             return socket.emit('roomIsLocked');
@@ -599,6 +622,7 @@ io.sockets.on('connect', async (socket) => {
     socket.on('relayICE', async (config) => {
         if (!Validate.isValidData(config)) return;
         const { peer_id, ice_candidate } = config;
+        if (!isRelayAllowed(socket, peer_id)) return;
         await sendToPeer(peer_id, sockets, 'iceCandidate', {
             peer_id: socket.id,
             ice_candidate: ice_candidate,
@@ -611,6 +635,7 @@ io.sockets.on('connect', async (socket) => {
     socket.on('relaySDP', async (config) => {
         if (!Validate.isValidData(config)) return;
         const { peer_id, session_description } = config;
+        if (!isRelayAllowed(socket, peer_id)) return;
         log.debug('[' + socket.id + '] relay SessionDescription to [' + peer_id + ']', {
             type: session_description.type,
         });
@@ -661,7 +686,7 @@ io.sockets.on('connect', async (socket) => {
                     const data = {
                         peer_name: peer_name,
                         action: action,
-                        password: password == peers[room_id]['password'] ? 'OK' : 'KO',
+                        password: safeEqualStrings(password, peers[room_id]['password']) ? 'OK' : 'KO',
                     };
                     await sendToPeer(socket.id, sockets, 'roomAction', data);
                     break;
@@ -874,6 +899,32 @@ io.sockets.on('connect', async (socket) => {
  */
 function isPeerInRoom(room_id, socket_id) {
     return !!(room_id && peers[room_id] && peers[room_id][socket_id]);
+}
+
+/**
+ * Relay gate (relaySDP / relayICE): sender and target must both be members of
+ * the same channel, so a socket can never push signaling at peers it never
+ * joined with.
+ */
+function isRelayAllowed(socket, peer_id) {
+    if (!peer_id || typeof peer_id !== 'string') return false;
+    for (const channel of Object.keys(socket.channels || {})) {
+        if (channels[channel] && peer_id in channels[channel]) return true;
+    }
+    return false;
+}
+
+/**
+ * Constant-time string comparison for secrets (room passwords, API keys).
+ */
+function safeEqualStrings(a, b) {
+    const bufA = Buffer.from(String(a ?? ''));
+    const bufB = Buffer.from(String(b ?? ''));
+    if (bufA.length !== bufB.length) {
+        crypto.timingSafeEqual(bufA, bufA); // dummy compare keeps the timing profile flat
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
 }
 
 /**

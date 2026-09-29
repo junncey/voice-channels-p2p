@@ -3,7 +3,7 @@
 const util = require('util');
 const colors = require('colors');
 
-const LOGS_DEBUG = process.env.LOGS_DEBUG ? process.env.LOGS_DEBUG === 'true' : true;
+const LOGS_DEBUG = process.env.LOGS_DEBUG ? process.env.LOGS_DEBUG === 'true' : false;
 const LOGS_COLORS = process.env.LOGS_COLORS ? process.env.LOGS_COLORS === 'true' : true;
 const LOGS_JSON = process.env.LOGS_JSON ? process.env.LOGS_JSON === 'true' : false;
 const LOGS_JSON_PRETTY = process.env.LOGS_JSON_PRETTY ? process.env.LOGS_JSON_PRETTY === 'true' : false;
