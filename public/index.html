@@ -23,7 +23,7 @@
                     <span data-i18n="app.brand">语音频道</span>
                 </a>
                 <nav class="topbar-nav">
-                    <a href="/admin" class="topbar-link" data-i18n="index.adminEntry">管理后台</a>
+                    <button id="clearDataBtn" class="topbar-link topbar-clear" data-i18n="index.clearData">清除用户信息</button>
                 </nav>
             </header>
 
@@ -51,6 +51,27 @@
                 </div>
             </section>
         </div>
+
+        <!-- 清除本机用户信息 -->
+        <div id="clearModal" class="overlay hidden">
+            <div class="modal clear-modal">
+                <h2 data-i18n="index.clearTitle">清除本机保存的信息</h2>
+                <p class="clear-desc" data-i18n="index.clearDesc">以下信息仅保存在本浏览器，不影响其他设备。</p>
+                <div class="clear-actions">
+                    <button id="clearNickBtn" class="btn ghost">
+                        <span data-i18n="index.clearNickOnly">仅清除用户名</span>
+                        <span class="hint" data-i18n="index.clearNickOnlyHint">下次进入频道时重新输入昵称</span>
+                    </button>
+                    <button id="clearAllBtn" class="btn danger">
+                        <span data-i18n="index.clearAll">清除用户名与全部配置</span>
+                        <span class="hint" data-i18n="index.clearAllHint">包含音频设备选择、开关与对其他成员的音量调节</span>
+                    </button>
+                    <button id="clearCancelBtn" class="btn" data-i18n="admin.cancel">取消</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="toasts" class="toasts"></div>
 
         <script type="module" src="/js/pages/index.js"></script>
     </body>

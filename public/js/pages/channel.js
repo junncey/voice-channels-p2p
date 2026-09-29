@@ -19,6 +19,7 @@ import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 const NICK_KEY = 'vc_nick';
 const HOST_TOKEN_PREFIX = 'vc_host_token_';
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
+const PEER_VOLUMES_KEY = 'vc_peer_volumes';
 const PTT_KEY_CODE = 'KeyV';
 
 const MIC_ON_SVG =
@@ -117,8 +118,16 @@ async function boot() {
     document.title = `${channelMeta.name || channelId} · ${t('app.name')}`;
 
     const presetName = new URLSearchParams(location.search).get('name');
-    $('#nickInput').value = presetName || localStorage.getItem(NICK_KEY) || randomNick(t('channel.guest'));
+    const savedNick = presetName || localStorage.getItem(NICK_KEY) || '';
+    $('#nickInput').value = savedNick || randomNick(t('channel.guest'));
     if (hostToken) $('#hostReadyHint').classList.remove('hidden');
+
+    if (savedNick) {
+        // returning visitor: skip the nickname overlay and join straight away
+        $('#joinOverlay').classList.add('hidden');
+        join({ textOnly: false });
+        return;
+    }
 
     $('#nickInput').focus();
     $('#nickInput').select();
@@ -133,6 +142,7 @@ function bindUi() {
     $('#textOnlyBtn').addEventListener('click', () => join({ textOnly: true }));
 
     $('#hostLoginBtn').addEventListener('click', openHostModal);
+    $('#hostLoginEntryBtn').addEventListener('click', openHostModal);
     $('#hostCancelBtn').addEventListener('click', closeHostModal);
     $('#hostLoginForm').addEventListener('submit', onHostLoginSubmit);
 
@@ -381,12 +391,14 @@ function syncMembers(peersMap) {
         if (roomMetaKey(peerId)) continue;
         if (peerId === selfId) continue;
         const existing = members.get(peerId);
+        const name = info.peer_name || existing?.peer_name || '?';
         members.set(peerId, {
-            peer_name: info.peer_name || existing?.peer_name || '?',
+            peer_name: name,
             peer_presenter: !!info.peer_presenter,
             peer_audio_status: info.peer_audio_status === true,
             joined_at: info.joined_at || existing?.joined_at || Date.now(),
-            volume: existing?.volume ?? 1, // per-user volume survives list refreshes
+            // remembered per-user volume; an in-session adjustment wins over the stored one
+            volume: existing?.volume ?? (name !== '?' ? peerVolumes[name] ?? 1 : 1),
         });
     }
     // drop stale entries
@@ -449,6 +461,7 @@ function memberVolumeNode(peerId, info) {
         info.volume = Number(slider.value) / 100;
         value.textContent = `${slider.value}%`;
         slider.closest('.member-volume')?.classList.add('adjusted');
+        savePeerVolume(info.peer_name, info.volume);
         reapplyPeerVolume(peerId);
     });
     return el(
@@ -570,6 +583,8 @@ function kickPeer(peerId) {
 
 function updateHeaderActions() {
     $('#hostBadge').classList.toggle('hidden', !isPresenter);
+    // host login stays reachable after the auto-join (no pre-join overlay)
+    $('#hostLoginEntryBtn').classList.toggle('hidden', !(joined && !isPresenter));
     const lockBtn = $('#lockBtn');
     lockBtn.classList.toggle('hidden', !isPresenter);
     if (isPresenter) {
@@ -967,6 +982,31 @@ function saveAudioSettings() {
     }
 }
 
+// per-user volumes, keyed by display name so they survive reconnects,
+// page reloads and follow the same person into other channels
+function loadPeerVolumes() {
+    try {
+        return JSON.parse(localStorage.getItem(PEER_VOLUMES_KEY)) || {};
+    } catch {
+        return {};
+    }
+}
+
+const peerVolumes = loadPeerVolumes();
+
+function savePeerVolume(name, volume) {
+    if (!name || name === '?') return;
+    delete peerVolumes[name]; // re-insert so recency order holds
+    if (volume !== 1) peerVolumes[name] = volume;
+    const keys = Object.keys(peerVolumes);
+    if (keys.length > 50) for (const key of keys.slice(0, keys.length - 50)) delete peerVolumes[key];
+    try {
+        localStorage.setItem(PEER_VOLUMES_KEY, JSON.stringify(peerVolumes));
+    } catch {
+        /* storage full — volumes still apply for this session */
+    }
+}
+
 // ---------------------------------------------------------------------------
 // chat + image sending
 // ---------------------------------------------------------------------------
@@ -1052,8 +1092,10 @@ async function onHostLoginSubmit(event) {
         $('#hostReadyHint').classList.remove('hidden');
         closeHostModal();
         if (!joined) join({ textOnly: false });
-    } catch {
-        $('#hostLoginError').textContent = t('channel.hostLoginFailed');
+        else location.reload(); // presenter status is granted at join time — rejoin with the token
+    } catch (err) {
+        const key = err?.status === 503 ? 'channel.hostLoginUnavailable' : 'channel.hostLoginFailed';
+        $('#hostLoginError').textContent = t(key);
     }
 }
 
@@ -1097,6 +1139,8 @@ function setOverlayBusy(busy) {
 
 function showJoinError(message) {
     setOverlayBusy(false);
+    // auto-join keeps the overlay hidden — bring it back so the error is seen
+    $('#joinOverlay').classList.remove('hidden');
     $('#joinError').textContent = message;
     teardownMedia();
     socket?.disconnect();

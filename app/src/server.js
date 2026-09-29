@@ -302,6 +302,11 @@ app.post('/api/host/login', loginLimiter, (req, res) => {
     if (!channelId || !username || !password) {
         return res.status(400).json({ error: 'Missing channelId, username or password' });
     }
+    if (!channelsCfg.adminJwtSecret) {
+        // per-channel hosts may exist, but there is no secret to sign tokens with
+        log.warn('Host login rejected: CHANNEL_ADMIN_JWT_SECRET is not configured');
+        return res.status(503).json({ error: 'server not configured' });
+    }
     if (!channelStore.exists(channelId)) {
         return res.status(404).json({ error: 'Channel not found' });
     }

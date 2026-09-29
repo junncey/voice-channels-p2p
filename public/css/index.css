@@ -50,6 +50,46 @@
     color: var(--text-1);
 }
 
+button.topbar-link {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
+}
+
+/* ---------- clear local data modal ---------- */
+
+.clear-desc {
+    font-size: 13px;
+    color: var(--text-3);
+    margin-bottom: 16px;
+}
+
+.clear-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.clear-actions .btn {
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+    padding: 11px;
+}
+
+.clear-actions .btn .hint {
+    font-size: 11.5px;
+    font-weight: 400;
+    color: var(--text-3);
+}
+
+.clear-actions .btn.danger .hint {
+    color: inherit;
+    opacity: 0.75;
+}
+
 .hero {
     padding: 64px 0 44px;
     text-align: center;
