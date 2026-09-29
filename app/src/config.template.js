@@ -105,6 +105,9 @@ module.exports = {
         // disable the fallback.
         defaultModerator: process.env.DEFAULT_CHANNEL_MODERATOR || '',
         autoInit: process.env.AUTO_INIT_CHANNELS ? getEnvBoolean(process.env.AUTO_INIT_CHANNELS) : true,
+        // Ephemeral rooms: anyone may open /c/<id> and get an in-memory room
+        // (no registry entry, no hosts). Enabled unless explicitly disabled.
+        tempRooms: process.env.TEMP_ROOMS_ENABLED ? getEnvBoolean(process.env.TEMP_ROOMS_ENABLED) : true,
     },
 
     // ==========================================
