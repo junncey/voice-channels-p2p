@@ -986,9 +986,13 @@ async function playTestBeep() {
     beep.play().catch(() => toast(t('common.error'), 'warn'));
 }
 
-// ----- mic test: record a few seconds, then play it back -----
+// ----- mic test: live loopback — hear your own mic through the speakers with
+// a short delay; click again to stop. Taps the RAW capture so it works even
+// while the channel mic is muted, and applies the input volume itself -----
 
-let micTest = null; // { rec, timer }
+const MIC_TEST_DELAY = 0.5; // seconds — long enough to feel like an echo, short enough to be live
+
+let micTest = null; // { src, delay, gain, timer }
 
 async function onTestMicClick() {
     if (micTest) {
@@ -999,30 +1003,26 @@ async function onTestMicClick() {
         await enableVoice();
         if (!localStream) return;
     }
-    if (typeof MediaRecorder === 'undefined') return toast(t('settings.micTestUnsupported'), 'warn');
-
-    const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported(m));
-    const rec = new MediaRecorder(localStream, mimeType ? { mimeType } : undefined);
-    const chunks = [];
-    rec.ondataavailable = (event) => {
-        if (event.data.size) chunks.push(event.data);
+    if (!hub?.ctx) return toast(t('settings.micTestUnsupported'), 'warn');
+    try {
+        await hub.ensureContext();
+    } catch {
+        /* fall through — the graph below will simply stay silent */
+    }
+    const ctx = hub.ctx;
+    const src = ctx.createMediaStreamSource(rawMicStream || localStream);
+    const delay = ctx.createDelay(2);
+    delay.delayTime.value = MIC_TEST_DELAY;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(delay).connect(gain).connect(ctx.destination); // ctx sink = selected speaker
+    gain.gain.setTargetAtTime(Math.max(0.2, settings.volume) * settings.micVolume, ctx.currentTime, 0.03);
+    micTest = {
+        src,
+        delay,
+        gain,
+        timer: setTimeout(stopMicTest, 30000), // safety stop: bounded feedback risk
     };
-    rec.onstop = () => {
-        if (!micTest) return;
-        clearTimeout(micTest.timer);
-        micTest = null;
-        resetTestMicBtn();
-        const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
-        if (!blob.size) return;
-        const url = URL.createObjectURL(blob);
-        const playback = new Audio(url);
-        playback.volume = Math.max(0.2, settings.volume);
-        applySink(playback);
-        playback.onended = () => URL.revokeObjectURL(url);
-        playback.play().catch(() => URL.revokeObjectURL(url));
-    };
-    rec.start();
-    micTest = { rec, timer: setTimeout(() => rec.state !== 'inactive' && rec.stop(), 10000) };
     const btn = $('#testMicBtn');
     btn.classList.add('recording');
     btn.textContent = t('settings.stopMicTest');
@@ -1030,11 +1030,16 @@ async function onTestMicClick() {
 
 function stopMicTest() {
     if (!micTest) return;
-    const rec = micTest.rec;
     clearTimeout(micTest.timer);
+    try {
+        micTest.src.disconnect();
+        micTest.delay.disconnect();
+        micTest.gain.disconnect();
+    } catch {
+        /* already disconnected */
+    }
     micTest = null;
     resetTestMicBtn();
-    if (rec.state !== 'inactive') rec.stop();
 }
 
 function resetTestMicBtn() {
@@ -1260,6 +1265,7 @@ if (location.hash === '#debug') {
         ctxTime: hub?.ctx?.currentTime ?? null,
         micRaw: hub?.mic?.raw.getAudioTracks().map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`).join(',') ?? null,
         micProcessed,
+        micTest: micTest ? { delay: micTest.delay.delayTime.value, gain: micTest.gain.gain.value } : null,
         micVolume: settings.micVolume,
         micGain: hub?.mic?.gain.gain.value ?? null,
         // live sampling (not the throttled _tick values) — readable in background tabs
