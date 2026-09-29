@@ -47,6 +47,22 @@ export class Mesh {
     }
 
     /**
+     * Swap the outgoing audio track on every live connection (mic switch or
+     * constraint change). sender.replaceTrack keeps the negotiation untouched.
+     * @param {MediaStreamTrack} track track from the NEW local stream
+     * @param {MediaStream} [stream] the new local stream (updates this.localStream)
+     */
+    replaceAudioTrack(track, stream) {
+        if (stream) this.localStream = stream;
+        for (const entry of this.entries.values()) {
+            if (!entry.tracksAdded) continue; // will pick the current stream on connect
+            const sender = entry.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+            if (sender) sender.replaceTrack(track).catch((err) => console.error('[mesh] replaceTrack failed', err));
+            else entry.pc.addTrack(track, this.localStream);
+        }
+    }
+
+    /**
      * @param {string}  peerId
      * @param {boolean} shouldCreateOffer true for the joiner side
      * @param {Array}   iceServers from the addPeer payload

@@ -93,3 +93,68 @@ export class AudioHub {
         this.ctx = null;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Speaker test tone — a short 660 Hz beep rendered offline into a WAV blob
+// URL, so it plays through an <audio> element (and therefore honors
+// setSinkId/volume) with zero network assets.
+// ---------------------------------------------------------------------------
+
+let beepUrlPromise = null;
+
+export function getTestBeepUrl() {
+    if (!beepUrlPromise) beepUrlPromise = renderBeep();
+    return beepUrlPromise;
+}
+
+async function renderBeep() {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OAC) return null;
+    const sampleRate = 24000;
+    const duration = 0.4;
+    const ctx = new OAC(1, Math.ceil(sampleRate * duration), sampleRate);
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = 660;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, 0);
+    gain.gain.linearRampToValueAtTime(0.85, 0.03);
+    gain.gain.setValueAtTime(0.85, duration - 0.1);
+    gain.gain.linearRampToValueAtTime(0.0001, duration);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(0);
+    osc.stop(duration);
+    try {
+        const buffer = await ctx.startRendering();
+        return bufferToWavUrl(buffer);
+    } catch {
+        return null;
+    }
+}
+
+function bufferToWavUrl(buffer) {
+    const chan = buffer.getChannelData(0);
+    const view = new DataView(new ArrayBuffer(44 + chan.length * 2));
+    const writeStr = (offset, str) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + chan.length * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, buffer.sampleRate, true);
+    view.setUint32(28, buffer.sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, chan.length * 2, true);
+    let offset = 44;
+    for (let i = 0; i < chan.length; i++, offset += 2) {
+        const s = Math.max(-1, Math.min(1, chan[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return URL.createObjectURL(new Blob([view.buffer], { type: 'audio/wav' }));
+}

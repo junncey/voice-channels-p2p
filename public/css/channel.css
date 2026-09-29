@@ -291,6 +291,16 @@ body {
     width: 100%;
 }
 
+.voice-controls-row {
+    display: flex;
+    gap: 10px;
+}
+
+.voice-icon-btn {
+    flex: 0 0 46px;
+    padding: 0;
+}
+
 #micBtn.muted {
     background: var(--bg-3);
     color: var(--text-2);
@@ -408,6 +418,197 @@ body {
     gap: 10px;
     padding: 12px;
     border-top: 1px solid var(--border-soft);
+}
+
+.chat-image-btn {
+    flex: 0 0 auto;
+    align-self: center;
+}
+
+.chat-image-btn:hover {
+    color: var(--accent);
+}
+
+/* ---------- image messages + lightbox ---------- */
+
+.msg-image {
+    display: block;
+    width: 100%;
+    max-width: 300px;
+    max-height: 300px;
+    object-fit: contain;
+    border-radius: var(--radius-m);
+    border: 1px solid var(--border);
+    margin-top: 6px;
+    cursor: zoom-in;
+    background: var(--bg-0);
+}
+
+.msg.self .msg-image {
+    max-width: 260px;
+}
+
+.lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(6, 9, 14, 0.9);
+    cursor: zoom-out;
+    animation: fade-in 0.14s var(--ease);
+}
+
+.lightbox img {
+    max-width: 92vw;
+    max-height: 86vh;
+    border-radius: 10px;
+    box-shadow: var(--shadow-1);
+}
+
+.lightbox-bar {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    cursor: default;
+}
+
+/* ---------- audio settings modal ---------- */
+
+.settings-modal {
+    max-width: 520px;
+    max-height: min(680px, 92dvh);
+    display: flex;
+    flex-direction: column;
+}
+
+.settings-body {
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-right: 4px;
+}
+
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-m);
+    background: var(--bg-2);
+}
+
+.settings-section > h3 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-2);
+}
+
+.settings-section .field {
+    margin-bottom: 0;
+}
+
+.settings-section .btn {
+    align-self: flex-start;
+}
+
+.level-meter {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-3);
+    overflow: hidden;
+}
+
+#settingsMicBar {
+    height: 100%;
+    width: 0%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+    transition: width 0.1s linear;
+}
+
+.switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13.5px;
+    cursor: pointer;
+}
+
+.switch {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    width: 40px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    position: relative;
+    cursor: pointer;
+    transition: background var(--speed) var(--ease), border-color var(--speed) var(--ease);
+    margin: 0;
+}
+
+.switch::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-2);
+    transition: transform var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.switch:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.switch:checked::after {
+    transform: translateX(18px);
+    background: #08281b;
+}
+
+.settings-hint {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+.volume-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13.5px;
+}
+
+.volume-row input[type='range'] {
+    flex: 1;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.volume-val {
+    flex: 0 0 auto;
+    min-width: 40px;
+    text-align: right;
+    font-size: 12.5px;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+}
+
+#testMicBtn.recording {
+    border-color: var(--danger);
+    color: var(--danger);
+    animation: pulse 1.2s ease-in-out infinite;
 }
 
 /* ---------- join overlay ---------- */
