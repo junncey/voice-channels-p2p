@@ -342,3 +342,22 @@ select {
         transition-duration: 0.01ms !important;
     }
 }
+
+/* ---------- light theme overrides (dark stays the default) ---------- */
+
+html[data-theme='light'] body {
+    background:
+        radial-gradient(1100px 420px at 18% -10%, rgba(0, 153, 255, 0.06), transparent 60%),
+        radial-gradient(900px 380px at 95% 0%, rgba(0, 153, 255, 0.04), transparent 55%),
+        var(--bg-0);
+}
+
+/* blue/danger buttons carry white text on the light palette */
+html[data-theme='light'] .btn.primary,
+html[data-theme='light'] .btn.danger {
+    color: #fff;
+}
+
+html[data-theme='light'] .overlay {
+    background: rgba(23, 32, 45, 0.42);
+}

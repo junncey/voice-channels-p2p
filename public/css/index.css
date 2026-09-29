@@ -248,3 +248,41 @@ button.topbar-link {
     padding: 11px 26px;
     font-size: 15px;
 }
+
+/* ---------- theme toggle pill (topbar) ---------- */
+
+.theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-right: 16px;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-3);
+    color: var(--text-2);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition:
+        color var(--speed) var(--ease),
+        border-color var(--speed) var(--ease),
+        background var(--speed) var(--ease);
+}
+
+.theme-toggle:hover {
+    color: var(--text-1);
+    border-color: var(--accent);
+    background: var(--accent-dim);
+}
+
+.theme-toggle .theme-icon {
+    display: inline-flex;
+    align-items: center;
+}
+
+.theme-toggle .theme-icon svg {
+    display: block;
+}

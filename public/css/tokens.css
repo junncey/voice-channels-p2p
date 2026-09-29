@@ -46,3 +46,36 @@
         'Microsoft YaHei', 'Noto Sans SC', sans-serif;
     --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
 }
+
+/* Light theme — QQ-style white/blue. Dark (above) stays the default;
+   the choice is applied pre-paint by /js/core/theme-boot.js */
+html[data-theme='light'] {
+    /* surfaces */
+    --bg-0: #e8ecf2;
+    --bg-1: #f2f4f8;
+    --bg-2: #ffffff;
+    --bg-3: #eaeef4;
+    --border: #d8dfe9;
+    --border-soft: #e7ebf2;
+
+    /* text */
+    --text-1: #1a1f28;
+    --text-2: #5b6472;
+    --text-3: #99a2b0;
+
+    /* accent (QQ blue) */
+    --accent: #0099ff;
+    --accent-strong: #0077e6;
+    --accent-dim: rgba(0, 153, 255, 0.12);
+    --accent-glow: rgba(0, 153, 255, 0.35);
+
+    /* status */
+    --danger: #e5484d;
+    --danger-dim: rgba(229, 72, 77, 0.12);
+    --warn: #b97e0f;
+    --warn-dim: rgba(255, 179, 0, 0.15);
+    --info: #2f7fd6;
+
+    /* effects */
+    --shadow-1: 0 10px 32px rgba(23, 34, 51, 0.12);
+}

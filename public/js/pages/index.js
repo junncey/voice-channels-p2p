@@ -4,22 +4,49 @@
 
 import { api } from '/js/core/api.js';
 import { initI18n, t } from '/js/core/i18n.js';
+import { getTheme, toggleTheme } from '/js/core/theme.js';
 import { $, el } from '/js/core/utils.js';
 
 const POLL_MS = 15000;
 
-// everything this app stores per-browser; nickname can be cleared separately
+// everything this app stores per-browser; nickname can be cleared separately.
+// The theme choice (vc_theme) is deliberately NOT listed — "clear everything"
+// must keep the user's palette.
 const NICK_KEY = 'vc_nick';
 const CONFIG_KEYS = ['vc_audio_settings', 'vc_peer_volumes', 'vc_send_key'];
+
+const MOON_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>';
+const SUN_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
 
 boot();
 
 async function boot() {
     await initI18n();
+    bindThemeToggle();
     bindClearData();
     bindCreateTemp();
     await load();
     setInterval(load, POLL_MS);
+}
+
+// ----- dark/light theme pill (topbar) -----
+
+function bindThemeToggle() {
+    const button = $('#themeBtn');
+    const icon = button.querySelector('.theme-icon');
+    const label = button.querySelector('.theme-label');
+    const render = () => {
+        const light = getTheme() === 'light';
+        icon.innerHTML = light ? SUN_SVG : MOON_SVG;
+        label.textContent = t(light ? 'index.themeLight' : 'index.themeDark');
+    };
+    button.addEventListener('click', () => {
+        toggleTheme();
+        render();
+    });
+    render();
 }
 
 // ----- temporary rooms: spawn one by visiting a fresh /c/<id>; the server

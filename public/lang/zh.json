@@ -175,6 +175,8 @@
     "index.createTemp": "创建临时房间",
     "index.tempBadge": "临时",
     "index.locked": "需密码",
+    "index.themeDark": "深色模式",
+    "index.themeLight": "浅色模式",
     "channel.tempBadge": "临时房间",
     "chat.imageTooMany": "一次最多发送 6 张图片"
 }

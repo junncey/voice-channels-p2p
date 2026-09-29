@@ -175,6 +175,8 @@
     "index.createTemp": "Create a temporary room",
     "index.tempBadge": "Temporary",
     "index.locked": "Password",
+    "index.themeDark": "Dark",
+    "index.themeLight": "Light",
     "channel.tempBadge": "Temporary room",
     "chat.imageTooMany": "Up to 6 images per message"
 }

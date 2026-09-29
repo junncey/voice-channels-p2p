@@ -1136,3 +1136,24 @@ body {
 .send-key-option input:checked + .option-check::before {
     content: '✓';
 }
+
+/* ---------- light theme overrides ---------- */
+
+/* frosted header follows the light panel color */
+html[data-theme='light'] .channel-header {
+    background: rgba(255, 255, 255, 0.85);
+}
+
+/* self bubbles are QQ blue with white text; the image-bubble variant keeps
+   its own (higher-specificity) text-1 rule and needs no change */
+html[data-theme='light'] .msg.self .msg-text {
+    color: #fff;
+}
+
+html[data-theme='light'] .switch:checked::after {
+    background: #fff;
+}
+
+html[data-theme='light'] .chat-attachment-remove:hover {
+    color: #fff;
+}
