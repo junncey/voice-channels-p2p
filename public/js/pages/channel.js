@@ -19,6 +19,7 @@ import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 const NICK_KEY = 'vc_nick';
 const HOST_TOKEN_PREFIX = 'vc_host_token_';
 const CHANNEL_PW_PREFIX = 'vc_chan_pw_';
+const SEND_KEY_STORE = 'vc_send_key'; // 'enter' (default) | 'ctrlEnter'
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
 const PEER_VOLUMES_KEY = 'vc_peer_volumes';
 const AVATAR_KEY = 'vc_avatar';
@@ -83,6 +84,9 @@ let hostToken = loadHostToken();
 // channel join password: pre-filled from storage for the auto-join path,
 // otherwise taken from the overlay input at join time
 let channelPassword = '';
+// composer send key preference (QQ style): Enter or Ctrl+Enter sends, the
+// other combinations insert a newline
+let sendKey = localStorage.getItem(SEND_KEY_STORE) === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
 
 // ----- host login persistence -----
 // The host token lives in localStorage so the login survives browser restarts
@@ -260,6 +264,7 @@ function bindUi() {
     $('#leaveBtn').addEventListener('click', leave);
     $('#micBtn').addEventListener('click', onMicBtnClick);
     $('#chatForm').addEventListener('submit', onChatSubmit);
+    bindChatInput();
 
     bindImageUi();
     bindSettingsUi();
@@ -1348,6 +1353,78 @@ function savePeerVolume(name, volume) {
 // chat + image sending
 // ---------------------------------------------------------------------------
 
+// composer textarea grows with the content up to this height, then scrolls
+const CHAT_INPUT_MAX_HEIGHT = 120;
+
+function bindChatInput() {
+    const input = $('#chatInput');
+    input.addEventListener('input', autoGrowChatInput);
+    input.addEventListener('keydown', onChatInputKeydown);
+
+    // QQ-style send-key menu behind the caret next to the send button
+    const menu = $('#sendKeyMenu');
+    const caret = $('#sendKeyBtn');
+    for (const radio of menu.querySelectorAll('input[name="sendKey"]')) {
+        if (radio.value === sendKey) radio.checked = true;
+        radio.addEventListener('change', () => {
+            sendKey = radio.value === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
+            localStorage.setItem(SEND_KEY_STORE, sendKey);
+            toggleSendKeyMenu(false);
+        });
+    }
+    caret.addEventListener('click', () => toggleSendKeyMenu(menu.classList.contains('hidden')));
+    document.addEventListener('click', (event) => {
+        if (!menu.classList.contains('hidden') && !menu.contains(event.target) && !caret.contains(event.target)) {
+            toggleSendKeyMenu(false);
+        }
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') toggleSendKeyMenu(false);
+    });
+}
+
+function toggleSendKeyMenu(open) {
+    $('#sendKeyMenu').classList.toggle('hidden', !open);
+    $('#sendKeyBtn').classList.toggle('open', open);
+}
+
+function autoGrowChatInput() {
+    const input = $('#chatInput');
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, CHAT_INPUT_MAX_HEIGHT) + 'px';
+}
+
+function onChatInputKeydown(event) {
+    // IME composition: Enter confirms the candidate text, it must never send
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key !== 'Enter') return;
+    // newline/sending is handled EXPLICITLY — relying on the browser's default
+    // insertion is unreliable across webviews and mobile keyboards
+    event.preventDefault();
+    const ctrlEnter = event.ctrlKey || event.metaKey;
+    if (sendKey === 'enter') {
+        if (ctrlEnter || event.shiftKey) insertChatNewline();
+        else $('#chatForm').requestSubmit();
+    } else if (ctrlEnter) {
+        $('#chatForm').requestSubmit();
+    } else {
+        insertChatNewline();
+    }
+}
+
+function insertChatNewline() {
+    const input = $('#chatInput');
+    // execCommand keeps the native undo stack; setRangeText is the fallback
+    let inserted = false;
+    try {
+        inserted = document.execCommand('insertText', false, '\n');
+    } catch {
+        inserted = false;
+    }
+    if (!inserted) input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end');
+    autoGrowChatInput();
+}
+
 async function onChatSubmit(event) {
     event.preventDefault();
     if (!joined) return;
@@ -1356,6 +1433,7 @@ async function onChatSubmit(event) {
     const images = [...pendingImages];
     if (!text && !images.length) return;
     input.value = '';
+    autoGrowChatInput();
     clearPendingImages(); // the tray is emptied up-front; failures toast per image
 
     if (!images.length) {

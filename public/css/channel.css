@@ -517,7 +517,8 @@ body {
 
 .chat-form {
     display: flex;
-    align-items: center;
+    /* buttons stay pinned to the bottom while the textarea grows (QQ style) */
+    align-items: flex-end;
     gap: 8px;
 }
 
@@ -526,6 +527,15 @@ body {
     background: transparent;
     border: none;
     padding: 7px 6px;
+}
+
+/* multiline composer: auto-grows via JS up to ~6 lines, then scrolls */
+.chat-composer .chat-input {
+    resize: none;
+    overflow-y: auto;
+    min-height: 32px;
+    max-height: 120px;
+    line-height: 1.45;
 }
 
 .chat-composer .input:focus {
@@ -1043,4 +1053,86 @@ body {
 .chat-attachment-remove:hover {
     background: var(--danger);
     color: #2b0a09;
+}
+
+/* send button split (QQ style): 发送 + caret opening the send-key menu */
+
+.send-btn-wrap {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.send-btn-group {
+    display: flex;
+}
+
+.send-btn-wrap .send-btn {
+    border-radius: var(--radius-s) 0 0 var(--radius-s);
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+.send-caret-btn {
+    border-radius: 0 var(--radius-s) var(--radius-s) 0;
+    padding: 0 5px;
+    border-left: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+.send-caret-btn svg {
+    transition: transform var(--speed) var(--ease);
+    transform: rotate(180deg);
+}
+
+.send-caret-btn.open svg {
+    transform: none;
+}
+
+/* send-key options floating above the button */
+
+.send-key-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    min-width: 220px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    z-index: 40;
+}
+
+.send-key-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius-s);
+    font-size: 13px;
+    color: var(--text-1);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.send-key-option:hover {
+    background: var(--bg-3);
+}
+
+.send-key-option input {
+    display: none;
+}
+
+.option-check {
+    flex: 0 0 16px;
+    text-align: center;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 14px;
+}
+
+.send-key-option input:checked + .option-check::before {
+    content: '✓';
 }

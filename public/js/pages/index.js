@@ -10,7 +10,7 @@ const POLL_MS = 15000;
 
 // everything this app stores per-browser; nickname can be cleared separately
 const NICK_KEY = 'vc_nick';
-const CONFIG_KEYS = ['vc_audio_settings', 'vc_peer_volumes'];
+const CONFIG_KEYS = ['vc_audio_settings', 'vc_peer_volumes', 'vc_send_key'];
 
 boot();
 
