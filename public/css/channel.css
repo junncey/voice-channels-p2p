@@ -174,6 +174,7 @@ body {
     padding: 8px 10px;
     border-radius: var(--radius-m);
     border: 1px solid transparent;
+    flex-wrap: wrap;
     transition: background var(--speed) var(--ease);
 }
 
@@ -258,6 +259,43 @@ body {
 .member-actions .btn {
     padding: 4px 8px;
     font-size: 11.5px;
+}
+
+/* per-user volume (hover a member card to reveal) */
+.member-volume {
+    display: none;
+    flex: 1 0 100%;
+    align-items: center;
+    gap: 8px;
+    padding-top: 6px;
+}
+
+.member:hover .member-volume,
+.member-volume.adjusted {
+    display: flex;
+}
+
+.member-volume-icon {
+    flex: 0 0 auto;
+    color: var(--text-3);
+    display: inline-flex;
+}
+
+.member-volume input[type='range'] {
+    flex: 1;
+    min-width: 0;
+    height: 4px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.member-volume-val {
+    flex: 0 0 auto;
+    min-width: 40px;
+    text-align: right;
+    font-size: 11.5px;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
 }
 
 /* ---------- voice controls ---------- */
@@ -581,6 +619,91 @@ body {
 .settings-hint {
     font-size: 12px;
     color: var(--text-3);
+}
+
+/* ---------- custom dropdown (device pickers) ---------- */
+
+.dropdown-root {
+    display: flex;
+}
+
+.dropdown-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--text-1);
+    text-align: left;
+    font-size: 14px;
+    transition: border-color var(--speed) var(--ease);
+}
+
+.dropdown-trigger:hover:not(:disabled),
+.dropdown-trigger[aria-expanded='true'] {
+    border-color: var(--accent);
+}
+
+.dropdown-trigger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.dropdown-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dropdown-chevron {
+    flex: 0 0 auto;
+    display: inline-flex;
+    color: var(--text-3);
+    transition: transform var(--speed) var(--ease);
+}
+
+.dropdown-trigger[aria-expanded='true'] .dropdown-chevron {
+    transform: rotate(180deg);
+}
+
+.dropdown-menu {
+    position: fixed;
+    z-index: 260;
+    margin: 0;
+    padding: 6px;
+    list-style: none;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow-1);
+    max-height: 262px;
+    overflow-y: auto;
+    animation: fade-in 0.12s var(--ease);
+}
+
+.dropdown-option {
+    padding: 8px 12px;
+    border-radius: var(--radius-s);
+    font-size: 13.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dropdown-option:hover,
+.dropdown-option.active {
+    background: var(--bg-3);
+}
+
+.dropdown-option.selected {
+    color: var(--accent);
+    font-weight: 600;
 }
 
 .volume-row {

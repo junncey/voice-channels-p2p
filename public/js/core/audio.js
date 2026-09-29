@@ -1,7 +1,8 @@
 /**
  * Audio level monitoring — one shared AudioContext, one analyser per stream.
- * Analyser taps do NOT route audio to the speakers; playback happens through
- * dedicated <audio> elements owned by the channel page.
+ * Analyser taps do NOT route audio to the speakers by themselves; playback is
+ * either a per-peer GainNode (supports boosting past 100%) or a dedicated
+ * <audio> element owned by the channel page.
  */
 
 export class AudioHub {
@@ -13,6 +14,8 @@ export class AudioHub {
         this.threshold = threshold;
         this.ctx = null;
         this.watchers = new Map(); // key -> { src, analyser, data, speaking, cb }
+        /** key -> { src, gain } audible playback chains (remote peers only) */
+        this.players = new Map();
         this.timer = null;
     }
 
@@ -62,6 +65,63 @@ export class AudioHub {
         if (!this.watchers.size) this._stop();
     }
 
+    // ----- audible per-peer playback (gain 0..3 = 0%..300%) -----
+
+    /**
+     * Start playing a remote stream through a gain node. Returns false when
+     * the graph can't be built (caller falls back to an <audio> element).
+     * @param {string}  key    peer id
+     * @param {MediaStream} stream
+     * @param {number}  volume initial total gain (peer volume × master)
+     */
+    playPeer(key, stream, volume) {
+        if (!this.ctx || !stream || !stream.getAudioTracks().length) return false;
+        this.stopPeer(key);
+        try {
+            const src = this.ctx.createMediaStreamSource(stream);
+            const gain = this.ctx.createGain();
+            gain.gain.value = 0;
+            src.connect(gain).connect(this.ctx.destination);
+            gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.03); // fade in, no pop
+            this.players.set(key, { src, gain });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    setPeerVolume(key, volume) {
+        const player = this.players.get(key);
+        if (!player || !this.ctx) return;
+        player.gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.02);
+    }
+
+    stopPeer(key) {
+        const player = this.players.get(key);
+        if (!player) return;
+        try {
+            player.src.disconnect();
+            player.gain.disconnect();
+        } catch {
+            /* already disconnected */
+        }
+        this.players.delete(key);
+    }
+
+    /**
+     * Route Web Audio playback to a specific output device (Chromium only).
+     * @returns {Promise<boolean>} whether the sink could be applied
+     */
+    async setSink(deviceId = '') {
+        if (!this.ctx || typeof this.ctx.setSinkId !== 'function') return false;
+        try {
+            await this.ctx.setSinkId(deviceId || '');
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     _start() {
         if (!this.timer) this.timer = setInterval(() => this._tick(), 100);
     }
@@ -89,6 +149,7 @@ export class AudioHub {
     destroy() {
         this._stop();
         for (const key of [...this.watchers.keys()]) this.unwatch(key);
+        for (const key of [...this.players.keys()]) this.stopPeer(key);
         if (this.ctx) this.ctx.close().catch(() => {});
         this.ctx = null;
     }

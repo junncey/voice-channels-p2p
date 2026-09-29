@@ -84,6 +84,7 @@
     "settings.micTestUnsupported": "当前浏览器不支持录音",
     "settings.done": "完成",
     "channel.pttOn": "按住 V 说话",
+    "channel.userVolume": "单独音量（0-300%）",
     "notFound.title": "频道不存在",
     "notFound.desc": "该链接无效，或频道已被删除",
     "notFound.home": "返回首页",

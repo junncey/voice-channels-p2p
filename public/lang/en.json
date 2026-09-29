@@ -84,6 +84,7 @@
     "settings.micTestUnsupported": "This browser can't record audio",
     "settings.done": "Done",
     "channel.pttOn": "Hold V to talk",
+    "channel.userVolume": "User volume (0-300%)",
     "notFound.title": "Channel not found",
     "notFound.desc": "This link is invalid, or the channel was deleted",
     "notFound.home": "Back home",

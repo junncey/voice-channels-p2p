@@ -12,6 +12,7 @@ import { Mesh } from '/js/core/webrtc.js';
 import { AudioHub, getTestBeepUrl } from '/js/core/audio.js';
 import { initChat } from '/js/core/chat.js';
 import { fileToImageMessage, sendImageData, createImageReceiver } from '/js/core/images.js';
+import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t } from '/js/core/i18n.js';
 import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 
@@ -28,6 +29,8 @@ const LOCK_SVG =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
 const UNLOCK_SVG =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>';
+const VOL_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
 
 // ---------------------------------------------------------------------------
 // state
@@ -69,9 +72,13 @@ let joinLockOn = false;
 let localStream = null;
 let hostToken = sessionStorage.getItem(HOST_TOKEN_PREFIX + channelId) || '';
 
-/** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, self } */
+/** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
 const members = new Map();
-const audioEls = new Map(); // peerId -> HTMLAudioElement
+const audioEls = new Map(); // peerId -> HTMLAudioElement (fallback playback path)
+let micDevices = [];
+let spkDevices = [];
+let micDropdown = null;
+let spkDropdown = null;
 
 const imageReceiver = createImageReceiver({
     onDone: ({ from, dataUrl }) => {
@@ -192,6 +199,7 @@ async function join({ textOnly: asTextOnly }) {
         /* speaking indicators degrade to off, voice still works */
     }
     if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);
+    applySpeaker(); // route Web Audio playback to the chosen output from the start
 
     socket = io({ transports: ['websocket'] });
     mesh = new Mesh({ signaling: socket, handlers: meshHandlers() });
@@ -267,7 +275,7 @@ function registerSocketHandlers() {
         const member = members.get(peer_id);
         if (!member) return;
         member.peer_audio_status = status === true;
-        renderMembers();
+        updateMicIconNode(peer_id, status === true);
     });
 
     socket.on('peerName', ({ peer_id, peer_name }) => {
@@ -337,17 +345,7 @@ function peerIdSafe(id) {
 function meshHandlers() {
     return {
         onRemoteStream(peerId, stream) {
-            let audio = audioEls.get(peerId);
-            if (!audio) {
-                audio = el('audio', { autoplay: '', playsinline: '' });
-                audio.style.display = 'none';
-                audio.volume = settings.volume;
-                document.body.append(audio);
-                audioEls.set(peerId, audio);
-                applySink(audio);
-            }
-            audio.srcObject = stream;
-            audio.play().catch(() => {});
+            attachRemoteAudio(peerId, stream);
             if (hub?.ctx) {
                 hub.watch(peerId, stream, ({ speaking }) => {
                     const node = $(`#memberList .member[data-id="${peerId}"]`);
@@ -388,6 +386,7 @@ function syncMembers(peersMap) {
             peer_presenter: !!info.peer_presenter,
             peer_audio_status: info.peer_audio_status === true,
             joined_at: info.joined_at || existing?.joined_at || Date.now(),
+            volume: existing?.volume ?? 1, // per-user volume survives list refreshes
         });
     }
     // drop stale entries
@@ -417,6 +416,7 @@ function dropPeer(peerId, { silent = false } = {}) {
     members.delete(peerId);
     mesh?.removePeer(peerId);
     hub?.unwatch(peerId);
+    hub?.stopPeer(peerId);
     const audio = audioEls.get(peerId);
     if (audio) {
         audio.srcObject = null;
@@ -424,6 +424,40 @@ function dropPeer(peerId, { silent = false } = {}) {
         audioEls.delete(peerId);
     }
     if (!silent) renderMembers();
+}
+
+function micIconNode(on) {
+    return el('span', {
+        class: 'member-mic' + (on ? '' : ' off'),
+        html: on ? MIC_ON_SVG : MIC_OFF_SVG,
+    });
+}
+
+/** Per-user volume row (0-300%), revealed on card hover. */
+function memberVolumeNode(peerId, info) {
+    const initial = Math.round((info.volume ?? 1) * 100);
+    const value = el('span', { class: 'member-volume-val', text: `${initial}%` });
+    const slider = el('input', {
+        type: 'range',
+        min: 0,
+        max: 300,
+        step: 5,
+        value: String(initial),
+        title: t('channel.userVolume'),
+    });
+    slider.addEventListener('input', () => {
+        info.volume = Number(slider.value) / 100;
+        value.textContent = `${slider.value}%`;
+        slider.closest('.member-volume')?.classList.add('adjusted');
+        reapplyPeerVolume(peerId);
+    });
+    return el(
+        'div',
+        { class: 'member-volume' + (initial !== 100 ? ' adjusted' : '') },
+        el('span', { class: 'member-volume-icon', html: VOL_SVG }),
+        slider,
+        value
+    );
 }
 
 function renderMembers() {
@@ -459,13 +493,12 @@ function renderMembers() {
                         { class: 'member-sub' },
                         info.peer_presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
                         info.self && textOnly ? el('span', { class: 'badge', text: t('channel.textOnlyBadge') }) : null,
-                        el('span', {
-                            class: 'member-mic' + (info.peer_audio_status ? '' : ' off'),
-                            html: info.peer_audio_status ? MIC_ON_SVG : MIC_OFF_SVG,
-                        })
+                        micIconNode(info.peer_audio_status)
                     )
                 )
             );
+
+            if (!info.self) node.append(memberVolumeNode(peerId, info));
 
             if (isPresenter && !info.self) {
                 node.append(
@@ -489,6 +522,20 @@ function renderMembers() {
         })
     );
     $('#memberCount').textContent = String(members.size);
+}
+
+/**
+ * Update one member's mic icon in place — remote peerStatus flips (and local
+ * push-to-talk) must not rebuild the list, or a volume slider mid-drag dies.
+ */
+function updateMicIconNode(peerId, on) {
+    const node = $(`#memberList .member[data-id="${peerId}"] .member-mic`);
+    if (!node) {
+        renderMembers();
+        return;
+    }
+    node.className = 'member-mic' + (on ? '' : ' off');
+    node.innerHTML = on ? MIC_ON_SVG : MIC_OFF_SVG;
 }
 
 function updateOnlineCount() {
@@ -570,7 +617,7 @@ function applyMicState() {
     const self = members.get(socket?.id);
     if (self) self.peer_audio_status = live;
     updateVoiceControls();
-    renderMembers();
+    updateMicIconNode(socket?.id, live); // in-place: full re-renders kill a mid-drag volume slider
 }
 
 function bindPttKeys() {
@@ -653,22 +700,103 @@ function updateVoiceControls() {
 }
 
 // ---------------------------------------------------------------------------
+// remote audio playback — per-user volume 0..300% x master 0..100%
+// ---------------------------------------------------------------------------
+
+/** Chromium: play through GainNodes (boost past 100% + AudioContext sink). */
+function webAudioPlayback() {
+    return !!hub?.ctx && typeof hub.ctx.setSinkId === 'function';
+}
+
+/** total gain for a remote peer: per-user volume × master volume */
+function peerTotalGain(peerId) {
+    return (members.get(peerId)?.volume ?? 1) * settings.volume;
+}
+
+function removeAudioEl(peerId) {
+    const audio = audioEls.get(peerId);
+    if (audio) {
+        audio.srcObject = null;
+        audio.remove();
+        audioEls.delete(peerId);
+    }
+}
+
+function attachRemoteAudio(peerId, stream) {
+    const total = peerTotalGain(peerId);
+    if (webAudioPlayback() && hub.playPeer(peerId, stream, total)) {
+        removeAudioEl(peerId);
+        return;
+    }
+    // fallback path: <audio> elements honor element.setSinkId but cap at 100%
+    hub?.stopPeer(peerId);
+    let audio = audioEls.get(peerId);
+    if (!audio) {
+        audio = el('audio', { autoplay: '', playsinline: '' });
+        audio.style.display = 'none';
+        document.body.append(audio);
+        audioEls.set(peerId, audio);
+        applySink(audio);
+    }
+    audio.srcObject = stream;
+    audio.volume = Math.min(1, total);
+    audio.play().catch(() => {});
+}
+
+function reapplyPeerVolume(peerId) {
+    const total = peerTotalGain(peerId);
+    if (hub) hub.setPeerVolume(peerId, total);
+    const audio = audioEls.get(peerId);
+    if (audio) audio.volume = Math.min(1, total);
+}
+
+function reapplyAllVolumes() {
+    for (const peerId of members.keys()) {
+        if (peerId !== socket?.id) reapplyPeerVolume(peerId);
+    }
+}
+
+/** Route remote playback to the selected output device. */
+async function applySpeaker() {
+    if (webAudioPlayback()) {
+        await hub.setSink(settings.spkDeviceId);
+        return;
+    }
+    for (const audio of audioEls.values()) await applySink(audio);
+}
+
+// ---------------------------------------------------------------------------
 // audio settings modal
 // ---------------------------------------------------------------------------
 
 function bindSettingsUi() {
+    micDropdown = createDropdown({
+        getItems: () => deviceItems('mic'),
+        getValue: () => settings.micDeviceId,
+        onSelect: (value) => {
+            settings.micDeviceId = value;
+            saveAudioSettings();
+            // switching device in text-only mode doubles as "enable voice"
+            if (localStream) reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
+            else enableVoice();
+        },
+    });
+    spkDropdown = createDropdown({
+        getItems: () => deviceItems('spk'),
+        getValue: () => settings.spkDeviceId,
+        onSelect: (value) => {
+            settings.spkDeviceId = value;
+            saveAudioSettings();
+            applySpeaker();
+        },
+    });
+    $('#micDeviceSelect').append(micDropdown.el);
+    $('#spkDeviceSelect').append(spkDropdown.el);
+
     $('#settingsBtn').addEventListener('click', openSettings);
     $('#settingsCloseBtn').addEventListener('click', closeSettings);
     $('#settingsModal').addEventListener('click', (event) => {
         if (event.target === $('#settingsModal')) closeSettings();
-    });
-
-    $('#micDeviceSelect').addEventListener('change', (event) => {
-        settings.micDeviceId = event.target.value;
-        saveAudioSettings();
-        // switching device in text-only mode doubles as "enable voice"
-        if (localStream) reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
-        else enableVoice();
     });
 
     for (const [id, key] of [
@@ -690,16 +818,10 @@ function bindSettingsUi() {
         applyMicState();
     });
 
-    $('#spkDeviceSelect').addEventListener('change', (event) => {
-        settings.spkDeviceId = event.target.value;
-        saveAudioSettings();
-        for (const audio of audioEls.values()) applySink(audio);
-    });
-
     $('#volumeSlider').addEventListener('input', (event) => {
         settings.volume = Number(event.target.value) / 100;
         $('#volumeVal').textContent = `${event.target.value}%`;
-        for (const audio of audioEls.values()) audio.volume = settings.volume;
+        reapplyAllVolumes();
         saveAudioSettings();
     });
 
@@ -710,12 +832,11 @@ function bindSettingsUi() {
 }
 
 function openSettings() {
-    $('#micDeviceSelect').value = settings.micDeviceId;
     $('#nsToggle').checked = settings.noiseSuppression;
     $('#ecToggle').checked = settings.echoCancellation;
     $('#agcToggle').checked = settings.autoGainControl;
     $('#pttToggle').checked = settings.ptt;
-    $('#spkDeviceSelect').disabled = !sinkSupported;
+    spkDropdown.setDisabled(!sinkSupported);
     $('#sinkUnsupported').classList.toggle('hidden', sinkSupported);
     const pct = Math.round(settings.volume * 100);
     $('#volumeSlider').value = String(pct);
@@ -725,8 +846,20 @@ function openSettings() {
 }
 
 function closeSettings() {
+    micDropdown?.close();
+    spkDropdown?.close();
     $('#settingsModal').classList.add('hidden');
     stopMicTest();
+}
+
+function deviceItems(kind) {
+    const list = kind === 'mic' ? micDevices : spkDevices;
+    const generic = t(kind === 'mic' ? 'settings.deviceMic' : 'settings.deviceSpk');
+    const items = [{ value: '', label: t('settings.defaultDevice') }];
+    list.forEach((device, index) => {
+        items.push({ value: device.deviceId, label: ((device.label || '').trim() || `${generic} ${index + 1}`).slice(0, 60) });
+    });
+    return items;
 }
 
 async function refreshDeviceSelects() {
@@ -736,17 +869,10 @@ async function refreshDeviceSelects() {
     } catch {
         return;
     }
-    fillDeviceSelect($('#micDeviceSelect'), devices.filter((d) => d.kind === 'audioinput'), settings.micDeviceId, t('settings.deviceMic'));
-    fillDeviceSelect($('#spkDeviceSelect'), devices.filter((d) => d.kind === 'audiooutput'), settings.spkDeviceId, t('settings.deviceSpk'));
-}
-
-function fillDeviceSelect(select, devices, selectedId, genericLabel) {
-    select.replaceChildren(el('option', { value: '', text: t('settings.defaultDevice') }));
-    devices.forEach((device, index) => {
-        const label = (device.label || '').trim() || `${genericLabel} ${index + 1}`;
-        select.append(el('option', { value: device.deviceId, text: label.slice(0, 60) }));
-    });
-    select.value = devices.some((d) => d.deviceId === selectedId) ? selectedId : '';
+    micDevices = devices.filter((d) => d.kind === 'audioinput');
+    spkDevices = devices.filter((d) => d.kind === 'audiooutput');
+    micDropdown?.refresh();
+    spkDropdown?.refresh();
 }
 
 async function applySink(audioEl) {
@@ -996,4 +1122,25 @@ function toast(message, kind = '') {
     const node = el('div', { class: `toast ${kind}`, text: message });
     $('#toasts').append(node);
     setTimeout(() => node.remove(), 3200);
+}
+
+// ---------------------------------------------------------------------------
+// e2e inspection hook (only with #debug in the URL — never in normal use)
+// ---------------------------------------------------------------------------
+
+if (location.hash === '#debug') {
+    window.__vcDebug = () => ({
+        mode: webAudioPlayback() ? 'webaudio' : 'element',
+        ctxSink: hub?.ctx?.sinkId ?? null,
+        master: settings.volume,
+        errs: window.__errs || [],
+        peers: [...members.entries()]
+            .filter(([, info]) => !info.self)
+            .map(([peerId, info]) => ({
+                name: info.peer_name,
+                volume: info.volume ?? 1,
+                gain: hub?.players.get(peerId)?.gain.gain.value ?? null,
+                elVolume: audioEls.get(peerId)?.volume ?? null,
+            })),
+    });
 }
