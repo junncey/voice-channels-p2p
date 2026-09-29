@@ -1,0 +1,116 @@
+# ============================================================
+# MiroTalk P2P (junncey fork) - 构建 Docker 镜像并推送到阿里云 ACR
+#
+# 触发方式：
+#   1) GitHub Actions 页面 -> Actions -> 左侧 "Docker Build & Push" ->
+#      "Run workflow" 手动触发（最常用）
+#   2) 打 tag 推送触发：git tag v2.0.20-custom && git push origin v2.0.20-custom
+#
+# 需要配置的仓库 Secrets（Settings -> Secrets and variables -> Actions）：
+#   ALIYUN_REGISTRY_USERNAME : 阿里云 ACR 用户名
+#   ALIYUN_REGISTRY_PASSWORD : 阿里云 ACR 密码
+#   （与 junncey/blog 仓库里用的是同一套 ACR，可直接复用）
+#
+# 可选 Variables（不配置则用下方默认值）：
+#   ALIYUN_REGISTRY  : 默认 crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com
+#   ALIYUN_NAMESPACE : 默认 b1at
+#   IMAGE_NAME       : 默认 mirotalk-p2p
+# ============================================================
+name: Docker Build & Push
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '镜像标签（留空则打 latest + 短SHA 两个标签）'
+        required: false
+        default: ''
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ${{ vars.ALIYUN_REGISTRY || 'crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com' }}
+  NAMESPACE: ${{ vars.ALIYUN_NAMESPACE || 'b1at' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'mirotalk-p2p' }}
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build & Push MiroTalk P2P Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        # 手动输入经 env 传入，不直接内嵌脚本，防止 shell 注入
+        env:
+          INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SHA_TAG="${GITHUB_SHA::10}"
+          CUSTOM_TAG="latest"
+          if [ "${REF_TYPE}" = "tag" ]; then
+            CUSTOM_TAG="${REF_NAME#v}"
+          elif [ -n "${INPUT_IMAGE_TAG}" ]; then
+            # 仅允许合法 Docker tag 字符集
+            if ! [[ "${INPUT_IMAGE_TAG}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "::error::image_tag 含非法字符（仅允许 A-Za-z0-9 . _ / -）: ${INPUT_IMAGE_TAG}"
+              exit 1
+            fi
+            CUSTOM_TAG="${INPUT_IMAGE_TAG}"
+          fi
+          echo "CUSTOM_TAG=${CUSTOM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "SHA_TAG=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # 阿里云 ACR 个人版不支持 BuildKit 的 provenance/SBOM attestation 清单
+          # （否则报错: denied: unknown manifest class for application/vnd.oci.empty.v1+json）
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.SHA_TAG }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "## 构建完成 🎉"
+            echo "- 镜像: \`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
+            echo "- SHA 标签: \`${{ steps.tags.outputs.SHA_TAG }}\`"
+            echo ""
+            echo "服务器拉取："
+            echo '```bash'
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
