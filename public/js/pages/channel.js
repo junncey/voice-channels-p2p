@@ -209,6 +209,15 @@ async function join({ textOnly: asTextOnly }) {
         /* speaking indicators degrade to off, voice still works */
     }
     if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);
+    if (hub.ctx) {
+        // the context may start suspended (autoplay policy — e.g. auto-join on
+        // page load with no user gesture): peers play through <audio> elements
+        // until the first interaction resumes it, then upgrade to the gain path
+        hub.ctx.addEventListener('statechange', onCtxStateChange);
+        const resume = () => hub?.ctx?.resume().catch(() => {});
+        window.addEventListener('pointerdown', resume, { once: true });
+        window.addEventListener('keydown', resume, { once: true });
+    }
     applySpeaker(); // route Web Audio playback to the chosen output from the start
 
     socket = io({ transports: ['websocket'] });
@@ -720,7 +729,17 @@ function updateVoiceControls() {
 
 /** Chromium: play through GainNodes (boost past 100% + AudioContext sink). */
 function webAudioPlayback() {
-    return !!hub?.ctx && typeof hub.ctx.setSinkId === 'function';
+    return !!hub?.ctx && hub.ctx.state === 'running' && typeof hub.ctx.setSinkId === 'function';
+}
+
+/** Context became audible — move peers from the <audio> fallback to gain nodes. */
+function onCtxStateChange() {
+    if (webAudioPlayback()) {
+        for (const [peerId, audio] of [...audioEls]) {
+            if (audio.srcObject) attachRemoteAudio(peerId, audio.srcObject);
+        }
+        applySpeaker();
+    }
 }
 
 /** total gain for a remote peer: per-user volume × master volume */
@@ -1175,6 +1194,17 @@ function toast(message, kind = '') {
 if (location.hash === '#debug') {
     window.__vcDebug = () => ({
         mode: webAudioPlayback() ? 'webaudio' : 'element',
+        ctxState: hub?.ctx?.state ?? null,
+        levels: hub ? Object.fromEntries([...hub.watchers.entries()].map(([k, w]) => [k, w.lastLevel ?? null])) : null,
+        tracks: hub
+            ? [...hub.players.entries()].map(([k, p]) => ({
+                  peer: k,
+                  state: p.src.mediaStream
+                      .getAudioTracks()
+                      .map((t) => `${t.readyState}:${t.muted ? 'muted' : 'on'}`)
+                      .join(','),
+              }))
+            : [],
         ctxSink: hub?.ctx?.sinkId ?? null,
         master: settings.volume,
         errs: window.__errs || [],
@@ -1187,4 +1217,82 @@ if (location.hash === '#debug') {
                 elVolume: audioEls.get(peerId)?.volume ?? null,
             })),
     });
+    // e2e aid: swap the outgoing mic track for a synthetic sine — verifies the
+    // WebRTC chain without depending on acoustic mic/speaker hardware
+    window.__vcTone = async (ms = 3000) => {
+        if (!mesh || !hub?.ctx || !localStream) return 'not-ready';
+        const dest = hub.ctx.createMediaStreamDestination();
+        const osc = hub.ctx.createOscillator();
+        osc.frequency.value = 880;
+        const g = hub.ctx.createGain();
+        g.gain.value = 0.7;
+        osc.connect(g).connect(dest);
+        const an = hub.ctx.createAnalyser();
+        an.fftSize = 512;
+        hub.ctx.createMediaStreamSource(dest.stream).connect(an);
+        const data = new Uint8Array(an.frequencyBinCount);
+        window.__vcToneLevel = 0;
+        mesh.replaceAudioTrack(dest.stream.getAudioTracks()[0], dest.stream);
+        osc.start();
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) {
+            await new Promise((r) => setTimeout(r, 300));
+            an.getByteFrequencyData(data);
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+            window.__vcToneLevel = Math.sqrt(sum / data.length) / 255;
+        }
+        osc.stop();
+        mesh.replaceAudioTrack(localStream.getAudioTracks()[0], localStream);
+        return 'done';
+    };
+    window.__vcStats = async () => {
+        if (!mesh) return null;
+        const out = [];
+        for (const [peerId, entry] of mesh.entries) {
+            const stats = await entry.pc.getStats();
+            const rows = [];
+            stats.forEach((r) => {
+                if (r.type === 'inbound-rtp' && r.kind === 'audio')
+                    rows.push({ dir: 'in', bytes: r.bytesReceived, packets: r.packetsReceived, lost: r.packetsLost });
+                if (r.type === 'outbound-rtp' && r.kind === 'audio')
+                    rows.push({ dir: 'out', bytes: r.bytesSent, packets: r.packetsSent });
+            });
+            out.push({ peerId, state: entry.pc.connectionState, rows });
+        }
+        return out;
+    };
+    // probe: is a FRESH Web Audio tap on the (now flowing) remote stream live,
+    // and does a muted <audio> element prime the pipeline?
+    window.__vcRetap = async (ms = 1200) => {
+        if (!hub?.ctx) return 'no-ctx';
+        const out = {};
+        for (const [peerId, player] of hub.players) {
+            const stream = player.src.mediaStream;
+            const measure = () =>
+                new Promise((resolve) => {
+                    const an = hub.ctx.createAnalyser();
+                    an.fftSize = 512;
+                    hub.ctx.createMediaStreamSource(stream).connect(an);
+                    const data = new Uint8Array(an.frequencyBinCount);
+                    setTimeout(() => {
+                        an.getByteFrequencyData(data);
+                        let sum = 0;
+                        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+                        resolve(Math.sqrt(sum / data.length) / 255);
+                    }, ms);
+                });
+            out[peerId] = { fresh: await measure() };
+            const el = document.createElement('audio');
+            el.srcObject = stream;
+            el.muted = true;
+            await el.play().catch(() => {});
+            out[peerId].withMutedEl = await measure();
+            el.srcObject = null;
+            el.remove();
+        }
+        return out;
+    };
+    // probe: force the AudioContext suspended/running to test the fallback migration
+    window.__vcCtx = (op) => (op === 'suspend' ? hub?.ctx?.suspend() : hub?.ctx?.resume());
 }

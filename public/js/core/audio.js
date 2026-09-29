@@ -16,6 +16,8 @@ export class AudioHub {
         this.watchers = new Map(); // key -> { src, analyser, data, speaking, cb }
         /** key -> { src, gain } audible playback chains (remote peers only) */
         this.players = new Map();
+        /** key -> muted <audio> keeping remote track delivery alive (see _prime) */
+        this.primers = new Map();
         this.timer = null;
     }
 
@@ -84,10 +86,39 @@ export class AudioHub {
             src.connect(gain).connect(this.ctx.destination);
             gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.03); // fade in, no pop
             this.players.set(key, { src, gain });
+            this._prime(key, stream);
             return true;
         } catch {
             return false;
         }
+    }
+
+    /**
+     * Chromium only delivers audio for a remote WebRTC track once a media
+     * element consumes it — without this a MediaStreamSourceNode stays silent
+     * even while RTP flows in. A muted hidden element is enough to kick (and
+     * keep alive) that delivery; it renders nothing itself.
+     */
+    _prime(key, stream) {
+        let el = this.primers.get(key);
+        if (!el) {
+            el = document.createElement('audio');
+            el.muted = true;
+            el.setAttribute('playsinline', '');
+            el.style.display = 'none';
+            document.body.append(el);
+            this.primers.set(key, el);
+        }
+        el.srcObject = stream;
+        el.play().catch(() => {});
+    }
+
+    _unprime(key) {
+        const el = this.primers.get(key);
+        if (!el) return;
+        el.srcObject = null;
+        el.remove();
+        this.primers.delete(key);
     }
 
     setPeerVolume(key, volume) {
@@ -106,6 +137,7 @@ export class AudioHub {
             /* already disconnected */
         }
         this.players.delete(key);
+        this._unprime(key);
     }
 
     /**
@@ -137,6 +169,7 @@ export class AudioHub {
             let sum = 0;
             for (let i = 0; i < watcher.data.length; i++) sum += watcher.data[i] * watcher.data[i];
             const level = Math.sqrt(sum / watcher.data.length) / 255;
+            watcher.lastLevel = level;
 
             // hysteresis so the ring doesn't flicker at the threshold
             if (!watcher.speaking && level > this.threshold) watcher.speaking = true;
@@ -152,8 +185,7 @@ export class AudioHub {
         for (const key of [...this.players.keys()]) this.stopPeer(key);
         if (this.ctx) this.ctx.close().catch(() => {});
         this.ctx = null;
-    }
-}
+    }}
 
 // ---------------------------------------------------------------------------
 // Speaker test tone — a short 660 Hz beep rendered offline into a WAV blob
