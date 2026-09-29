@@ -2,7 +2,7 @@
 
 /**
  * ==============================================
- * MiroTalk P2P v.2.0.30 - Configuration File
+ * Voice Channels - Configuration File
  * ==============================================
  *
  * This file is the central configuration source.
@@ -12,18 +12,13 @@
  *
  * Setup:
  *   cp app/src/config.template.js app/src/config.js
- *   Then edit config.js to match your environment.
+ *   Then edit config.js (or .env) to match your environment.
  *
  * Docker/container environments inject values via
  * environment variables which are read at startup.
- *
- * Branding and customizations require a license:
- * https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661
  */
 
 require('dotenv').config();
-
-const packageJson = require('../../package.json');
 
 // Helper: parse env string to boolean
 function getEnvBoolean(key, force_true_if_undefined = false) {
@@ -51,25 +46,19 @@ module.exports = {
         port: port,
         host: process.env.HOST || `http://localhost:${port}`,
         environment: process.env.NODE_ENV || 'development',
+        // Behind nginx/traefik? enable so Express honors X-Forwarded-* headers
         trustProxy: !!getEnvBoolean(process.env.TRUST_PROXY),
 
         /**
          * Embed (iframe) Restrictions
          * ---------------------------
-         * Controls which origins are allowed to embed MiroTalk P2P in an <iframe>
-         * via the HTTP `Content-Security-Policy: frame-ancestors` header
-         * (also mirrored to `X-Frame-Options` when possible for legacy browsers).
+         * Controls which origins are allowed to embed this app in an <iframe>
+         * via the HTTP `Content-Security-Policy: frame-ancestors` header.
          *
-         * Behavior:
-         * - Empty / unset  → header NOT set, embedding allowed anywhere (default).
-         * - 'none'         → block ALL embedding (frame-ancestors 'none' + X-Frame-Options: DENY).
-         * - 'self'         → only same-origin embedding (frame-ancestors 'self' + X-Frame-Options: SAMEORIGIN).
-         * - list           → comma-separated origins, 'self' is always implicitly included.
-         *                    Wildcards like https://*.example.com are valid in CSP.
-         *
-         * IMPORTANT: This affects the widget too — the MiroTalk widget embeds
-         * the room in an iframe on the host site, so every site that should
-         * load the widget must be listed here.
+         * - Empty / unset  → header NOT set, embedding allowed anywhere (default)
+         * - 'none'         → block ALL embedding
+         * - 'self'         → only same-origin embedding
+         * - list           → comma-separated origins, 'self' implicitly included
          */
         embed: {
             allowedOrigins: process.env.ALLOWED_EMBED_ORIGINS
@@ -89,38 +78,15 @@ module.exports = {
     },
 
     // ==========================================
-    // Host Protection
+    // Login throttling (admin + host login share one limiter)
     // ==========================================
     host: {
-        protected: getEnvBoolean(process.env.HOST_PROTECTED),
-        userAuth: getEnvBoolean(process.env.HOST_USER_AUTH),
-        // HOST_USERS passwords must contain between 1 and 36 characters.
-        users: parseJsonEnv(process.env.HOST_USERS, [{ username: 'MiroTalk', password: 'P2P' }]),
         maxLoginAttempts: process.env.HOST_MAX_LOGIN_ATTEMPTS || 5,
         minLoginBlockTime: process.env.HOST_MIN_LOGIN_BLOCK_TIME || 15, // in minutes
-        maxRoomParticipants: parseInt(process.env.ROOM_MAX_PARTICIPANTS) || 1000,
-        showActiveRooms: getEnvBoolean(process.env.SHOW_ACTIVE_ROOMS) || false,
     },
 
     // ==========================================
-    // JWT
-    // ==========================================
-    jwt: {
-        key: process.env.JWT_KEY || 'mirotalk_jwt_secret',
-        exp: process.env.JWT_EXP || '1h',
-    },
-
-    // ==========================================
-    // Presenters
-    // ==========================================
-    // WARNING: without host protection / user auth, the peer name is unverified client input,
-    // so each entry acts as a shared secret. Use unique, non-guessable values (never a real
-    // name or email) or anyone who guesses it becomes presenter. Empty by default: a shipped
-    // name is a public credential.
-    presenters: parseJsonEnv(process.env.PRESENTERS, []),
-
-    // ==========================================
-    // [CUSTOM] Persistent channels (持久化频道 + 网页管理后台)
+    // Persistent channels (持久化频道 + 网页管理后台)
     // ==========================================
     // Channels live in app/src/channels.json, managed at runtime via the /admin
     // console. The admin console and every /api/admin/* route stay completely
@@ -132,30 +98,21 @@ module.exports = {
         adminJwtSecret: process.env.CHANNEL_ADMIN_JWT_SECRET || '',
         adminJwtExp: process.env.CHANNEL_ADMIN_JWT_EXP || '24h',
         // Shared-secret password accepted as host login for channels that don't
-        // configure their own hosts (username is free-form). Same caveat as
-        // `presenters` above: leave empty to disable the fallback.
+        // configure their own hosts (username is free-form). Leave empty to
+        // disable the fallback.
         defaultModerator: process.env.DEFAULT_CHANNEL_MODERATOR || '',
         autoInit: process.env.AUTO_INIT_CHANNELS ? getEnvBoolean(process.env.AUTO_INIT_CHANNELS) : true,
     },
 
     // ==========================================
-    // API
+    // API (legacy /api/v1/stats, API-key gated)
     // ==========================================
     api: {
         keySecret: process.env.API_KEY_SECRET,
-        disabled: parseJsonEnv(process.env.API_DISABLED, ['token', 'meetings']),
     },
 
     // ==========================================
-    // Ngrok
-    // ==========================================
-    ngrok: {
-        enabled: getEnvBoolean(process.env.NGROK_ENABLED),
-        authToken: process.env.NGROK_AUTH_TOKEN,
-    },
-
-    // ==========================================
-    // WebRTC ICE Servers
+    // WebRTC ICE Servers (STUN/TURN, relayed to clients on join)
     // ==========================================
     webrtc: {
         stun: {
@@ -171,455 +128,10 @@ module.exports = {
     },
 
     // ==========================================
-    // IP Lookup
-    // ==========================================
-    ipLookup: {
-        enabled: getEnvBoolean(process.env.IP_LOOKUP_ENABLED),
-    },
-
-    // ==========================================
-    // Survey
-    // ==========================================
-    survey: {
-        enabled: getEnvBoolean(process.env.SURVEY_ENABLED),
-        url: process.env.SURVEY_URL || 'https://www.questionpro.com/t/AUs7VZq00L',
-    },
-
-    // ==========================================
-    // Redirect
-    // ==========================================
-    redirect: {
-        enabled: getEnvBoolean(process.env.REDIRECT_ENABLED),
-        url: process.env.REDIRECT_URL || '/newcall',
-    },
-
-    // ==========================================
-    // Sentry
-    // ==========================================
-    sentry: {
-        enabled: getEnvBoolean(process.env.SENTRY_ENABLED),
-        dsn: process.env.SENTRY_DSN,
-        tracesSampleRate: parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE || '0.0'),
-        logLevels: process.env.SENTRY_LOG_LEVELS
-            ? process.env.SENTRY_LOG_LEVELS.split(',').map((level) => level.trim())
-            : ['error'],
-    },
-
-    // ==========================================
-    // Slack
-    // ==========================================
-    slack: {
-        enabled: getEnvBoolean(process.env.SLACK_ENABLED),
-        signingSecret: process.env.SLACK_SIGNING_SECRET,
-    },
-
-    // ==========================================
-    // ChatGPT / OpenAI
-    // ==========================================
-    chatGPT: {
-        enabled: getEnvBoolean(process.env.CHATGPT_ENABLED),
-        basePath: process.env.CHATGPT_BASE_PATH,
-        apiKey: process.env.CHATGPT_APIKEY,
-        model: process.env.CHATGPT_MODEL,
-        max_tokens: parseInt(process.env.CHATGPT_MAX_TOKENS),
-        temperature: parseInt(process.env.CHATGPT_TEMPERATURE),
-    },
-
-    // ==========================================
-    // Whisper Speech-to-Text (server-side transcription)
-    // ==========================================
-    // Server-side audio transcription using an OpenAI-compatible Whisper
-    // endpoint. Works with the official OpenAI API or any self-hosted,
-    // OpenAI-compatible server (whisper.cpp server, faster-whisper, etc.).
-    //
-    // IMPORTANT: Whisper is a side-channel only. The browser records short
-    // audio segments from a SECONDARY copy of the local microphone stream and
-    // sends them here for transcription. It NEVER sits in the WebRTC media
-    // path: the RTCPeerConnection audio track is untouched and keeps the
-    // lowest possible latency. The resulting text is distributed to peers over
-    // the existing WebRTC DataChannel, not through this server.
-    //
-    // - enabled        : Enable/disable Whisper transcription [true/false] (default: false)
-    // - basePath       : OpenAI-compatible API endpoint (default: 'https://api.openai.com/v1/')
-    //                    For a self-hosted server use e.g. 'http://localhost:8000/v1/'
-    // - apiKey         : API secret key (ALWAYS store in .env, never sent to the browser).
-    //                    May be empty for self-hosted servers that don't require auth.
-    // - model          : Whisper model name (default: 'whisper-1')
-    // - language       : Optional ISO-639-1 language hint (e.g. 'en'). Empty = auto-detect.
-    // - segmentSeconds : Length of each recorded audio segment sent for transcription (default: 3)
-    // - maxAudioBytes  : Reject audio segments larger than this (default: 25MB)
-    whisper: {
-        enabled: getEnvBoolean(process.env.WHISPER_ENABLED),
-        basePath: process.env.WHISPER_BASE_PATH || 'https://api.openai.com/v1/',
-        apiKey: process.env.WHISPER_API_KEY || '',
-        model: process.env.WHISPER_MODEL || 'whisper-1',
-        language: process.env.WHISPER_LANGUAGE || '',
-        segmentSeconds: parseInt(process.env.WHISPER_SEGMENT_SECONDS) || 3,
-        maxAudioBytes: parseInt(process.env.WHISPER_MAX_AUDIO_BYTES) || 25 * 1024 * 1024,
-    },
-
-    // ==========================================
     // IP Whitelist
     // ==========================================
     ipWhitelist: {
         enabled: getEnvBoolean(process.env.IP_WHITELIST_ENABLED),
         allowed: parseJsonEnv(process.env.IP_WHITELIST_ALLOWED, []),
-    },
-
-    // ==========================================
-    // OIDC - OpenID Connect
-    // ==========================================
-    oidc: {
-        enabled: process.env.OIDC_ENABLED ? getEnvBoolean(process.env.OIDC_ENABLED) : false,
-        allowRoomCreationForAuthUsers: process.env.OIDC_ALLOW_ROOMS_CREATION_FOR_AUTH_USERS
-            ? getEnvBoolean(process.env.OIDC_ALLOW_ROOMS_CREATION_FOR_AUTH_USERS)
-            : false,
-        baseUrlDynamic: process.env.OIDC_BASE_URL_DYNAMIC ? getEnvBoolean(process.env.OIDC_BASE_URL_DYNAMIC) : false,
-        /*
-         * When `baseUrlDynamic` is true, the OIDC baseURL (and therefore the redirect_uri
-         * sent to the IdP) is derived from the incoming `Host` header. To prevent
-         * Host-header injection from redirecting authorization codes to an attacker,
-         * list every origin the server is allowed to serve here (full origin, no path).
-         * The static `config.baseURL` is always trusted and does not need to be repeated.
-         * Example: ['https://p2p.mirotalk.com', 'https://meet.example.com']
-         */
-        allowedDynamicBaseURLs: process.env.OIDC_ALLOWED_DYNAMIC_BASE_URLS
-            ? process.env.OIDC_ALLOWED_DYNAMIC_BASE_URLS.split(',')
-                  .map((u) => u.trim())
-                  .filter(Boolean)
-            : [],
-        config: {
-            issuerBaseURL: process.env.OIDC_ISSUER_BASE_URL,
-            clientID: process.env.OIDC_CLIENT_ID,
-            clientSecret: process.env.OIDC_CLIENT_SECRET,
-            baseURL: process.env.OIDC_BASE_URL,
-            secret: process.env.SESSION_SECRET,
-            authorizationParams: {
-                response_type: 'code',
-                scope: 'openid profile email',
-            },
-            authRequired: process.env.OIDC_AUTH_REQUIRED ? getEnvBoolean(process.env.OIDC_AUTH_REQUIRED) : false,
-            auth0Logout: process.env.OIDC_AUTH_LOGOUT ? getEnvBoolean(process.env.OIDC_AUTH_LOGOUT) : true,
-            routes: {
-                callback: '/auth/callback',
-                login: false,
-                logout: '/logout',
-            },
-        },
-    },
-
-    // ==========================================
-    // Mattermost
-    // ==========================================
-    mattermost: {
-        enabled: getEnvBoolean(process.env.MATTERMOST_ENABLED),
-        serverUrl: process.env.MATTERMOST_SERVER_URL,
-        username: process.env.MATTERMOST_USERNAME,
-        password: process.env.MATTERMOST_PASSWORD,
-        token: process.env.MATTERMOST_TOKEN,
-        roomTokenExpire: process.env.MATTERMOST_ROOM_TOKEN_EXPIRE,
-    },
-
-    // ==========================================
-    // Stats / Analytics
-    // ==========================================
-    stats: {
-        enabled: process.env.STATS_ENABLED ? getEnvBoolean(process.env.STATS_ENABLED) : true,
-        src: process.env.STATS_SCR || 'https://stats.mirotalk.com/script.js',
-        id: process.env.STATS_ID || 'c7615aa7-ceec-464a-baba-54cb605d7261',
-    },
-
-    // ==========================================
-    // Email
-    // ==========================================
-    email: {
-        alert: process.env.EMAIL_ALERT === 'true' || false,
-        host: process.env.EMAIL_HOST,
-        port: Number(process.env.EMAIL_PORT),
-        username: process.env.EMAIL_USERNAME,
-        password: process.env.EMAIL_PASSWORD,
-        from: process.env.EMAIL_FROM || process.env.EMAIL_USERNAME,
-        sendTo: process.env.EMAIL_SEND_TO,
-        https: process.env.HTTPS === 'true' || false,
-        serverPort: process.env.PORT || 3000,
-    },
-
-    // ==========================================
-    // Branding (UI customizations)
-    // ==========================================
-    brand: {
-        htmlInjection: true,
-        app: {
-            language: 'en', // https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes
-            translationMode: 'google', // In-room UI: auto (native file else Google) | native (human files only, no Google) | google (default, always Google)
-            name: 'MiroTalk',
-            title: '<h1>MiroTalk</h1>Free browser based Real-time video calls.<br />Simple, Secure, Fast.',
-            description:
-                'Start your next video call with a single click. No download, plug-in, or login is required. Just get straight to talking, messaging, and sharing your screen.',
-            joinDescription: 'Pick a room name.<br />How about this one?',
-            joinButtonLabel: 'JOIN ROOM',
-            customizeRoomButtonLabel: 'CUSTOMIZE ROOM',
-            joinLastLabel: 'Your recent room:',
-        },
-        og: {
-            type: 'app-webrtc',
-            siteName: 'MiroTalk',
-            title: 'MiroTalk P2P - Open Source WebRTC Video Calls & Meetings',
-            description:
-                'MiroTalk P2P is an open-source self-hosted WebRTC video calling and meeting platform. Create fast peer-to-peer video calls with screen sharing, chat, whiteboard and collaboration directly in the browser.',
-            image: 'https://p2p.mirotalk.com/images/preview.png',
-            url: 'https://p2p.mirotalk.com',
-        },
-        site: {
-            shortcutIcon: '../images/logo.svg',
-            appleTouchIcon: '../images/logo.svg',
-            landingTitle: 'MiroTalk P2P - Open Source WebRTC Video Calls & Meetings',
-            newCallTitle: 'MiroTalk a Free Secure Video Calls, Chat & Screen Sharing.',
-            newCallRoomTitle: 'Pick name. <br />Share URL. <br />Start conference.',
-            newCallRoomDescription:
-                "Each room has its disposable URL. Just pick a room name and share your custom URL. It's that easy.",
-            loginTitle: 'MiroTalk - Host Protected login required.',
-            loginHeading: 'Welcome back',
-            loginDescription: 'Enter your credentials to continue.',
-            loginButtonLabel: 'Login',
-            joinRoomTitle: 'Pick name.<br />Share URL.<br />Start conference.',
-            joinRoomButtonLabel: 'JOIN ROOM',
-            clientTitle: 'MiroTalk WebRTC Video call, Chat Room & Screen Sharing.',
-            privacyPolicyTitle: 'MiroTalk - privacy and policy.',
-            stunTurnTitle: 'Test Stun/Turn Servers.',
-            notFoundTitle: 'MiroTalk - 404 Page not found.',
-            waitingRoomTitle: 'MiroTalk - Waiting for host to start the meeting',
-            waitingRoomHeading: 'Waiting for host...',
-            waitingRoomDescription:
-                "The meeting hasn't started yet.<br />You'll join automatically when the host opens the room.",
-            waitingRoomStatus: 'Checking room status...',
-            waitingRoomReady: 'Room is ready! Joining...',
-            waitingRoomWaiting: 'Waiting for host to start the meeting...',
-            waitingRoomHostLink: 'Are you the host?',
-            waitingRoomLoginLink: 'Login here',
-            waitingRoomElapsedJust: 'Just started waiting',
-            waitingRoomElapsedMinutes: 'Waiting for {minutes}',
-            waitingRoomSongUrl: '../sounds/waiting-music.mp3',
-        },
-        html: {
-            topSponsors: true,
-            features: true,
-            teams: true, // please keep me always true ;)
-            tryEasier: true,
-            poweredBy: true,
-            sponsors: true,
-            pastSponsors: true,
-            advertisers: true,
-            supportUs: true,
-            footer: true,
-        },
-        about: {
-            imageUrl: '../images/mirotalk-logo.gif',
-            title: `WebRTC P2P v${packageJson.version}`,
-            html: `
-                <div class="about-content">
-                    <p class="about-description">
-                        Secure peer-to-peer video meetings directly in your browser.
-                    </p>
-                    <a
-                        class="about-primary-action"
-                        data-umami-event="About button"
-                        href="https://docs.mirotalk.com/sites/p2p"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                        <i class="fas fa-info-circle" aria-hidden="true"></i>
-                        <span>About</span>
-                    </a>
-                    <dl class="about-details">
-                        <div>
-                            <dt>Author</dt>
-                            <dd>
-                                <a
-                                    id="linkedin-button"
-                                    data-umami-event="Linkedin button"
-                                    href="https://www.linkedin.com/in/miroslav-pejic-976a07101/"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                >Miroslav Pejic</a>
-                            </dd>
-                        </div>
-                        <div>
-                            <dt>Email</dt>
-                            <dd>
-                                <a
-                                    id="email-button"
-                                    data-umami-event="Email button"
-                                    href="mailto:miroslav.pejic.85@gmail.com?subject=MiroTalk P2P info"
-                                >miroslav.pejic.85@gmail.com</a>
-                            </dd>
-                        </div>
-                    </dl>
-                    <footer class="about-footer">
-                        &copy; ${new Date().getFullYear()} MiroTalk P2P. All rights reserved.
-                    </footer>
-                </div>
-            `,
-        },
-        // https://docs.mirotalk.com/mirotalk-p2p/integration/#widgets-integration
-        widget: {
-            enabled: false,
-            roomId: 'support-room',
-            theme: 'dark',
-            widgetState: 'minimized',
-            widgetType: 'support',
-            supportWidget: {
-                position: 'top-right',
-                expertImages: [
-                    'https://photo.cloudron.pocketsolution.net/uploads/original/95/7d/a5f7f7a2c89a5fee7affda5f013c.jpeg',
-                ],
-                buttons: {
-                    audio: true,
-                    video: true,
-                    screen: true,
-                    chat: true,
-                    join: true,
-                },
-                checkOnlineStatus: false,
-                isOnline: true,
-                customMessages: {
-                    heading: 'Need Help?',
-                    subheading: 'Get instant support from our expert team!',
-                    connectText: 'connect in < 5 seconds',
-                    onlineText: 'We are online',
-                    offlineText: 'We are offline',
-                    poweredBy: 'Powered by MiroTalk',
-                },
-            },
-        },
-        //...
-    },
-    // ==========================================
-    // Themes
-    // ==========================================
-    /**
-     * Theme definitions — CSS custom properties for each theme.
-     * Admins can override individual themes or add new ones.
-     * The client merges these with built-in defaults, so you
-     * only need to specify the properties you want to change.
-     */
-    themes: {
-        /* Example: override dark theme background
-        dark: {
-            '--body-bg': 'radial-gradient(#1a1a2e, #0a0a14)',
-            '--msger-bg': 'radial-gradient(#1a1a2e, #0a0a14)',
-        },
-        */
-        /* Example: add a custom theme
-        ocean: {
-            '--body-bg': 'radial-gradient(#0d2137, #061220)',
-            '--msger-bg': 'radial-gradient(#0d2137, #061220)',
-            '--msger-private-bg': 'radial-gradient(#0d2137, #061220)',
-            '--wb-bg': 'radial-gradient(#0d2137, #061220)',
-            '--elem-border-color': '1px solid rgba(56, 189, 248, 0.15)',
-            '--navbar-bg': 'rgba(6, 18, 32, 0.88)',
-            '--select-bg': '#0f2a45',
-            '--tab-btn-active': '#163d5e',
-            '--box-shadow': '0px 4px 12px 0px rgba(0, 0, 0, 0.5)',
-            '--left-msg-bg': '#112d4a',
-            '--right-msg-bg': '#0a1f35',
-            '--private-msg-bg': '#0e2540',
-            '--btn-bar-bg-color': '#E0F2FE',
-            '--btn-bar-color': '#061220',
-            '--btns-bg-color': 'rgba(6, 18, 32, 0.75)',
-            '--dd-color': '#38BDF8',
-        },
-        */
-    },
-    /**
-     * Configuration for controlling the visibility of buttons in the MiroTalk P2P client.
-     * Set properties to true to show the corresponding buttons, or false to hide them.
-     * captionBtn, showSwapCameraBtn, showScreenShareBtn, showFullScreenBtn, showVideoPipBtn, showDocumentPipBtn -> (auto-detected).
-     */
-    buttons: {
-        main: {
-            showAudioBtn: true,
-            showVideoBtn: true,
-            showScreenBtn: true, // autodetected
-            showMyHandBtn: true,
-            showChatRoomBtn: true,
-            showParticipantsBtn: true,
-            showMySettingsBtn: true,
-            showExtraBtn: true,
-            showShareQr: true,
-            showShareRoomBtn: true, // For guests
-            showHideMeBtn: true,
-            showRecordStreamBtn: true,
-            showFullScreenBtn: true,
-            showRoomEmojiPickerBtn: true,
-            showCaptionRoomBtn: true,
-            showWhiteboardBtn: true,
-            showSnapshotRoomBtn: true,
-            showFileShareBtn: true,
-            showDocumentPipBtn: true,
-            showAboutBtn: true, // Please keep me always true, Thank you!
-        },
-        chat: {
-            showTogglePinBtn: true,
-            showMaxBtn: true,
-            showSaveMessageBtn: true,
-            showMarkDownBtn: true,
-            showChatGPTBtn: getEnvBoolean(process.env.CHATGPT_ENABLED, true),
-            showFileShareBtn: true,
-            showShareVideoAudioBtn: true,
-            showParticipantsBtn: true,
-        },
-        caption: {
-            showTogglePinBtn: true,
-            showMaxBtn: true,
-        },
-        settings: {
-            showActiveRoomsBtn: true,
-            showMicOptionsBtn: true,
-            showTabRoomPeerName: true,
-            showTabRoomParticipants: true,
-            showTabRoomSecurity: true,
-            showTabEmailInvitation: true,
-            showCaptionEveryoneBtn: true,
-            showMuteEveryoneBtn: true,
-            showHideEveryoneBtn: true,
-            showEjectEveryoneBtn: true,
-            showLockRoomBtn: true,
-            showUnlockRoomBtn: true,
-            showJoinLockBtn: true,
-            showShortcutsBtn: true,
-            customNoiseSuppression: getEnvBoolean(process.env.CUSTOM_NOISE_SUPPRESSION_ENABLED, true),
-        },
-        remote: {
-            showAudioVolume: true,
-            audioBtnClickAllowed: true,
-            videoBtnClickAllowed: true,
-            showVideoPipBtn: true,
-            showKickOutBtn: true,
-            showSnapShotBtn: true,
-            showFileShareBtn: true,
-            showShareVideoAudioBtn: true,
-            showGeoLocationBtn: true,
-            showPrivateMessageBtn: true,
-            showZoomInOutBtn: false,
-            showVideoFocusBtn: true,
-        },
-        local: {
-            showVideoPipBtn: true,
-            showSnapShotBtn: true,
-            showVideoCircleBtn: true,
-            showZoomInOutBtn: false,
-            showVideoFocusBtn: true,
-        },
-        whiteboard: {
-            whiteboardLockBtn: false,
-        },
-    },
-    // ==========================================
-    // Webhook
-    // ==========================================
-    webhook: {
-        enabled: false, // Enable webhook functionality
-        url: 'http://localhost:8888/webhook-endpoint', // Webhook server URL
     },
 };
