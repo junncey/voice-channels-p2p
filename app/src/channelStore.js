@@ -185,7 +185,17 @@ class ChannelStore {
         const data = JSON.stringify({ version: 1, channels: this.channels }, null, 4);
         const tmp = `${this.filePath}.tmp`;
         fs.writeFileSync(tmp, data, 'utf8');
-        fs.renameSync(tmp, this.filePath);
+        try {
+            fs.renameSync(tmp, this.filePath);
+        } catch (err) {
+            // Docker often bind-mounts channels.json as a *single file*. rename() cannot
+            // replace a mount point (EBUSY / EXDEV), so fall back to copying the payload
+            // over it — overwriting the mounted file's content is allowed, only swapping
+            // its inode is not.
+            if (!['EBUSY', 'EXDEV', 'EPERM'].includes(err.code)) throw err;
+            fs.copyFileSync(tmp, this.filePath);
+            fs.unlinkSync(tmp);
+        }
     }
 
     isValidId(id) {
