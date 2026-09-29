@@ -3,9 +3,9 @@
  *
  * Protocol (all fields short, chunks are plain base64 text so no binary
  * DataChannel support is required):
- *   { type:'img-start', id, from, mime, size, total }
+ *   { type:'img-start', id, from, mime, size, total, batch? }
  *   { type:'img-chunk', id, i, d }        (i = 0..total-1)
- *   { type:'img-end',   id, from }
+ *   { type:'img-end',   id, from, batch? }
  *
  * The sending side compresses first: tiny originals and GIFs pass through
  * untouched (animation/transparency preserved), everything else is re-encoded
@@ -76,17 +76,19 @@ async function compressToJpeg(dataUrl) {
 
 /**
  * Split a data URL into protocol frames and push them through `send`
- * (typically Mesh.sendChat, one broadcast per frame).
+ * (typically Mesh.sendChat, one broadcast per frame). An optional `batch`
+ * id ties the transfer to a merged text+images bubble on the receiver.
  */
-export function sendImageData({ send, from, mime, dataUrl }) {
+export function sendImageData({ send, from, mime, dataUrl, batch = '' }) {
     const id = crypto.randomUUID();
     const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
     const total = Math.ceil(base64.length / CHUNK_CHARS);
-    send({ type: 'img-start', id, from, mime, size: base64.length, total });
+    const tag = typeof batch === 'string' && batch.length <= 64 ? batch : '';
+    send({ type: 'img-start', id, from, mime, size: base64.length, total, batch: tag });
     for (let i = 0; i < total; i++) {
         send({ type: 'img-chunk', id, i, d: base64.substr(i * CHUNK_CHARS, CHUNK_CHARS) });
     }
-    send({ type: 'img-end', id, from });
+    send({ type: 'img-end', id, from, batch: tag });
 }
 
 /**
@@ -107,7 +109,7 @@ export function createImageReceiver({ onDone, onFail }) {
         if (!entry) return;
         clearTimeout(entry.timer);
         incoming.delete(id);
-        if (onFail) onFail(reason);
+        if (onFail) onFail(reason, entry.batch);
     }
 
     return function handleImageFrame(msg) {
@@ -124,6 +126,7 @@ export function createImageReceiver({ onDone, onFail }) {
                 mime,
                 size,
                 total,
+                batch: typeof msg.batch === 'string' && msg.batch.length <= 64 ? msg.batch : '',
                 parts: new Array(total),
                 got: 0,
                 timer: setTimeout(() => fail(id, 'timeout'), 20000),
@@ -151,7 +154,7 @@ export function createImageReceiver({ onDone, onFail }) {
             const dataUrl = `data:${entry.mime};base64,${entry.parts.join('')}`;
             clearTimeout(entry.timer);
             incoming.delete(msg.id);
-            if (DATA_URL_RE.test(dataUrl)) onDone({ from: entry.from, dataUrl });
+            if (DATA_URL_RE.test(dataUrl)) onDone({ from: entry.from, dataUrl, batch: entry.batch });
             else if (onFail) onFail('bad-data');
         }
     };

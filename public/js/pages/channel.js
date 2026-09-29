@@ -20,7 +20,11 @@ const NICK_KEY = 'vc_nick';
 const HOST_TOKEN_PREFIX = 'vc_host_token_';
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
 const PEER_VOLUMES_KEY = 'vc_peer_volumes';
+const AVATAR_KEY = 'vc_avatar';
+const AVATAR_MAX_CHARS = 96 * 1024; // broadcast/storage cap for the avatar data URL
 const PTT_KEY_CODE = 'KeyV';
+
+const AVATAR_DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
 const MIC_ON_SVG =
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
@@ -119,16 +123,23 @@ function clearHostToken() {
 /** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
 const members = new Map();
 const audioEls = new Map(); // peerId -> HTMLAudioElement (fallback playback path)
+/** display name -> custom avatar data URL (validated) */
+const avatars = new Map();
+let selfAvatar = safeAvatarUrl(localStorage.getItem(AVATAR_KEY));
 let micDevices = [];
 let spkDevices = [];
 let micDropdown = null;
 let spkDropdown = null;
 
 const imageReceiver = createImageReceiver({
-    onDone: ({ from, dataUrl }) => {
-        chat.addImage({ name: from || '?', src: dataUrl, alt: t('chat.image') });
+    onDone: ({ from, dataUrl, batch }) => {
+        if (batch) chat.addBatchImage(batch, dataUrl, t('chat.image'));
+        else chat.addImage({ name: from || '?', src: dataUrl, alt: t('chat.image') });
     },
-    onFail: () => chat.add({ text: t('chat.imageBroken'), system: true }),
+    onFail: (reason, batch) => {
+        if (batch) chat.failBatchImage(batch);
+        else chat.add({ text: t('chat.imageBroken'), system: true });
+    },
 });
 
 // ---------------------------------------------------------------------------
@@ -144,7 +155,14 @@ async function boot() {
     }
 
     await initI18n();
-    chat = initChat($('#chatMessages'), { emptyText: t('chat.empty'), downloadText: t('chat.saveImage') });
+    chat = initChat($('#chatMessages'), {
+        emptyText: t('chat.empty'),
+        downloadText: t('chat.saveImage'),
+        yesterdayText: t('chat.yesterday'),
+        avatarFor: (name) => avatars.get(name) || '',
+        imagesProgress: (got, total) => t('chat.imagesProgress', { got, total }),
+        failText: t('chat.imageBroken'),
+    });
     bindUi();
     bindPttKeys();
 
@@ -307,6 +325,9 @@ function registerSocketHandlers() {
             updateHeaderActions();
             syncMembers(cfg.peers || {});
             chat.add({ text: t('chat.joined', { name: selfName }), system: true, self: true });
+            // tell everyone in the room which avatar we carry (peers list only
+            // flows joiner <- room, this is the joiner -> room direction)
+            if (selfAvatar) socket.emit('peerAvatar', { room_id: channelId, avatar: selfAvatar });
         } else {
             isPresenter = !!cfg.is_presenter;
             joinLockOn = !!cfg.join_locked;
@@ -356,6 +377,13 @@ function registerSocketHandlers() {
                 savePeerVolume(peer_name, peerVolumes[old]);
             }
             savePeerVolume(old, 1); // drop the stale key
+            // avatar lookup is keyed by name too — move it along
+            const avatar = avatars.get(old);
+            if (avatar) {
+                avatars.set(peer_name, avatar);
+                avatars.delete(old);
+            }
+            chat.renamePeer(old, peer_name);
             member.peer_name = peer_name;
             if (peerVolumes[peer_name] !== undefined) member.volume = peerVolumes[peer_name];
         } else if (member) {
@@ -365,6 +393,8 @@ function registerSocketHandlers() {
             // the host renamed ME — accept it and persist for the next visit
             selfName = peer_name;
             localStorage.setItem(NICK_KEY, peer_name);
+            if (selfAvatar) avatars.set(selfName, selfAvatar);
+            chat.setAvatar(selfName, selfAvatar);
             $('#nickInput').value = peer_name;
             toast(t('channel.renamedYou', { name: peer_name }), 'ok');
         } else if (joined && member && (peer_name_old || old)) {
@@ -372,6 +402,21 @@ function registerSocketHandlers() {
                 text: t('chat.renamed', { old: peer_name_old || old, name: peer_name }),
                 system: true,
             });
+        }
+        renderMembers();
+    });
+
+    socket.on('peerAvatar', ({ peer_id, peer_name, avatar }) => {
+        const url =
+            typeof avatar === 'string' && avatar.length <= AVATAR_MAX_CHARS && AVATAR_DATA_URL_RE.test(avatar)
+                ? avatar
+                : '';
+        const member = members.get(peerIdSafe(peer_id));
+        if (member) member.avatar = url || undefined;
+        if (peer_name) {
+            if (url) avatars.set(peer_name, url);
+            else avatars.delete(peer_name);
+            chat.setAvatar(peer_name, url);
         }
         renderMembers();
     });
@@ -463,7 +508,14 @@ function meshHandlers() {
             if (!data || typeof data !== 'object') return;
             if (data.type === 'chat') {
                 const name = members.get(peerId)?.peer_name || String(data.from || '').slice(0, 24) || '?';
-                chat.add({ name, text: String(data.msg || '').slice(0, 500) });
+                const batch = typeof data.batch === 'string' && data.batch.length <= 64 ? data.batch : '';
+                const imgs = Number(data.imgs);
+                if (batch && Number.isInteger(imgs) && imgs > 0 && imgs <= 9) {
+                    // one send of text + N images renders as ONE merged bubble
+                    chat.openBatch({ batch, name, text: String(data.msg || '').slice(0, 500), count: imgs });
+                } else {
+                    chat.add({ name, text: String(data.msg || '').slice(0, 500) });
+                }
                 return;
             }
             if (data.type === 'img-start' || data.type === 'img-chunk' || data.type === 'img-end') {
@@ -488,11 +540,19 @@ function syncMembers(peersMap) {
         if (peerId === selfId) continue;
         const existing = members.get(peerId);
         const name = info.peer_name || existing?.peer_name || '?';
+        const avatar =
+            typeof info.peer_avatar === 'string' &&
+            info.peer_avatar.length <= AVATAR_MAX_CHARS &&
+            AVATAR_DATA_URL_RE.test(info.peer_avatar)
+                ? info.peer_avatar
+                : existing?.avatar;
+        if (avatar) avatars.set(name, avatar);
         members.set(peerId, {
             peer_name: name,
             peer_presenter: !!info.peer_presenter,
             peer_audio_status: info.peer_audio_status === true,
             joined_at: info.joined_at || existing?.joined_at || Date.now(),
+            avatar,
             // remembered per-user volume; an in-session adjustment wins over the stored one
             volume: existing?.volume ?? (name !== '?' ? peerVolumes[name] ?? 1 : 1),
         });
@@ -516,8 +576,10 @@ function ensureSelfMember() {
         peer_presenter: isPresenter,
         peer_audio_status: onAir(),
         joined_at: 0, // self always first
+        avatar: selfAvatar || undefined,
         self: true,
     });
+    if (selfAvatar) avatars.set(selfName, selfAvatar);
 }
 
 function dropPeer(peerId, { silent = false } = {}) {
@@ -532,6 +594,19 @@ function dropPeer(peerId, { silent = false } = {}) {
         audioEls.delete(peerId);
     }
     if (!silent) renderMembers();
+}
+
+function memberAvatarNode(info) {
+    if (info.avatar) {
+        const img = el('img', { class: 'member-avatar img', alt: '' });
+        img.src = info.avatar; // validated data URL
+        return img;
+    }
+    return el(
+        'div',
+        { class: 'member-avatar', style: { background: avatarColor(info.peer_name) } },
+        (info.peer_name || '?').trim().charAt(0).toUpperCase() || '?'
+    );
 }
 
 function micIconNode(on) {
@@ -583,11 +658,7 @@ function renderMembers() {
         ...sorted.map(([peerId, info]) => {
             const node = el('li', { class: 'member' + (info.self ? ' self-member' : ''), dataset: { id: peerId } });
             node.append(
-                el(
-                    'div',
-                    { class: 'member-avatar', style: { background: avatarColor(info.peer_name) } },
-                    (info.peer_name || '?').trim().charAt(0).toUpperCase() || '?'
-                ),
+                memberAvatarNode(info),
                 el(
                     'div',
                     { class: 'member-info' },
@@ -1005,6 +1076,7 @@ function bindSettingsUi() {
     $('#settingsModal').addEventListener('click', (event) => {
         if (event.target === $('#settingsModal')) closeSettings();
     });
+    bindAvatarUi();
 
     for (const [id, key] of [
         ['nsToggle', 'noiseSuppression'],
@@ -1046,6 +1118,7 @@ function bindSettingsUi() {
 }
 
 function openSettings() {
+    updateAvatarPreview();
     $('#nsToggle').checked = settings.noiseSuppression;
     $('#ecToggle').checked = settings.echoCancellation;
     $('#agcToggle').checked = settings.autoGainControl;
@@ -1228,27 +1301,141 @@ async function onChatSubmit(event) {
     input.value = '';
     clearPendingImages(); // the tray is emptied up-front; failures toast per image
 
-    if (text) {
+    if (!images.length) {
         mesh.sendChat({ type: 'chat', from: selfName, msg: text });
         chat.add({ name: selfName, text, self: true });
+        return;
     }
+
+    // text + images go out as ONE batch = one merged bubble on every receiver
+    const payloads = [];
     for (const item of images) {
-        let payload;
         try {
-            payload = await fileToImageMessage(item.file);
+            payloads.push(await fileToImageMessage(item.file));
         } catch (err) {
             const key = err?.message === 'too-large' ? 'chat.imageTooLarge' : 'chat.imageUnsupported';
             toast(t(key), 'warn');
-            continue;
         }
+    }
+    if (!payloads.length) {
+        if (text) {
+            mesh.sendChat({ type: 'chat', from: selfName, msg: text });
+            chat.add({ name: selfName, text, self: true });
+        }
+        return;
+    }
+
+    const batch = crypto.randomUUID();
+    mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length });
+    chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true });
+    for (const payload of payloads) {
         sendImageData({
             send: (frame) => mesh.sendChat(frame),
             from: selfName,
             mime: payload.mime,
             dataUrl: payload.dataUrl,
+            batch,
         });
-        chat.addImage({ name: selfName, self: true, src: payload.dataUrl, alt: t('chat.image') });
+        chat.addBatchImage(batch, payload.dataUrl, t('chat.image'));
     }
+}
+
+// ---------------------------------------------------------------------------
+// custom avatar (settings modal)
+// ---------------------------------------------------------------------------
+
+function safeAvatarUrl(value) {
+    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && AVATAR_DATA_URL_RE.test(value)
+        ? value
+        : '';
+}
+
+function bindAvatarUi() {
+    $('#avatarUploadBtn').addEventListener('click', () => $('#avatarFileInput').click());
+    $('#avatarResetBtn').addEventListener('click', () => applySelfAvatar(''));
+    $('#avatarFileInput').addEventListener('change', async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = ''; // allow re-picking the same file
+        if (!file) return;
+        try {
+            applySelfAvatar(await processAvatarFile(file));
+        } catch {
+            toast(t('chat.imageUnsupported'), 'warn');
+        }
+    });
+}
+
+function updateAvatarPreview() {
+    $('#avatarPreview').replaceChildren(memberAvatarNode({ peer_name: selfName, avatar: selfAvatar }));
+}
+
+function applySelfAvatar(dataUrl) {
+    selfAvatar = safeAvatarUrl(dataUrl);
+    if (selfAvatar) localStorage.setItem(AVATAR_KEY, selfAvatar);
+    else localStorage.removeItem(AVATAR_KEY);
+    if (selfAvatar) avatars.set(selfName, selfAvatar);
+    else avatars.delete(selfName);
+    chat.setAvatar(selfName, selfAvatar);
+    const me = members.get(socket.id);
+    if (me) {
+        me.avatar = selfAvatar || undefined;
+        renderMembers();
+    }
+    updateAvatarPreview();
+    if (joined) socket.emit('peerAvatar', { room_id: channelId, avatar: selfAvatar || null });
+}
+
+/**
+ * Center-crop any image to a small square JPEG data URL that always fits the
+ * avatar broadcast budget (shrinks size/quality until it does).
+ */
+async function processAvatarFile(file) {
+    if (!file || !file.type.startsWith('image/') || file.type === 'image/gif') {
+        throw new Error('not-image');
+    }
+    if (file.size > 8 * 1024 * 1024) throw new Error('too-large');
+    const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('read-failed'));
+        reader.readAsDataURL(file);
+    });
+    const img = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('not-image'));
+        image.src = dataUrl;
+    });
+
+    const crop = (size) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        ctx.drawImage(
+            img,
+            (img.naturalWidth - side) / 2,
+            (img.naturalHeight - side) / 2,
+            side,
+            side,
+            0,
+            0,
+            size,
+            size
+        );
+        return canvas;
+    };
+
+    let out = '';
+    for (const size of [96, 72, 56]) {
+        const canvas = crop(size);
+        for (const quality of [0.85, 0.7, 0.5]) {
+            out = canvas.toDataURL('image/jpeg', quality);
+            if (out.length <= 64 * 1024) return out;
+        }
+    }
+    return out; // 56px q0.5 always lands well under the 96KB broadcast cap
 }
 
 function bindImageUi() {

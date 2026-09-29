@@ -74,18 +74,20 @@
                     <h2 data-i18n="channel.chatPanel">文字聊天</h2>
                 </div>
                 <div id="chatMessages" class="chat-messages"></div>
-                <div id="chatAttachments" class="chat-attachments hidden"></div>
-                <form id="chatForm" class="chat-form" autocomplete="off">
-                    <button type="button" id="imageBtn" class="icon-btn chat-image-btn" data-i18n-title="chat.sendImage" aria-label="send image">
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="3" y="3" width="18" height="18" rx="2" />
-                            <circle cx="9" cy="9" r="2" />
-                            <path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21" />
-                        </svg>
-                    </button>
-                    <input id="chatInput" class="input" data-i18n-ph="channel.chatPlaceholder" maxlength="500" />
-                    <button type="submit" class="btn primary" data-i18n="channel.send">发送</button>
-                </form>
+                <div id="chatComposer" class="chat-composer">
+                    <div id="chatAttachments" class="chat-attachments hidden"></div>
+                    <form id="chatForm" class="chat-form" autocomplete="off">
+                        <input id="chatInput" class="input" data-i18n-ph="channel.chatPlaceholder" maxlength="500" />
+                        <button type="button" id="imageBtn" class="icon-btn chat-image-btn" data-i18n-title="chat.sendImage" aria-label="send image">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="3" width="18" height="18" rx="2" />
+                                <circle cx="9" cy="9" r="2" />
+                                <path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21" />
+                            </svg>
+                        </button>
+                        <button type="submit" class="btn primary" data-i18n="channel.send">发送</button>
+                    </form>
+                </div>
             </section>
         </main>
 
@@ -147,11 +149,23 @@
             </div>
         </div>
 
-        <!-- 音频设置弹窗 -->
+        <!-- 设置弹窗 -->
         <div id="settingsModal" class="overlay hidden">
             <div class="modal settings-modal">
-                <h2 data-i18n="settings.title">音频设置</h2>
+                <h2 data-i18n="settings.title">设置</h2>
                 <div class="settings-body">
+                    <section class="settings-section">
+                        <h3 data-i18n="settings.profile">个人资料</h3>
+                        <div class="avatar-row">
+                            <div id="avatarPreview" class="avatar-preview"></div>
+                            <div class="avatar-actions">
+                                <button type="button" id="avatarUploadBtn" class="btn ghost sm" data-i18n="settings.avatarChange">更换头像</button>
+                                <button type="button" id="avatarResetBtn" class="btn ghost sm" data-i18n="settings.avatarReset">恢复默认</button>
+                            </div>
+                        </div>
+                        <p class="settings-hint" data-i18n="settings.avatarHint">图片会自动裁剪为方形，仅保存在本浏览器，并同步展示给频道成员</p>
+                        <input type="file" id="avatarFileInput" accept="image/*" class="hidden" />
+                    </section>
                     <section class="settings-section">
                         <h3 data-i18n="settings.mic">麦克风</h3>
                         <div class="field">

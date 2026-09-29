@@ -183,6 +183,7 @@ function getRoomPeers(roomId) {
             peer_presenter: !!info.peer_presenter,
             peer_audio: !!info.peer_audio,
             peer_audio_status: !!info.peer_audio_status,
+            peer_avatar: info.peer_avatar || null,
             joined_at: info.joined_at,
         };
     }
@@ -219,8 +220,9 @@ app.use(
             scriptSrc: ["'self'"],
             // 404.html carries an inline <style> block; inline styles cannot execute script
             styleSrc: ["'self'", "'unsafe-inline'"],
-            // chat images travel as data: URLs; audio playback may use blob:
-            imgSrc: ["'self'", 'data:'],
+            // chat images travel as data: URLs; audio playback and the
+            // composer's pending-image previews (object URLs) use blob:
+            imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:', 'data:'],
             connectSrc: ["'self'"], // socket.io websocket (same-origin) is covered by 'self'
             fontSrc: ["'self'"],
@@ -788,6 +790,43 @@ io.sockets.on('connect', async (socket) => {
         // and the chat notice must follow too (sendToRoom would skip the sender)
         for (const sid in channels[room_id]) {
             await channels[room_id][sid].emit('peerName', { peer_id, peer_name: name, peer_name_old: old });
+        }
+    });
+
+    /**
+     * Set/clear a peer's custom avatar. The data URL never goes through
+     * checkXSS (DOMPurify strips data: URIs) — it is validated against a
+     * strict whitelist + size cap instead, exactly like the DataChannel
+     * image protocol, and is only ever rendered as an <img src>.
+     */
+    socket.on('peerAvatar', async (cfg) => {
+        if (!Validate.isValidData(cfg)) return;
+
+        const { room_id, avatar } = cfg;
+        if (!peers[room_id]?.[socket.id]) return;
+
+        const valid =
+            typeof avatar === 'string' &&
+            avatar.length > 0 &&
+            avatar.length <= 96 * 1024 &&
+            /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(avatar);
+        if (valid) {
+            peers[room_id][socket.id]['peer_avatar'] = avatar;
+        } else {
+            delete peers[room_id][socket.id]['peer_avatar'];
+        }
+
+        const peer_name = peers[room_id][socket.id]['peer_name'];
+        log.debug('[' + socket.id + '] peer avatar ' + (valid ? 'set' : 'cleared'), { room_id });
+
+        // everyone INCLUDING the sender — the sender's own DOM is already
+        // up to date, the echo just keeps the room in lockstep
+        for (const sid in channels[room_id]) {
+            await channels[room_id][sid].emit('peerAvatar', {
+                peer_id: socket.id,
+                peer_name,
+                avatar: valid ? avatar : null,
+            });
         }
     });
 
