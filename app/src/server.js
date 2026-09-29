@@ -103,7 +103,13 @@ const channelStore = new ChannelStore({
     filePath: path.join(__dirname, 'channels.json'),
     autoInit: channelsCfg.autoInit !== false,
     defaultModerator: channelsCfg.defaultModerator,
+    // env seeds the first-boot default; afterwards the admin toggle persists
+    defaultSettings: { tempRooms: channelsCfg.tempRooms !== false },
 });
+
+// Runtime source of truth for the temporary-rooms feature (admin-managed,
+// persisted in channels.json — the env value only seeded the initial default)
+const tempRoomsEnabled = () => channelStore.settings.tempRooms !== false;
 
 // The admin console stays completely DISABLED (404 on /admin and every
 // /api/admin/* route) until BOTH a password and a dedicated JWT secret are
@@ -275,7 +281,7 @@ app.get('/', (req, res) => {
 app.get('/c/:channelId', (req, res) => {
     const { channelId } = req.params;
     const known = channelStore.exists(channelId) || channelStore.isTemp(channelId);
-    if (!known && !(channelsCfg.tempRooms && channelStore.isValidId(channelId))) {
+    if (!known && !(tempRoomsEnabled() && channelStore.isValidId(channelId))) {
         return res.status(404).sendFile(views.notFound);
     }
     res.sendFile(views.channel);
@@ -309,6 +315,7 @@ app.get('/:roomId', (req, res) => {
 // appended with a `temporary` flag so visitors can discover and join them
 app.get('/api/channels', (req, res) => {
     res.json({
+        settings: { tempRooms: tempRoomsEnabled() },
         channels: [
             ...channelStore.list({ includePrivate: false, onlineOf: (id) => getPeerCount(id) }),
             ...channelStore.listTemps({ onlineOf: (id) => getPeerCount(id) }),
@@ -325,7 +332,7 @@ app.get('/api/channels/:channelId', (req, res) => {
     }
     // unknown id: with temp rooms enabled, any valid id MAY become a room the
     // moment someone joins — serve a virtual preview instead of a 404
-    if (channelsCfg.tempRooms && channelStore.isValidId(id)) {
+    if (tempRoomsEnabled() && channelStore.isValidId(id)) {
         return res.json({
             id,
             name: id,
@@ -333,6 +340,7 @@ app.get('/api/channels/:channelId', (req, res) => {
             public: true,
             maxParticipants: 8,
             hosts: [],
+            hasPassword: false,
             temporary: true,
         });
     }
@@ -396,10 +404,43 @@ app.post('/api/admin/login', loginLimiter, (req, res) => {
     res.json({ token: signConsoleToken({ role: 'admin' }) });
 });
 
+/**
+ * Evict every peer from a channel (admin channel deletion). Each socket gets
+ * a kickOut with the deletion reason, then a hard disconnect — the normal
+ * disconnect cleanup tears the room structures down.
+ */
+function evictChannelPeers(channelId, reason) {
+    const room = channels[channelId];
+    if (!room) return 0;
+    let evicted = 0;
+    for (const sock of Object.values(room)) {
+        try {
+            sock.emit('kickOut', { reason });
+            sock.disconnect(true);
+            evicted++;
+        } catch (err) {
+            log.error('Evict peer failed', { channel: channelId, error: err.message });
+        }
+    }
+    return evicted;
+}
+
 app.get('/api/admin/channels', requireAdmin, (req, res) => {
     res.json({
         channels: channelStore.list({ includePrivate: true, onlineOf: (id) => getPeerCount(id) }),
+        temps: channelStore.listTemps({ onlineOf: (id) => getPeerCount(id) }),
+        settings: channelStore.getSettings(),
     });
+});
+
+app.get('/api/admin/settings', requireAdmin, (req, res) => {
+    res.json({ settings: channelStore.getSettings() });
+});
+
+app.put('/api/admin/settings', requireAdmin, (req, res) => {
+    const result = channelStore.updateSettings(checkXSS(req.body) || {});
+    if (!result.ok) return res.status(400).json({ error: result.errors.join('; ') });
+    res.json({ settings: result.settings });
 });
 
 app.post('/api/admin/channels', requireAdmin, (req, res) => {
@@ -417,8 +458,12 @@ app.put('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
 });
 
 app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
-    const result = channelStore.remove(req.params.channelId);
+    const id = req.params.channelId;
+    // temp rooms live outside the persistent registry but are deletable too
+    const result = channelStore.isTemp(id) ? channelStore.removeTemp(id) : channelStore.remove(id);
     if (!result.ok) return res.status(404).json({ error: result.errors[0] });
+    const evicted = evictChannelPeers(id, 'channelDeleted');
+    if (evicted) log.info('Channel deleted by admin, peers evicted', { channel: id, evicted });
     res.json({ success: true });
 });
 
@@ -539,7 +584,7 @@ io.sockets.on('connect', async (socket) => {
         // Channel must be registered — or, with temporary rooms enabled, any
         // valid id spawns an ephemeral in-memory room
         let channelDef = channelStore.get(channel);
-        if (!channelDef && channelsCfg.tempRooms) {
+        if (!channelDef && tempRoomsEnabled()) {
             channelDef = channelStore.getOrCreateTemp(channel);
         }
         if (!channelDef) {
@@ -559,6 +604,13 @@ io.sockets.on('connect', async (socket) => {
                 log.warn('[' + socket.id + '] invalid host token for channel', { channel });
                 return socket.emit('unauthorized');
             }
+        }
+
+        // Persistent channel password (set in the admin console). Hosts
+        // authenticate with their own credentials and always pass.
+        if (!is_presenter && channelDef.passwordHash && !channelStore.verifyChannelPassword(channel, channel_password)) {
+            log.debug('[' + socket.id + '] [Warning] channel password required/invalid', { channel });
+            return socket.emit('channelPasswordRequired');
         }
 
         // Capacity hard check (hosts may always join to manage their channel)

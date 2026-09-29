@@ -9,8 +9,10 @@ import { $, el, formatDate } from '/js/core/utils.js';
 const POLL_MS = 10000;
 
 let channels = [];
+let temps = [];
 let editingId = null; // null = creating
 let pendingDelete = null;
+let settingsSaving = false; // don't clobber the toggle from a poll mid-save
 
 boot();
 
@@ -48,6 +50,8 @@ function bindUi() {
     $('#editorForm').addEventListener('submit', onEditorSubmit);
     $('#addHostBtn').addEventListener('click', () => addHostRow('', ''));
 
+    $('#tempRoomsToggle').addEventListener('change', onTempRoomsToggle);
+
     $('#confirmCancel').addEventListener('click', () => {
         pendingDelete = null;
         $('#confirmModal').classList.add('hidden');
@@ -81,7 +85,9 @@ async function load() {
     try {
         const data = await api.adminChannels();
         channels = data.channels || [];
+        temps = data.temps || [];
         $('#loadError').textContent = '';
+        syncSettingsToggle(data.settings);
         renderTable();
     } catch (err) {
         if (err.status === 401) {
@@ -93,51 +99,91 @@ async function load() {
     }
 }
 
+/** Reflect server settings in the toggle — unless a save is in flight. */
+function syncSettingsToggle(settings) {
+    if (settingsSaving || !settings) return;
+    $('#tempRoomsToggle').checked = settings.tempRooms !== false;
+}
+
+async function onTempRoomsToggle() {
+    if (settingsSaving) return;
+    const toggle = $('#tempRoomsToggle');
+    const next = toggle.checked;
+    settingsSaving = true;
+    try {
+        const { settings } = await api.adminUpdateSettings({ tempRooms: next });
+        toggle.checked = settings.tempRooms !== false;
+        toast(t('admin.settingsSaved'), 'ok');
+        load();
+    } catch (err) {
+        toggle.checked = !next; // revert on failure
+        toast(t('admin.settingsError'), 'error');
+    } finally {
+        settingsSaving = false;
+    }
+}
+
 function renderTable() {
     const rows = $('#channelRows');
-    $('#adminEmpty').classList.toggle('hidden', channels.length > 0);
+    $('#adminEmpty').classList.toggle('hidden', channels.length + temps.length > 0);
 
+    // registered channels first, then live temporary rooms (deletable only)
     rows.replaceChildren(
-        ...channels.map((channel) =>
-            el(
-                'tr',
-                {},
-                el('td', { class: 'name-cell', text: channel.name || channel.id }),
-                el('td', { class: 'id-cell', text: channel.id }),
-                el(
-                    'td',
-                    {},
-                    el('span', {
-                        class: 'badge' + (channel.public ? ' on' : ''),
-                        text: channel.public ? t('admin.publicYes') : t('admin.publicNo'),
-                    })
-                ),
-                el(
-                    'td',
-                    { class: 'count-cell' + (channel.online ? '' : ' zero') },
-                    String(channel.online ?? 0)
-                ),
-                el(
-                    'td',
-                    { class: 'hosts-cell', title: (channel.hosts || []).join(', ') || '—' },
-                    (channel.hosts || []).join(', ') || '—'
-                ),
-                el('td', { class: 'updated-cell', text: formatDate(channel.updatedAt) }),
-                el(
-                    'td',
-                    { class: 'actions-cell' },
-                    el('button', {
-                        class: 'btn ghost sm',
-                        text: t('admin.edit'),
-                        onclick: () => openEditor(channel),
-                    }),
-                    el('button', {
-                        class: 'btn danger sm',
-                        text: t('admin.delete'),
-                        onclick: () => confirmDelete(channel),
-                    })
-                )
-            )
+        ...channels.map((channel) => channelRow(channel, false)),
+        ...temps.map((channel) => channelRow(channel, true))
+    );
+}
+
+function channelRow(channel, isTemp) {
+    return el(
+        'tr',
+        {},
+        el(
+            'td',
+            { class: 'name-cell' },
+            channel.name || channel.id,
+            channel.hasPassword ? el('span', { class: 'pw-flag', title: t('admin.hasPassword'), text: '🔒' }) : null
+        ),
+        el('td', { class: 'id-cell', text: channel.id }),
+        el(
+            'td',
+            {},
+            isTemp
+                ? el('span', { class: 'badge temp', text: t('admin.temporary') })
+                : el('span', {
+                      class: 'badge' + (channel.public ? ' on' : ''),
+                      text: channel.public ? t('admin.publicYes') : t('admin.publicNo'),
+                  })
+        ),
+        el(
+            'td',
+            { class: 'count-cell' + (channel.online ? '' : ' zero') },
+            String(channel.online ?? 0)
+        ),
+        el(
+            'td',
+            { class: 'hosts-cell', title: isTemp ? '—' : (channel.hosts || []).join(', ') || '—' },
+            isTemp ? '—' : (channel.hosts || []).join(', ') || '—'
+        ),
+        el('td', { class: 'updated-cell', text: formatDate(isTemp ? channel.createdAt : channel.updatedAt) }),
+        el(
+            'td',
+            { class: 'actions-cell' },
+            // temp rooms have no editable config — they can only be destroyed
+            ...(isTemp
+                ? []
+                : [
+                      el('button', {
+                          class: 'btn ghost sm',
+                          text: t('admin.edit'),
+                          onclick: () => openEditor(channel),
+                      }),
+                  ]),
+            el('button', {
+                class: 'btn danger sm',
+                text: t('admin.delete'),
+                onclick: () => confirmDelete(channel),
+            })
         )
     );
 }
@@ -161,6 +207,16 @@ function openEditor(channel) {
     $('#fDesc').value = channel ? channel.description || '' : '';
     $('#fMax').value = channel ? channel.maxParticipants || 8 : 8;
     $('#fPublic').checked = channel ? channel.public !== false : true;
+
+    // channel password: never echoed back — blank keeps the stored one, an
+    // explicit checkbox clears it (only offered when one is set)
+    $('#fPassword').value = '';
+    const hasPassword = !!channel?.hasPassword;
+    $('#pwHint').textContent = editingId && hasPassword
+        ? t('admin.field.passwordEditHint')
+        : t('admin.field.passwordCreateHint');
+    $('#fClearPwRow').classList.toggle('hidden', !(editingId && hasPassword));
+    $('#fClearPw').checked = false;
 
     const hostRows = $('#hostRows');
     hostRows.replaceChildren();
@@ -227,6 +283,12 @@ async function onEditorSubmit(event) {
     };
     if (!editingId) body.id = $('#fId').value.trim();
 
+    // channel password tri-state: filled = set/replace, '' = clear (checkbox),
+    // omitted = leave unchanged
+    const password = $('#fPassword').value;
+    if (password) body.password = password;
+    else if (editingId && $('#fClearPw').checked) body.password = '';
+
     try {
         if (editingId) {
             await api.adminUpdateChannel(editingId, body);
@@ -249,10 +311,9 @@ async function onEditorSubmit(event) {
 
 function confirmDelete(channel) {
     pendingDelete = channel;
-    $('#confirmText').textContent = t('admin.deleteConfirm', {
-        name: channel.name || channel.id,
-        n: channel.online ?? 0,
-    });
+    $('#confirmText').textContent = channel.temporary
+        ? t('admin.deleteTempConfirm', { name: channel.name || channel.id, n: channel.online ?? 0 })
+        : t('admin.deleteConfirm', { name: channel.name || channel.id, n: channel.online ?? 0 });
     $('#confirmModal').classList.remove('hidden');
 }
 

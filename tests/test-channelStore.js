@@ -210,8 +210,116 @@ describe('test-channelStore', () => {
         });
     });
 
+    describe('4. Channel join password', () => {
+        it('should set a password on create and never expose the hash', () => {
+            const store = newStore('chanpw');
+            store.create({ id: 'locked', name: 'c', password: 'open-sesame' }).ok.should.be.true();
+            store.create({ id: 'open', name: 'c' }).ok.should.be.true();
+
+            store.sanitize(store.get('locked')).hasPassword.should.be.true();
+            store.sanitize(store.get('open')).hasPassword.should.be.false();
+            // hash never leaks through the sanitized copy
+            JSON.stringify(store.sanitize(store.get('locked'))).should.not.containEql('scrypt$');
+
+            store.verifyChannelPassword('locked', 'open-sesame').should.be.true();
+            store.verifyChannelPassword('locked', 'wrong').should.be.false();
+            store.verifyChannelPassword('locked', '').should.be.false();
+            store.verifyChannelPassword('locked').should.be.false();
+            store.verifyChannelPassword('open', 'anything').should.be.false(); // no password set
+            store.verifyChannelPassword('missing', 'open-sesame').should.be.false();
+        });
+
+        it('should keep / replace / clear the password on update (tri-state)', () => {
+            const store = newStore('chanpw-upd');
+            store.create({ id: 'sec', name: 'c', password: 'first' });
+            // field omitted -> unchanged
+            store.update('sec', { name: 'renamed' }).ok.should.be.true();
+            store.verifyChannelPassword('sec', 'first').should.be.true();
+            // non-empty -> replaced
+            store.update('sec', { password: 'second' }).ok.should.be.true();
+            store.verifyChannelPassword('sec', 'first').should.be.false();
+            store.verifyChannelPassword('sec', 'second').should.be.true();
+            // '' -> explicitly cleared
+            const cleared = store.update('sec', { password: '' });
+            cleared.ok.should.be.true();
+            cleared.channel.hasPassword.should.be.false();
+            should.not.exist(store.get('sec').passwordHash);
+        });
+
+        it('should persist the hash across reloads and reject bad values', () => {
+            const filePath = tempFile('chanpw-file');
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            const store = new ChannelStore({ filePath, autoInit: true });
+            store.create({ id: 'keep', name: 'c', password: 'gate' });
+            const reloaded = new ChannelStore({ filePath, autoInit: false });
+            reloaded.verifyChannelPassword('keep', 'gate').should.be.true();
+
+            store.create({ id: 'bad1', name: 'n', password: 'x'.repeat(65) }).ok.should.be.false();
+            store.create({ id: 'bad2', name: 'n', password: '   ' }).ok.should.be.false();
+            store.create({ id: 'bad3', name: 'n', password: 123 }).ok.should.be.false();
+        });
+    });
+
+    describe('5. Admin settings (temp rooms toggle)', () => {
+        it('should default tempRooms to true and honor the env-seeded default', () => {
+            newStore('settings-default').getSettings().should.eql({ tempRooms: true });
+            newStore('settings-env', { defaultSettings: { tempRooms: false } })
+                .getSettings()
+                .should.eql({ tempRooms: false });
+        });
+
+        it('should toggle settings and persist them across reloads', () => {
+            const filePath = tempFile('settings-persist');
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            const store = new ChannelStore({ filePath, autoInit: true });
+
+            store.updateSettings({ tempRooms: false }).should.eql({ ok: true, settings: { tempRooms: false } });
+            const reloaded = new ChannelStore({ filePath, autoInit: false, defaultSettings: { tempRooms: true } });
+            // file wins over the env-seeded default once a setting is stored
+            reloaded.getSettings().should.eql({ tempRooms: false });
+
+            store.updateSettings({ tempRooms: true }).ok.should.be.true();
+            JSON.parse(fs.readFileSync(filePath, 'utf8')).settings.should.eql({ tempRooms: true });
+        });
+
+        it('should ignore non-boolean / unknown settings and malformed input', () => {
+            const store = newStore('settings-bad');
+            store.updateSettings({ tempRooms: 'yes' }).ok.should.be.false();
+            store.updateSettings({ somethingElse: true }).ok.should.be.true(); // unknown key = no-op
+            store.getSettings().should.eql({ tempRooms: true });
+            store.updateSettings(null).ok.should.be.false();
+        });
+
+        it('should force-remove a temp room regardless of occupancy', () => {
+            const store = newStore('settings-remove');
+            store.getOrCreateTemp('quick-room');
+            store.removeTempIfEmpty('quick-room', 3); // occupied: no-op
+            store.isTemp('quick-room').should.be.true();
+            store.removeTemp('quick-room').ok.should.be.true();
+            store.isTemp('quick-room').should.be.false();
+            store.removeTemp('quick-room').ok.should.be.false(); // already gone
+            store.removeTemp('never-existed').ok.should.be.false();
+        });
+    });
+
     after(() => {
-        for (const name of ['init', 'persist', 'corrupt', 'crud', 'hostauth', 'fallback', 'isHost']) {
+        for (const name of [
+            'init',
+            'persist',
+            'corrupt',
+            'crud',
+            'hostauth',
+            'fallback',
+            'isHost',
+            'chanpw',
+            'chanpw-upd',
+            'chanpw-file',
+            'settings-default',
+            'settings-env',
+            'settings-persist',
+            'settings-bad',
+            'settings-remove',
+        ]) {
             const filePath = tempFile(name);
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         }

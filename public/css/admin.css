@@ -221,3 +221,57 @@
     color: var(--text-2);
     margin-bottom: 18px;
 }
+
+/* channel password editor bits */
+
+.pw-flag {
+    margin-left: 6px;
+    font-size: 12px;
+    cursor: help;
+}
+
+.pw-clear-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--text-2);
+    cursor: pointer;
+    user-select: none;
+}
+
+.pw-clear-row input[type='checkbox'] {
+    accent-color: var(--danger);
+}
+
+/* temporary-rooms toggle (toolbar) */
+
+.temp-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-left: 10px;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m, 8px);
+    background: var(--bg-2);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-2);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.temp-toggle:hover {
+    border-color: var(--border-strong, var(--border));
+    color: var(--text-1);
+}
+
+.temp-toggle input[type='checkbox'] {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}

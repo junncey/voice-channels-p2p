@@ -18,6 +18,7 @@ import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
 const HOST_TOKEN_PREFIX = 'vc_host_token_';
+const CHANNEL_PW_PREFIX = 'vc_chan_pw_';
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
 const PEER_VOLUMES_KEY = 'vc_peer_volumes';
 const AVATAR_KEY = 'vc_avatar';
@@ -79,6 +80,9 @@ let localStream = null;
 let rawMicStream = null; // straight from getUserMedia, before the input gain
 let micProcessed = false; // outgoing track comes from the gain pipeline
 let hostToken = loadHostToken();
+// channel join password: pre-filled from storage for the auto-join path,
+// otherwise taken from the overlay input at join time
+let channelPassword = '';
 
 // ----- host login persistence -----
 // The host token lives in localStorage so the login survives browser restarts
@@ -118,6 +122,27 @@ function saveHostToken(token) {
 function clearHostToken() {
     localStorage.removeItem(hostTokenKey());
     sessionStorage.removeItem(hostTokenKey());
+}
+
+// ----- channel password persistence -----
+// Remembered per channel so returning visitors keep the auto-join flow; the
+// server still validates it on every join (a stale value just re-opens the
+// overlay). Hosts never need it (their JWT bypasses the channel password).
+
+function channelPwKey() {
+    return CHANNEL_PW_PREFIX + channelId;
+}
+
+function loadChannelPw() {
+    return localStorage.getItem(channelPwKey()) || '';
+}
+
+function saveChannelPw(password) {
+    localStorage.setItem(channelPwKey(), password);
+}
+
+function clearChannelPw() {
+    localStorage.removeItem(channelPwKey());
 }
 
 /** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
@@ -184,7 +209,17 @@ async function boot() {
     $('#nickInput').value = savedNick || randomNick(t('channel.guest'));
     if (hostToken) $('#hostReadyHint').classList.remove('hidden');
 
-    if (savedNick) {
+    // Password-protected channel: hosts pass with their own login, everyone
+    // else must type the password (or have it remembered from a previous join)
+    const pwFieldVisible = !!channelMeta.hasPassword && !hostToken;
+    $('#joinPasswordField').classList.toggle('hidden', !pwFieldVisible);
+    if (pwFieldVisible) {
+        channelPassword = loadChannelPw();
+        // pre-fill so the join() override below and the auto-join path agree
+        $('#channelPwInput').value = channelPassword;
+    }
+
+    if (savedNick && (!pwFieldVisible || channelPassword)) {
         // returning visitor: skip the nickname overlay and join straight away
         $('#joinOverlay').classList.add('hidden');
         join({ textOnly: false });
@@ -194,6 +229,9 @@ async function boot() {
     $('#nickInput').focus();
     $('#nickInput').select();
     $('#nickInput').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') join({ textOnly: false });
+    });
+    $('#channelPwInput').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') join({ textOnly: false });
     });
 }
@@ -254,6 +292,11 @@ function bindUi() {
 async function join({ textOnly: asTextOnly }) {
     const nick = $('#nickInput').value.trim().slice(0, 24);
     if (!nick) return showJoinError(t('channel.errors.nickRequired'));
+    // overlay visible = manual attempt: its input is authoritative (it may
+    // differ from the remembered value after a "wrong password" round-trip)
+    if (!$('#joinPasswordField').classList.contains('hidden')) {
+        channelPassword = $('#channelPwInput').value;
+    }
 
     // release anything a previous attempt left behind (e.g. the stale-token
     // retry after 'unauthorized' joins a second time)
@@ -325,6 +368,8 @@ function registerSocketHandlers() {
             updateHeaderActions();
             syncMembers(cfg.peers || {});
             chat.add({ text: t('chat.joined', { name: selfName }), system: true, self: true });
+            // password accepted — keep it for the next auto-join
+            if (channelPassword) saveChannelPw(channelPassword);
             // tell everyone in the room which avatar we carry (peers list only
             // flows joiner <- room, this is the joiner -> room direction)
             if (selfAvatar) socket.emit('peerAvatar', { room_id: channelId, avatar: selfAvatar });
@@ -439,15 +484,26 @@ function registerSocketHandlers() {
         updateHeaderActions();
     });
 
-    socket.on('kickOut', () => {
+    socket.on('kickOut', (cfg) => {
         teardown();
-        showJoinFatal(t('channel.kicked'));
+        // host ejection vs. the admin deleting the room under our feet
+        showJoinFatal(cfg?.reason === 'channelDeleted' ? t('channel.channelDeleted') : t('channel.kicked'));
     });
 
     socket.on('channelNotFound', () => showJoinFatal(t('channel.errors.channelNotFound')));
     socket.on('roomIsBusy', (cfg) => showJoinError(t('channel.errors.roomIsBusy', { n: cfg?.maxParticipants || 0 })));
     socket.on('roomIsJoinLocked', () => showJoinError(t('channel.errors.roomIsJoinLocked')));
     socket.on('roomIsLocked', () => showJoinError(t('channel.errors.roomIsLocked')));
+    socket.on('channelPasswordRequired', () => {
+        // wrong or missing channel password — drop the stale remembered value
+        // so the overlay stays up until a correct one is entered
+        clearChannelPw();
+        channelPassword = '';
+        showJoinError(t('channel.errors.passwordRequired'));
+        $('#joinPasswordField').classList.remove('hidden');
+        $('#channelPwInput').value = '';
+        $('#channelPwInput').focus();
+    });
     socket.on('unauthorized', () => {
         if (!hostToken) return showJoinError(t('channel.errors.unauthorized'));
         // persisted token no longer accepted (expired or the host was removed
@@ -481,6 +537,7 @@ function emitJoin() {
         peer_uuid: selfUuid,
         peer_name: selfName,
         peer_token: hostToken || undefined,
+        channel_password: channelPassword || undefined,
         peer_audio: onAir(),
     });
 }

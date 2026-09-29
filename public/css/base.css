@@ -225,6 +225,11 @@ select {
     color: var(--info);
 }
 
+.badge.lock {
+    background: var(--warn-dim);
+    color: var(--warn);
+}
+
 .badge.on {
     background: var(--accent-dim);
     color: var(--accent);

@@ -38,8 +38,11 @@ function bindCreateTemp() {
 async function load() {
     const grid = $('#channelGrid');
     try {
-        const { channels } = await api.getPublicChannels();
+        const { channels, settings } = await api.getPublicChannels();
         $('#statusHint').textContent = '';
+
+        // temp rooms disabled by the admin — hide the spawn entry point
+        $('#createTempBtn').classList.toggle('hidden', settings?.tempRooms === false);
 
         if (!channels.length) {
             grid.replaceChildren();
@@ -71,9 +74,10 @@ function bindClearData() {
     $('#clearAllBtn').addEventListener('click', () => {
         localStorage.removeItem(NICK_KEY);
         for (const key of CONFIG_KEYS) localStorage.removeItem(key);
-        // persisted host logins (one key per channel) go with "everything"
+        // persisted host logins and remembered channel passwords (one key per
+        // channel) go with "everything"
         for (const key of Object.keys(localStorage)) {
-            if (key.startsWith('vc_host_token_')) localStorage.removeItem(key);
+            if (key.startsWith('vc_host_token_') || key.startsWith('vc_chan_pw_')) localStorage.removeItem(key);
         }
         close();
         toast(t('index.cleared'), 'ok');
@@ -97,6 +101,9 @@ function renderCard(channel) {
             el('h3', { text: channel.name || channel.id }),
             channel.temporary
                 ? el('span', { class: 'badge temp', text: t('index.tempBadge') })
+                : null,
+            channel.hasPassword
+                ? el('span', { class: 'badge lock', title: t('index.locked'), text: '🔒' })
                 : null,
             el(
                 'span',

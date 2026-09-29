@@ -50,6 +50,8 @@ export const api = {
     /* admin */
     adminLogin: (password) => request('/api/admin/login', { method: 'POST', body: { password } }),
     adminChannels: () => request('/api/admin/channels', { admin: true }),
+    adminGetSettings: () => request('/api/admin/settings', { admin: true }),
+    adminUpdateSettings: (body) => request('/api/admin/settings', { method: 'PUT', body, admin: true }),
     adminCreateChannel: (body) => request('/api/admin/channels', { method: 'POST', body, admin: true }),
     adminUpdateChannel: (id, body) =>
         request(`/api/admin/channels/${encodeURIComponent(id)}`, { method: 'PUT', body, admin: true }),

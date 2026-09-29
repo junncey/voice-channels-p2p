@@ -25,9 +25,15 @@ const MIN_PARTICIPANTS = 2;
 const MAX_PARTICIPANTS = 16; // mesh topology: keep small on purpose
 const NAME_MAX = 64;
 const DESCRIPTION_MAX = 200;
+const PASSWORD_MAX = 64;
 
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1 };
+
+// Admin-managed runtime settings persisted alongside the channel list. The
+// env value (TEMP_ROOMS_ENABLED etc.) only seeds the default on first boot;
+// after that the console toggle in channels.json is the source of truth.
+const SETTING_KEYS = ['tempRooms'];
 
 function hashPassword(password) {
     const salt = crypto.randomBytes(16).toString('hex');
@@ -148,6 +154,20 @@ function validateDefinition(input, { partial = false } = {}) {
         }
     }
 
+    // Channel join password. CREATE: ''/undefined = no password. UPDATE:
+    // undefined = keep, '' = clear, non-empty = replace the hash.
+    if (input.password !== undefined) {
+        if (typeof input.password !== 'string') {
+            errors.push('password must be a string');
+        } else if (input.password.length > PASSWORD_MAX) {
+            errors.push(`password too long (max ${PASSWORD_MAX} chars)`);
+        } else if (input.password && !input.password.trim()) {
+            errors.push('password must not be blank');
+        } else {
+            value.password = input.password;
+        }
+    }
+
     return { ok: errors.length === 0, errors, value };
 }
 
@@ -158,10 +178,12 @@ class ChannelStore {
      * @param {boolean} [options.autoInit]        create an empty registry file when missing
      * @param {string}  [options.defaultModerator] shared-secret password for channels without
      *                                            configured hosts (see config.channels)
+     * @param {object}  [options.defaultSettings] setting defaults seeded from env on first boot
      */
-    constructor({ filePath = path.join(__dirname, 'channels.json'), autoInit = true, defaultModerator = '' } = {}) {
+    constructor({ filePath = path.join(__dirname, 'channels.json'), autoInit = true, defaultModerator = '', defaultSettings = {} } = {}) {
         this.filePath = filePath;
         this.defaultModerator = String(defaultModerator || '');
+        this.settings = { tempRooms: true, ...defaultSettings };
         this.channels = [];
         /** id -> ephemeral channel definition (see getTemp) */
         this.temps = new Map();
@@ -175,6 +197,11 @@ class ChannelStore {
                 this.channels = Array.isArray(raw.channels)
                     ? raw.channels.filter((ch) => isPlainObject(ch) && this.isValidId(ch.id))
                     : [];
+                if (isPlainObject(raw.settings)) {
+                    for (const key of SETTING_KEYS) {
+                        if (typeof raw.settings[key] === 'boolean') this.settings[key] = raw.settings[key];
+                    }
+                }
                 log.info('Channel registry loaded', { file: this.filePath, channels: this.channels.length });
             } else if (createIfMissing) {
                 this.save();
@@ -187,7 +214,7 @@ class ChannelStore {
     }
 
     save() {
-        const data = JSON.stringify({ version: 1, channels: this.channels }, null, 4);
+        const data = JSON.stringify({ version: 1, settings: this.settings, channels: this.channels }, null, 4);
         const tmp = `${this.filePath}.tmp`;
         fs.writeFileSync(tmp, data, 'utf8');
         try {
@@ -266,6 +293,38 @@ class ChannelStore {
         }
     }
 
+    /** Force-remove a temp room regardless of occupancy (admin delete). */
+    removeTemp(id) {
+        if (!this.temps.has(id)) return { ok: false, errors: [`channel not found: ${id}`] };
+        this.temps.delete(id);
+        log.info('Temp channel removed (admin)', { id });
+        return { ok: true };
+    }
+
+    getSettings() {
+        return { ...this.settings };
+    }
+
+    /** Partial update of known boolean settings; persists atomically. */
+    updateSettings(input) {
+        if (!isPlainObject(input)) return { ok: false, errors: ['settings must be an object'] };
+        const errors = [];
+        const next = { ...this.settings };
+        for (const key of SETTING_KEYS) {
+            if (input[key] === undefined) continue;
+            if (typeof input[key] !== 'boolean') {
+                errors.push(`${key} must be a boolean`);
+            } else {
+                next[key] = input[key];
+            }
+        }
+        if (errors.length) return { ok: false, errors };
+        this.settings = next;
+        this.save();
+        log.info('Settings updated', this.settings);
+        return { ok: true, settings: this.getSettings() };
+    }
+
     listTemps({ onlineOf = null } = {}) {
         return [...this.temps.values()].map((ch) =>
             this.sanitize(ch, { online: onlineOf ? onlineOf(ch.id) : null }),
@@ -287,6 +346,7 @@ class ChannelStore {
             public: channel.public !== false,
             maxParticipants: channel.maxParticipants || 8,
             hosts: Array.isArray(channel.hosts) ? channel.hosts.map((h) => h.username) : [],
+            hasPassword: Boolean(channel.passwordHash),
             temporary: channel.temporary === true,
             createdAt: channel.createdAt,
             updatedAt: channel.updatedAt,
@@ -331,6 +391,7 @@ class ChannelStore {
             createdAt: now,
             updatedAt: now,
         };
+        if (value.password) channel.passwordHash = hashPassword(value.password);
         this.channels.push(channel);
         this.save();
         log.info('Channel created', { id: channel.id, name: channel.name, hosts: channel.hosts.length });
@@ -356,6 +417,11 @@ class ChannelStore {
                 const existing = channel.hosts.find((prev) => prev.username === h.username);
                 return { username: h.username, passwordHash: existing ? existing.passwordHash : '' };
             });
+        }
+
+        if (value.password !== undefined) {
+            if (value.password) channel.passwordHash = hashPassword(value.password);
+            else delete channel.passwordHash; // '' explicitly clears the password
         }
 
         channel.updatedAt = new Date().toISOString();
@@ -401,6 +467,17 @@ class ChannelStore {
     isHost(id, username) {
         const channel = this.get(id);
         return !!(channel && Array.isArray(channel.hosts) && channel.hosts.some((h) => h.username === username));
+    }
+
+    /** Verify a join password against the channel's stored hash. */
+    verifyChannelPassword(id, password) {
+        const channel = this.get(id) || this.getTemp(id);
+        return Boolean(
+            channel &&
+            channel.passwordHash &&
+            typeof password === 'string' &&
+            verifyPassword(password, channel.passwordHash)
+        );
     }
 }
 

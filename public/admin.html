@@ -44,6 +44,10 @@
                         </svg>
                         <span data-i18n="admin.newChannel">新建频道</span>
                     </button>
+                    <label id="tempRoomsToggleWrap" class="temp-toggle" data-i18n-title="admin.tempRoomsHint">
+                        <input id="tempRoomsToggle" type="checkbox" checked />
+                        <span data-i18n="admin.tempRoomsToggle">临时房间</span>
+                    </label>
                     <span id="loadError" class="admin-error"></span>
                 </div>
 
@@ -98,6 +102,15 @@
                                 <span data-i18n="admin.field.public">在首页公开显示</span>
                             </label>
                         </div>
+                    </div>
+                    <div class="field">
+                        <label for="fPassword" data-i18n="admin.field.password">频道密码（可选，游客加入时需输入）</label>
+                        <input id="fPassword" class="input" type="password" maxlength="64" autocomplete="new-password" />
+                        <span id="pwHint" class="field-hint"></span>
+                        <label id="fClearPwRow" class="pw-clear-row hidden">
+                            <input id="fClearPw" type="checkbox" />
+                            <span data-i18n="admin.clearPassword">清除已设置的密码</span>
+                        </label>
                     </div>
                     <div class="field">
                         <label data-i18n="admin.field.hosts">主持人（登录后获得主持人权限）</label>
