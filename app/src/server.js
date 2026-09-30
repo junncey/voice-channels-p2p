@@ -92,8 +92,17 @@ const turnServerUrl = config.webrtc.turn.url;
 const turnServerUsername = config.webrtc.turn.username;
 const turnServerCredential = config.webrtc.turn.credential;
 if (config.webrtc.stun.enabled && stunServerUrl) iceServers.push({ urls: stunServerUrl });
-if (config.webrtc.turn.enabled && turnServerUrl && turnServerUsername && turnServerCredential) {
-    iceServers.push({ urls: turnServerUrl, username: turnServerUsername, credential: turnServerCredential });
+// TURN_SERVER_URL may hold several comma-separated URLs -> one RTCIceServer per relay
+// (multiple coturn instances act as mutual backups; the browser collects a relay
+// candidate per server and ICE picks whichever answers first)
+const turnServerUrls = (turnServerUrl || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+if (config.webrtc.turn.enabled && turnServerUrls.length && turnServerUsername && turnServerCredential) {
+    turnServerUrls.forEach((url) => {
+        iceServers.push({ urls: url, username: turnServerUsername, credential: turnServerCredential });
+    });
 }
 
 // ---------------------------------------------------------------------------
