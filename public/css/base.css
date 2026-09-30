@@ -352,9 +352,20 @@ html[data-theme='light'] body {
         var(--bg-0);
 }
 
-/* blue/danger buttons carry white text on the light palette */
-html[data-theme='light'] .btn.primary,
+/* primary keeps white text on its solid blue; danger reads red-on-tint at
+   rest in light mode — its dim background is far too pale for white text */
+html[data-theme='light'] .btn.primary {
+    color: #fff;
+}
+
 html[data-theme='light'] .btn.danger {
+    color: var(--danger);
+    background: rgba(229, 72, 77, 0.16);
+    border-color: rgba(229, 72, 77, 0.24);
+}
+
+html[data-theme='light'] .btn.danger:hover {
+    background: var(--danger);
     color: #fff;
 }
 
