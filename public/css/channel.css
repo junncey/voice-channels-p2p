@@ -1002,6 +1002,52 @@ body {
     animation: pulse 1.2s ease-in-out infinite;
 }
 
+/* ---------- operation sounds (settings modal) ---------- */
+
+.sound-event-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.sound-event {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.sound-event-name {
+    flex: 1 1 auto;
+    min-width: 56px;
+    font-size: 13.5px;
+}
+
+.sound-event.off .sound-event-name,
+.sound-event.off .sound-event-pick,
+.sound-event.off .sound-preview-btn {
+    opacity: 0.45;
+}
+
+.sound-preview-btn {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+}
+
+.sound-event-pick {
+    flex: 1 1 140px;
+    max-width: 210px;
+    display: flex;
+}
+
+.sound-event-pick .dropdown-trigger {
+    padding: 6px 10px;
+    font-size: 13px;
+}
+
 /* ---------- join overlay ---------- */
 
 .join-card {

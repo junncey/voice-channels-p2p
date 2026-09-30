@@ -13,7 +13,7 @@ const POLL_MS = 15000;
 // The theme choice (vc_theme) is deliberately NOT listed — "clear everything"
 // must keep the user's palette.
 const NICK_KEY = 'vc_nick';
-const CONFIG_KEYS = ['vc_audio_settings', 'vc_peer_volumes', 'vc_send_key'];
+const CONFIG_KEYS = ['vc_audio_settings', 'vc_peer_volumes', 'vc_send_key', 'vc_sound_settings'];
 
 const MOON_SVG =
     '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>';

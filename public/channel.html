@@ -237,6 +237,20 @@
                         </div>
                         <button type="button" id="testSpkBtn" class="btn ghost sm" data-i18n="settings.testSpk">测试扬声器</button>
                     </section>
+                    <section class="settings-section">
+                        <h3 data-i18n="settings.sounds">操作音效</h3>
+                        <label class="switch-row">
+                            <span data-i18n="settings.soundsEnable">启用操作音效</span>
+                            <input type="checkbox" id="soundToggle" class="switch" />
+                        </label>
+                        <div class="volume-row">
+                            <label for="soundVolumeSlider" data-i18n="settings.soundsVolume">音效音量</label>
+                            <input type="range" id="soundVolumeSlider" min="0" max="100" step="1" />
+                            <span id="soundVolumeVal" class="volume-val">50%</span>
+                        </div>
+                        <div id="soundEventList" class="sound-event-list"></div>
+                        <p class="settings-hint" data-i18n="settings.soundsHint">音效仅在本机播放；「上传自定义音效」会替换该事件的提示音，文件只保存在本浏览器，不会发送给其他人</p>
+                    </section>
                 </div>
                 <div class="modal-actions">
                     <button id="settingsCloseBtn" class="btn primary" data-i18n="settings.done">完成</button>

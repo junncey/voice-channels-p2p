@@ -3,8 +3,9 @@
  *
  * Audio settings (gear button): mic/speaker device pickers, browser audio
  * processing toggles, push-to-talk (hold V), mic level meter, speaker volume
- * and mic/speaker test. Images travel over the chat DataChannel in chunks
- * (public/js/core/images.js) and can be pasted straight from the clipboard.
+ * and mic/speaker test, operation sound effects (public/js/core/sound.js).
+ * Images travel over the chat DataChannel in chunks (public/js/core/images.js)
+ * and can be pasted straight from the clipboard.
  */
 
 import { api } from '/js/core/api.js';
@@ -14,6 +15,7 @@ import { initChat } from '/js/core/chat.js';
 import { fileToImageMessage, sendImageData, createImageReceiver } from '/js/core/images.js';
 import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t } from '/js/core/i18n.js';
+import { initSoundSettings, playSound } from '/js/core/sound.js';
 import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
@@ -172,7 +174,12 @@ let spkDropdown = null;
 const imageReceiver = createImageReceiver({
     onDone: ({ from, dataUrl, batch }) => {
         if (batch) chat.addBatchImage(batch, dataUrl, t('chat.image'));
-        else chat.addImage({ name: from || '?', src: dataUrl, alt: t('chat.image') });
+        else {
+            // a lone image IS the message — batched ones already chimed with
+            // their 'chat' text frame
+            chat.addImage({ name: from || '?', src: dataUrl, alt: t('chat.image') });
+            playSound('message');
+        }
     },
     onFail: (reason, batch) => {
         if (batch) chat.failBatchImage(batch);
@@ -419,6 +426,7 @@ function registerSocketHandlers() {
         if (joined && cfg.should_create_offer === false) {
             const name = members.get(cfg.peer_id)?.peer_name || '';
             if (name) chat.add({ text: t('chat.joined', { name }), system: true });
+            playSound('peerJoin');
         }
         updateOnlineCount();
     });
@@ -426,7 +434,10 @@ function registerSocketHandlers() {
     socket.on('removePeer', ({ peer_id }) => {
         const name = members.get(peer_id)?.peer_name || '';
         dropPeer(peerIdSafe(peer_id));
-        if (joined && name) chat.add({ text: t('chat.left', { name }), system: true });
+        if (joined && name) {
+            chat.add({ text: t('chat.left', { name }), system: true });
+            playSound('peerLeave');
+        }
         updateOnlineCount();
     });
 
@@ -604,6 +615,7 @@ function meshHandlers() {
                 } else {
                     chat.add({ name, text: String(data.msg || '').slice(0, 500) });
                 }
+                playSound('message');
                 return;
             }
             if (data.type === 'img-start' || data.type === 'img-chunk' || data.type === 'img-end') {
@@ -1137,8 +1149,13 @@ function onMicBtnClick() {
 }
 
 function setMic(on) {
-    micOn = on && !!localStream;
+    const next = on && !!localStream;
+    if (next === micOn) return;
+    micOn = next;
     applyMicState();
+    // click feedback for manual toggles and host mutes; push-to-talk keys
+    // drive applyMicState directly and must stay silent
+    playSound(next ? 'micOn' : 'micOff');
 }
 
 /** Push the effective state to the local track / peers / UI. */
@@ -1430,6 +1447,9 @@ function bindSettingsUi() {
 
     $('#testMicBtn').addEventListener('click', onTestMicClick);
     $('#testSpkBtn').addEventListener('click', playTestBeep);
+
+    // operation sound effects: master switch, volume, per-event sound pickers
+    initSoundSettings({ applySink, toast });
 
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceSelects);
 }
