@@ -1004,33 +1004,37 @@ body {
 
 /* ---------- operation sounds (settings modal) ---------- */
 
+/* one shared grid for all event rows (row wrappers are display:contents) so
+   every row's dropdown starts at the same x and spans the same width whatever
+   the label lengths; the name column floors at the widest label, the pick
+   column is what compresses on narrow screens (down to 96px, 210px cap) */
 .sound-event-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    display: grid;
+    grid-template-columns: auto minmax(min-content, 1fr) minmax(96px, 210px) auto;
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 8px;
 }
 
 .sound-event {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
+    display: contents;
 }
 
 .sound-event-name {
-    flex: 1 1 auto;
-    min-width: 56px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 13.5px;
 }
 
-.sound-event.off .sound-event-name,
-.sound-event.off .sound-event-pick,
-.sound-event.off .sound-preview-btn {
+.sound-event.off > .sound-event-name,
+.sound-event.off > .sound-event-pick,
+.sound-event.off > .sound-preview-btn {
     opacity: 0.45;
 }
 
 .sound-preview-btn {
-    flex: 0 0 auto;
     width: 28px;
     height: 28px;
     border-radius: var(--radius-s);
@@ -1038,8 +1042,7 @@ body {
 }
 
 .sound-event-pick {
-    flex: 1 1 140px;
-    max-width: 210px;
+    min-width: 0;
     display: flex;
 }
 
