@@ -71,6 +71,7 @@
     "channel.outageFailedHint": "The network or voice service may be down — try rejoining or reloading the page",
     "channel.outageRejoin": "Rejoin",
     "channel.outageReload": "Reload page",
+    "channel.peerConnecting": "Connecting…",
     "channel.peerOffline": "Offline",
     "channel.mutedByHost": "The host muted your microphone",
     "channel.joinLockOn": "{name} locked the channel — new joins are paused",

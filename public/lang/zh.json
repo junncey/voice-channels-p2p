@@ -71,6 +71,7 @@
     "channel.outageFailedHint": "网络或语音服务可能不可用，可尝试重新加入或刷新页面",
     "channel.outageRejoin": "重新加入",
     "channel.outageReload": "刷新页面",
+    "channel.peerConnecting": "连接中…",
     "channel.peerOffline": "连接中断",
     "channel.mutedByHost": "主持人已将你静音",
     "channel.joinLockOn": "{name} 锁定了频道，新成员暂无法加入",

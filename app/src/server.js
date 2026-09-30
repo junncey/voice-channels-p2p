@@ -77,6 +77,9 @@ const io = new Server({
     maxHttpBufferSize: 1e6,
     transports: ['websocket'],
     cors: corsOptions,
+    // reap connections that died without a FIN (ghost members) within ~18s
+    pingInterval: config.server.pingInterval,
+    pingTimeout: config.server.pingTimeout,
 }).listen(server);
 
 // ---------------------------------------------------------------------------

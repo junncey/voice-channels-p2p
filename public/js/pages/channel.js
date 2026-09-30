@@ -301,6 +301,12 @@ function bindUi() {
         socket?.disconnect();
         teardownMedia();
     });
+    // beforeunload never fires when iOS Safari swipes a tab away — pagehide
+    // does; the duplicate disconnect() on desktop unload paths is harmless
+    window.addEventListener('pagehide', () => {
+        socket?.disconnect();
+        teardownMedia();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +647,7 @@ function notePeerState(peerId, state) {
             hideOutageBanner();
             armB1Reset();
         }
+        clearConnectingBadge(peerId);
         cancelPeerRecovery(peerId);
         return;
     }
@@ -778,6 +785,43 @@ function updatePeerCardRecovery(peerId) {
     if (node) node.classList.toggle('lost', peerRecovery.has(peerId));
 }
 
+// ---------------------------------------------------------------------------
+// "connecting…" badge — a ghost member (socket dead, waiting for the server
+// heartbeat to reap it) never answers the SDP offer, so its card sits in
+// new/connecting looking normal while the link will never come up. Real links
+// settle in 2-8s (relayed ones slower), so only flag past a generous window.
+// ---------------------------------------------------------------------------
+
+const CONNECTING_BADGE_MS = 12000;
+const connectingTimers = new Map(); // peerId -> timeout; present = 'connected' not yet observed
+const stuckConnecting = new Set(); // window expired with the link still not up
+
+function armConnectingBadge(peerId) {
+    if (connectingTimers.has(peerId) || stuckConnecting.has(peerId)) return;
+    connectingTimers.set(
+        peerId,
+        setTimeout(() => {
+            connectingTimers.delete(peerId);
+            const state = mesh?.entries.get(peerId)?.pc.connectionState;
+            if (!members.has(peerId) || state === 'connected' || state === 'closed') return;
+            stuckConnecting.add(peerId);
+            updatePeerCardConnecting(peerId, true);
+        }, CONNECTING_BADGE_MS)
+    );
+}
+
+function clearConnectingBadge(peerId) {
+    const timer = connectingTimers.get(peerId);
+    if (timer) clearTimeout(timer);
+    connectingTimers.delete(peerId);
+    if (stuckConnecting.delete(peerId)) updatePeerCardConnecting(peerId, false);
+}
+
+function updatePeerCardConnecting(peerId, on) {
+    const node = $(`#memberList .member[data-id="${peerId}"]`);
+    if (node) node.classList.toggle('connecting', on);
+}
+
 function showOutageBanner(mode) {
     $('#outageBanner').classList.remove('hidden');
     $('#outageBanner').dataset.mode = mode;
@@ -817,6 +861,7 @@ function syncMembers(peersMap) {
             // remembered per-user volume; an in-session adjustment wins over the stored one
             volume: existing?.volume ?? (name !== '?' ? peerVolumes[name] ?? 1 : 1),
         });
+        if (!existing) armConnectingBadge(peerId);
     }
     // drop stale entries
     for (const peerId of [...members.keys()]) {
@@ -845,6 +890,7 @@ function ensureSelfMember() {
 
 function dropPeer(peerId, { silent = false } = {}) {
     cancelPeerRecovery(peerId);
+    clearConnectingBadge(peerId);
     members.delete(peerId);
     mesh?.removePeer(peerId);
     hub?.unwatch(peerId);
@@ -919,7 +965,11 @@ function renderMembers() {
     list.replaceChildren(
         ...sorted.map(([peerId, info]) => {
             const node = el('li', {
-                class: 'member' + (info.self ? ' self-member' : '') + (peerRecovery.has(peerId) ? ' lost' : ''),
+                class:
+                    'member' +
+                    (info.self ? ' self-member' : '') +
+                    (peerRecovery.has(peerId) ? ' lost' : '') +
+                    (stuckConnecting.has(peerId) ? ' connecting' : ''),
                 dataset: { id: peerId },
             });
             node.append(
@@ -938,6 +988,7 @@ function renderMembers() {
                         { class: 'member-sub' },
                         info.peer_presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
                         info.self && textOnly ? el('span', { class: 'badge', text: t('channel.textOnlyBadge') }) : null,
+                        !info.self ? el('span', { class: 'badge connect-badge', text: t('channel.peerConnecting') }) : null,
                         !info.self ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') }) : null,
                         micIconNode(info.peer_audio_status)
                     )
@@ -1906,6 +1957,10 @@ function teardown() {
 function teardownMedia() {
     stopRecoveryScan();
     clearPeerRecovery();
+    // the connecting-badge state is per-peer too — drop it with the rest
+    for (const timer of connectingTimers.values()) clearTimeout(timer);
+    connectingTimers.clear();
+    stuckConnecting.clear();
     hideOutageBanner();
     b1Attempts = 0;
     b1InFlight = false;

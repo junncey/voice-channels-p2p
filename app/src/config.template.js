@@ -48,6 +48,12 @@ module.exports = {
         environment: process.env.NODE_ENV || 'development',
         // Behind nginx/traefik? enable so Express honors X-Forwarded-* headers
         trustProxy: !!getEnvBoolean(process.env.TRUST_PROXY),
+        // Socket.IO heartbeat — the only way to reap connections that die
+        // without a FIN (network drop, phone lock screen, laptop sleep). A
+        // ghost member lingers for up to pingInterval + pingTimeout; the
+        // defaults below bound that to ~18s (socket.io defaults ≈ 45s).
+        pingInterval: Number(process.env.SOCKET_PING_INTERVAL) || 10000,
+        pingTimeout: Number(process.env.SOCKET_PING_TIMEOUT) || 8000,
 
         /**
          * Embed (iframe) Restrictions

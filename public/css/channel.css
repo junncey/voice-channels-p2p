@@ -277,6 +277,18 @@ body {
     display: inline-flex;
 }
 
+/* connecting badge: link stuck in new/connecting past the grace window
+   (likely a ghost member the server heartbeat hasn't reaped yet) */
+.member-sub .badge.connect-badge {
+    display: none;
+    background: var(--warn-dim);
+    color: var(--warn);
+}
+
+.member.connecting .connect-badge {
+    display: inline-flex;
+}
+
 /* media outage banner — shown when automatic recovery is running/failed */
 .outage-banner {
     position: fixed;
