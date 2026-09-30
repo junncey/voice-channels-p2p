@@ -613,9 +613,28 @@ io.sockets.on('connect', async (socket) => {
             return socket.emit('channelPasswordRequired');
         }
 
+        // A rejoin carrying the SAME peer_uuid + peer_name is this page's live
+        // session reconnecting (each join() mints a fresh uuid): reap the
+        // dead-but-unreaped socket so capacity / join-lock can't reject the
+        // recovery rejoin. Never matches a second tab (it would have its own uuid).
+        let is_rejoin = false;
+        for (const [existingId, existing] of Object.entries(peers[channel] || {})) {
+            if (!existing.peer_uuid || existing.peer_uuid !== peer_uuid || existing.peer_name !== peer_name) continue;
+            is_rejoin = true;
+            const oldSocket = sockets[existingId];
+            if (oldSocket) {
+                await removePeerFrom(channel, oldSocket, 'reconnected');
+            } else {
+                delete peers[channel][existingId];
+                delete channels[channel]?.[existingId];
+                delete presenters[channel]?.[existingId];
+            }
+            log.debug('[' + socket.id + '] reaped stale session on rejoin', { channel });
+        }
+
         // Capacity hard check (hosts may always join to manage their channel)
         const maxParticipants = channelDef.maxParticipants || 8;
-        if (!is_presenter && getPeerCount(channel) >= maxParticipants) {
+        if (!is_presenter && !is_rejoin && getPeerCount(channel) >= maxParticipants) {
             log.debug('[' + socket.id + '] channel is full', { channel, count: getPeerCount(channel), maxParticipants });
             return socket.emit('roomIsBusy', { maxParticipants });
         }
@@ -636,7 +655,10 @@ io.sockets.on('connect', async (socket) => {
                presenters[channel][id].peer_name === name &&
                presenters[channel][id].peer_uuid === uuid);
 
-        const joinLocked = peers[channel]?.['joinLock'] === true && !isPeerPresenterNow(socket.id, peer_name, peer_uuid);
+        // Room-level join lock blocks NEW joiners only — a reconnecting
+        // member (same uuid, reaped above) was already inside.
+        const joinLocked =
+            peers[channel]?.['joinLock'] === true && !is_rejoin && !isPeerPresenterNow(socket.id, peer_name, peer_uuid);
         if (joinLocked) {
             log.debug('[' + socket.id + '] [Warning] room is join-locked', { channel });
             return socket.emit('roomIsJoinLocked');

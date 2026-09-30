@@ -109,7 +109,14 @@ export class Mesh {
 
         if (shouldCreateOffer) {
             this._attachChat(peerId, entry, pc.createDataChannel(CHAT_DC_LABEL));
-            this._addLocalTracks(entry); // fires negotiationneeded -> initial offer
+            if (this.localStream) {
+                this._addLocalTracks(entry); // fires negotiationneeded -> initial offer
+            } else {
+                // text-only joiner: no track to trigger negotiationneeded, so
+                // kick the initial (recvonly, data-channel) offer manually —
+                // the remote mic arrives via the reverse offer once connected
+                initiateOffer();
+            }
         } else {
             pc.ondatachannel = (event) => {
                 if (event.channel.label === CHAT_DC_LABEL) this._attachChat(peerId, entry, event.channel);
@@ -122,22 +129,70 @@ export class Mesh {
         if (!entry || !session_description) return;
         const pc = entry.pc;
         try {
-            await pc.setRemoteDescription(session_description);
-            // flush ICE candidates that arrived before the remote description
-            for (const candidate of entry.pendingIce.splice(0)) {
+            await this._applySessionDescription(peer_id, entry, session_description);
+        } catch (err) {
+            // Glare: both sides may re-offer at once (e.g. both recovering a
+            // dead link). Roll back our local offer and answer theirs instead —
+            // one deterministic answer wins, the negotiation stays consistent.
+            if (session_description.type === 'offer' && pc.signalingState === 'have-local-offer') {
                 try {
-                    await pc.addIceCandidate(candidate);
-                } catch {
-                    /* stale candidate, ignore */
+                    await pc.setLocalDescription({ type: 'rollback' });
+                    await this._applySessionDescription(peer_id, entry, session_description);
+                    return;
+                } catch (retryErr) {
+                    console.error('[mesh] glare rollback failed', peer_id, retryErr);
+                    return;
                 }
             }
-            if (session_description.type === 'offer') {
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                this.signaling.emit('relaySDP', { peer_id, session_description: pc.localDescription });
-            }
-        } catch (err) {
             console.error('[mesh] session description failed', peer_id, err);
+        }
+    }
+
+    async _applySessionDescription(peer_id, entry, session_description) {
+        const pc = entry.pc;
+        await pc.setRemoteDescription(session_description);
+        // flush ICE candidates that arrived before the remote description
+        for (const candidate of entry.pendingIce.splice(0)) {
+            try {
+                await pc.addIceCandidate(candidate);
+            } catch {
+                /* stale candidate, ignore */
+            }
+        }
+        if (session_description.type === 'offer') {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            this.signaling.emit('relaySDP', { peer_id, session_description: pc.localDescription });
+        }
+    }
+
+    /**
+     * Re-establish the media path WITHOUT rebuilding the PeerConnection
+     * (e.g. the TURN allocation died on a coturn restart). Sends a re-offer
+     * with iceRestart; the remote side answers through the normal path and
+     * the chat DataChannel is preserved.
+     * @param {string} peerId
+     * @returns {Promise<boolean>} true when a re-offer went out
+     */
+    async restartIce(peerId) {
+        const entry = this.entries.get(peerId);
+        if (!entry) return false;
+        const pc = entry.pc;
+        // mid-negotiation (reverse offer in flight): let that settle first,
+        // the recovery ladder retries on its next tick
+        if (pc.connectionState === 'closed' || pc.signalingState !== 'stable') return false;
+        entry.offering = true;
+        try {
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
+            console.log('[mesh] ice restart offer sent', peerId);
+            return true;
+        } catch (err) {
+            console.error('[mesh] ice restart failed', peerId, err);
+            return false;
+        } finally {
+            entry.offering = false;
         }
     }
 

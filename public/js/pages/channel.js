@@ -88,6 +88,15 @@ let channelPassword = '';
 // other combinations insert a newline
 let sendKey = localStorage.getItem(SEND_KEY_STORE) === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
 
+// ----- media self-healing (see the recovery engine section below) -----
+const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated }
+let recoveryScanTimer = null;
+let b1Attempts = 0; // automatic signaling reconnects since the last stable period
+let b1InFlight = false;
+let b1Timer = null;
+let b1ResetTimer = null;
+let selfReconnecting = false; // suppress the "disconnected" toast on our own B1 reconnect
+
 // ----- host login persistence -----
 // The host token lives in localStorage so the login survives browser restarts
 // (the server re-grants presenter status on every join). Tokens stored in
@@ -262,6 +271,10 @@ function bindUi() {
     });
 
     $('#leaveBtn').addEventListener('click', leave);
+    $('#outageActionBtn').addEventListener('click', () => {
+        if ($('#outageBanner').dataset.mode === 'failed') location.reload();
+        else attemptSignalingReconnect({ manual: true });
+    });
     $('#micBtn').addEventListener('click', onMicBtnClick);
     $('#chatForm').addEventListener('submit', onChatSubmit);
     bindChatInput();
@@ -365,8 +378,13 @@ function registerSocketHandlers() {
     socket.on('connect', emitJoin);
 
     socket.on('serverInfo', (cfg) => {
+        // a successful (re)join resolves any pending self-reconnect
+        b1InFlight = false;
+        selfReconnecting = false;
+        clearTimeout(b1Timer);
         if (!joined) {
             joined = true;
+            startRecoveryScan();
             isPresenter = !!cfg.is_presenter;
             joinLockOn = !!cfg.join_locked;
             $('#joinOverlay').classList.add('hidden');
@@ -532,7 +550,9 @@ function registerSocketHandlers() {
         for (const peerId of [...members.keys()]) {
             if (peerId !== socket.id) dropPeer(peerId, { silent: true });
         }
-        toast(t('channel.errors.disconnected'), 'warn');
+        // a signaling reconnect WE triggered as the media-recovery fallback
+        // is expected — don't alarm the user about it
+        if (!selfReconnecting) toast(t('channel.errors.disconnected'), 'warn');
     });
 }
 
@@ -587,8 +607,187 @@ function meshHandlers() {
         onPeerState(peerId, state) {
             const node = $(`#memberList .member[data-id="${peerId}"]`);
             if (node) node.classList.toggle('bad', state === 'failed' || state === 'disconnected');
+            notePeerState(peerId, state);
         },
     };
+}
+
+// ---------------------------------------------------------------------------
+// media self-healing — a coturn restart destroys every TURN allocation while
+// signaling stays up, so links die without the app noticing. Recovery runs
+// per peer (a mesh can be half-broken):
+//   disconnected → 5s grace (ICE often self-heals; acting sooner breaks it)
+//   failed       → act at once
+//   → up to 3 ICE-restart rounds (3/6/12s backoff, lower socket.id initiates
+//     so both sides never re-offer at once) → signaling reconnect (rebuilds
+//     every link) → after 2 silent reconnects: visible "reload" prompt.
+// A 10s scan re-checks every connectionState in case a webview swallows the
+// connectionstatechange event.
+// ---------------------------------------------------------------------------
+
+const RECOVERY_GRACE_MS = 5000;
+const RECOVERY_ROUND_DELAYS = [3000, 6000, 12000];
+const RECOVERY_TOTAL_MS = 20000; // per-peer window before the signaling reconnect (round3 +12s = 21s)
+const RECOVERY_MAX_B1 = 2; // automatic signaling reconnects before asking the user
+const RECOVERY_SCAN_MS = 10000;
+const RECOVERY_B1_RESET_MS = 60000; // stable for this long → the B1 budget refills
+
+function notePeerState(peerId, state) {
+    const rec = peerRecovery.get(peerId);
+    if (rec && rec.lastState === state) return;
+
+    if (state === 'connected' || state === 'closed') {
+        if (state === 'connected') {
+            hideOutageBanner();
+            armB1Reset();
+        }
+        cancelPeerRecovery(peerId);
+        return;
+    }
+    if (state !== 'disconnected' && state !== 'failed') return; // new/checking/connecting
+    if (!mesh?.entries.has(peerId)) {
+        cancelPeerRecovery(peerId);
+        return;
+    }
+
+    if (!rec) {
+        clearTimeout(b1ResetTimer); // instability: don't refill the B1 budget
+        peerRecovery.set(peerId, {
+            timer: null,
+            attempts: 0,
+            lastState: state,
+            brokenAt: Date.now(),
+            escalated: false,
+        });
+        scheduleRecoveryTick(peerId, state === 'failed' ? 0 : RECOVERY_GRACE_MS);
+        updatePeerCardRecovery(peerId);
+        return;
+    }
+    rec.lastState = state;
+    // disconnected degraded to failed while still in the grace window — skip the wait
+    if (state === 'failed' && rec.attempts === 0 && rec.timer) scheduleRecoveryTick(peerId, 0);
+}
+
+function scheduleRecoveryTick(peerId, delay) {
+    const rec = peerRecovery.get(peerId);
+    if (!rec) return;
+    clearTimeout(rec.timer);
+    rec.timer = setTimeout(() => recoveryTick(peerId), delay);
+}
+
+function recoveryTick(peerId) {
+    const rec = peerRecovery.get(peerId);
+    if (!rec) return;
+    rec.timer = null;
+    const state = mesh?.entries.get(peerId)?.pc.connectionState;
+    if (!mesh?.entries.has(peerId) || state === 'connected' || state === 'closed') {
+        cancelPeerRecovery(peerId);
+        return;
+    }
+    if (Date.now() - rec.brokenAt >= RECOVERY_TOTAL_MS) {
+        escalatePeerRecovery(peerId);
+        return;
+    }
+    if (state === 'disconnected' || state === 'failed') {
+        if (rec.attempts < RECOVERY_ROUND_DELAYS.length) {
+            rec.attempts += 1;
+            // glare arbitration: with both sides broken, only the lower
+            // socket.id re-offers; the other just answers
+            if (socket?.id && socket.id < peerId) {
+                mesh.restartIce(peerId).catch(() => {});
+            } else {
+                console.log('[mesh] recovery: waiting for peer re-offer', peerId);
+            }
+            scheduleRecoveryTick(peerId, RECOVERY_ROUND_DELAYS[rec.attempts - 1]);
+            return;
+        }
+        // rounds spent but the window isn't over: keep watching the link
+        scheduleRecoveryTick(peerId, RECOVERY_ROUND_DELAYS[RECOVERY_ROUND_DELAYS.length - 1]);
+        return;
+    }
+    // transitional (new/checking/connecting): a restart is being evaluated —
+    // re-check shortly without burning another round
+    scheduleRecoveryTick(peerId, 3000);
+}
+
+function escalatePeerRecovery(peerId) {
+    const rec = peerRecovery.get(peerId);
+    if (!rec || rec.escalated) return;
+    rec.escalated = true;
+    console.warn('[mesh] recovery: ICE restarts exhausted, falling back to signaling reconnect', peerId);
+    showOutageBanner('recovering');
+    attemptSignalingReconnect();
+}
+
+/** Last-resort fallback: rebuild the whole session over fresh signaling. */
+function attemptSignalingReconnect({ manual = false } = {}) {
+    if (!socket || !joined) return;
+    if (b1InFlight) return;
+    if (!manual && b1Attempts >= RECOVERY_MAX_B1) {
+        showOutageBanner('failed');
+        return;
+    }
+    b1Attempts += 1;
+    b1InFlight = true;
+    selfReconnecting = true;
+    console.warn('[mesh] recovery: signaling reconnect', { manual, attempt: b1Attempts });
+    // the 'disconnect' handler resets the mesh and members; 'connect' rejoins
+    // and the server re-adds every peer with fresh ICE
+    socket.disconnect();
+    socket.connect();
+    clearTimeout(b1Timer);
+    b1Timer = setTimeout(() => {
+        b1InFlight = false;
+        selfReconnecting = false;
+    }, 15000);
+}
+
+function armB1Reset() {
+    clearTimeout(b1ResetTimer);
+    b1ResetTimer = setTimeout(() => (b1Attempts = 0), RECOVERY_B1_RESET_MS);
+}
+
+function cancelPeerRecovery(peerId) {
+    const rec = peerRecovery.get(peerId);
+    if (!rec) return;
+    clearTimeout(rec.timer);
+    peerRecovery.delete(peerId);
+    updatePeerCardRecovery(peerId);
+}
+
+function clearPeerRecovery() {
+    for (const peerId of [...peerRecovery.keys()]) cancelPeerRecovery(peerId);
+}
+
+function startRecoveryScan() {
+    if (recoveryScanTimer) return;
+    recoveryScanTimer = setInterval(() => {
+        if (!joined || !mesh) return;
+        for (const [peerId, entry] of mesh.entries) notePeerState(peerId, entry.pc.connectionState);
+    }, RECOVERY_SCAN_MS);
+}
+
+function stopRecoveryScan() {
+    clearInterval(recoveryScanTimer);
+    recoveryScanTimer = null;
+}
+
+/** Member card: red name/avatar while the link is broken, badge once recovery runs. */
+function updatePeerCardRecovery(peerId) {
+    const node = $(`#memberList .member[data-id="${peerId}"]`);
+    if (node) node.classList.toggle('lost', peerRecovery.has(peerId));
+}
+
+function showOutageBanner(mode) {
+    $('#outageBanner').classList.remove('hidden');
+    $('#outageBanner').dataset.mode = mode;
+    $('#outageTitle').textContent = t(mode === 'failed' ? 'channel.outageFailedTitle' : 'channel.outageTitle');
+    $('#outageHint').textContent = t(mode === 'failed' ? 'channel.outageFailedHint' : 'channel.outageRecovering');
+    $('#outageActionBtn').textContent = t(mode === 'failed' ? 'channel.outageReload' : 'channel.outageRejoin');
+}
+
+function hideOutageBanner() {
+    $('#outageBanner').classList.add('hidden');
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +844,7 @@ function ensureSelfMember() {
 }
 
 function dropPeer(peerId, { silent = false } = {}) {
+    cancelPeerRecovery(peerId);
     members.delete(peerId);
     mesh?.removePeer(peerId);
     hub?.unwatch(peerId);
@@ -718,7 +918,10 @@ function renderMembers() {
 
     list.replaceChildren(
         ...sorted.map(([peerId, info]) => {
-            const node = el('li', { class: 'member' + (info.self ? ' self-member' : ''), dataset: { id: peerId } });
+            const node = el('li', {
+                class: 'member' + (info.self ? ' self-member' : '') + (peerRecovery.has(peerId) ? ' lost' : ''),
+                dataset: { id: peerId },
+            });
             node.append(
                 memberAvatarNode(info),
                 el(
@@ -735,6 +938,7 @@ function renderMembers() {
                         { class: 'member-sub' },
                         info.peer_presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
                         info.self && textOnly ? el('span', { class: 'badge', text: t('channel.textOnlyBadge') }) : null,
+                        !info.self ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') }) : null,
                         micIconNode(info.peer_audio_status)
                     )
                 )
@@ -1700,6 +1904,14 @@ function teardown() {
 }
 
 function teardownMedia() {
+    stopRecoveryScan();
+    clearPeerRecovery();
+    hideOutageBanner();
+    b1Attempts = 0;
+    b1InFlight = false;
+    selfReconnecting = false;
+    clearTimeout(b1Timer);
+    clearTimeout(b1ResetTimer);
     stopMicTest();
     mesh?.close();
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
@@ -1801,6 +2013,16 @@ if (location.hash === '#debug') {
                 gain: hub?.players.get(peerId)?.gain.gain.value ?? null,
                 elVolume: audioEls.get(peerId)?.volume ?? null,
             })),
+        recovery: {
+            peers: Object.fromEntries(
+                [...peerRecovery.entries()].map(([peerId, r]) => [
+                    peerId,
+                    { attempts: r.attempts, state: r.lastState, escalated: r.escalated, brokenForMs: Date.now() - r.brokenAt },
+                ]),
+            ),
+            b1Attempts,
+            b1InFlight,
+        },
     });
     // e2e aid: swap the outgoing mic track for a synthetic sine — verifies the
     // WebRTC chain without depending on acoustic mic/speaker hardware
@@ -1888,6 +2110,8 @@ if (location.hash === '#debug') {
     };
     // probe: force the AudioContext suspended/running to test the fallback migration
     window.__vcCtx = (op) => (op === 'suspend' ? hub?.ctx?.suspend() : hub?.ctx?.resume());
+    // probe: direct access to the mesh (pc states, restartIce) for recovery tests
+    window.__vcMesh = () => mesh;
     // probe: persistent tap on the outgoing (post-gain) mic stream; sync read, external pacing
     window.__vcOutTap = () => {
         if (!hub?.ctx || !hub.mic) return null;

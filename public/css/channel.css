@@ -257,6 +257,70 @@ body {
     color: var(--danger);
 }
 
+/* broken media link (connectionState disconnected/failed) */
+.member.bad .member-avatar {
+    opacity: 0.45;
+}
+
+.member.bad .member-name {
+    color: var(--danger);
+}
+
+/* recovery badge: hidden until self-healing kicks in on a broken link */
+.member-sub .badge.recover-badge {
+    display: none;
+    background: var(--danger-dim);
+    color: var(--danger);
+}
+
+.member.lost .recover-badge {
+    display: inline-flex;
+}
+
+/* media outage banner — shown when automatic recovery is running/failed */
+.outage-banner {
+    position: fixed;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(92vw, 460px);
+    padding: 8px 10px 8px 14px;
+    border-radius: 999px;
+    background: var(--bg-2);
+    border: 1px solid var(--danger-dim);
+    box-shadow: var(--shadow-1);
+}
+
+.outage-banner[data-mode='failed'] {
+    border-color: var(--danger);
+}
+
+.outage-icon {
+    color: var(--danger);
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.outage-text {
+    display: flex;
+    flex-direction: column;
+    font-size: 12px;
+    line-height: 1.35;
+    min-width: 0;
+}
+
+.outage-text strong {
+    font-size: 12.5px;
+}
+
+.outage-text span {
+    color: var(--text-2);
+}
+
 /* host actions on a member card */
 .member-actions {
     display: none;

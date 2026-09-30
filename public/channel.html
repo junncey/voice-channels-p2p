@@ -246,6 +246,23 @@
 
         <input type="file" id="imageFileInput" accept="image/*" multiple hidden />
 
+        <!-- 语音链路中断横幅：自愈进行中 / 自愈失败 -->
+        <div id="outageBanner" class="outage-banner hidden" role="alert">
+            <span class="outage-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="2" y1="2" x2="22" y2="22" />
+                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6" />
+                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 1.16-.29 2.26-.8 3.22" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                </svg>
+            </span>
+            <span class="outage-text">
+                <strong id="outageTitle"></strong>
+                <span id="outageHint"></span>
+            </span>
+            <button id="outageActionBtn" class="btn primary sm"></button>
+        </div>
+
         <div id="toasts" class="toasts"></div>
 
         <script src="/socket.io/socket.io.js"></script>
