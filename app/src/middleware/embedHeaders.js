@@ -8,6 +8,11 @@ const config = require('../config');
  * Controls which origins may embed MiroTalk P2P in an <iframe> via CSP
  * `frame-ancestors` (and `X-Frame-Options` for legacy browsers).
  * Configured via ALLOWED_EMBED_ORIGINS env var. See config.server.embed.
+ *
+ * Fail-closed defaults: with no ALLOWED_EMBED_ORIGINS configured only
+ * same-origin embedding is allowed ('self' is required — the app iframes its
+ * own pages for share popups). The admin console is NEVER embeddable, whatever
+ * the config says (frame-ancestors 'none' + X-Frame-Options: DENY).
  */
 const embedAllowedOrigins = Array.isArray(config?.server?.embed?.allowedOrigins)
     ? config.server.embed.allowedOrigins
@@ -15,8 +20,9 @@ const embedAllowedOrigins = Array.isArray(config?.server?.embed?.allowedOrigins)
 
 function buildEmbedCsp(origins) {
     if (!origins || origins.length === 0) {
-        // Allow embedding from anywhere (default, no header set)
-        return null;
+        // Default (no ALLOWED_EMBED_ORIGINS): same-origin only — never allow
+        // embedding from anywhere.
+        return { csp: "frame-ancestors 'self'", xfo: 'SAMEORIGIN' };
     }
     // Single-token shortcuts
     if (origins.length === 1) {
@@ -45,14 +51,28 @@ function buildEmbedCsp(origins) {
 
 const embedCsp = buildEmbedCsp(embedAllowedOrigins);
 
+/**
+ * Per-path embed policy: the admin console and its API must never be framable,
+ * regardless of the configured embed origins.
+ */
+function embedPolicyFor(pathname) {
+    if (pathname === '/admin' || pathname.startsWith('/api/admin/')) {
+        return { csp: "frame-ancestors 'none'", xfo: 'DENY' };
+    }
+    return embedCsp;
+}
+
 const applyEmbedHeaders = (req, res, next) => {
-    if (embedCsp) {
-        // Merge with any existing CSP header set earlier in the chain
+    const policy = embedPolicyFor(req.path);
+    if (policy) {
+        // Merge with any existing CSP header set earlier in the chain (the
+        // base helmet policy never sets frame-ancestors, so the merged header
+        // contains exactly one)
         const existing = res.getHeader('Content-Security-Policy');
-        const merged = existing ? `${existing}; ${embedCsp.csp}` : embedCsp.csp;
+        const merged = existing ? `${existing}; ${policy.csp}` : policy.csp;
         res.setHeader('Content-Security-Policy', merged);
-        if (embedCsp.xfo) {
-            res.setHeader('X-Frame-Options', embedCsp.xfo);
+        if (policy.xfo) {
+            res.setHeader('X-Frame-Options', policy.xfo);
         }
     }
     next();
@@ -61,6 +81,7 @@ const applyEmbedHeaders = (req, res, next) => {
 module.exports = {
     applyEmbedHeaders,
     buildEmbedCsp,
+    embedPolicyFor,
     embedAllowedOrigins,
     embedCsp,
 };

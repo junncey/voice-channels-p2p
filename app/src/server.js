@@ -142,7 +142,8 @@ function signConsoleToken(payload, expiresIn) {
 function verifyConsoleToken(token) {
     if (!token || typeof token !== 'string') return null;
     try {
-        return jwt.verify(token, channelsCfg.adminJwtSecret);
+        // pin the algorithm so tokens signed with another alg are never accepted
+        return jwt.verify(token, channelsCfg.adminJwtSecret, { algorithms: ['HS256'] });
     } catch {
         return null;
     }
@@ -250,7 +251,9 @@ app.use(
         },
     }),
     helmet.noSniff(),
-    helmet.referrerPolicy({ policy: 'no-referrer' })
+    helmet.referrerPolicy({ policy: 'no-referrer' }),
+    // HSTS (180-day default); over plain HTTP browsers ignore the header
+    helmet.hsts()
 );
 app.use(applyEmbedHeaders);
 
@@ -383,7 +386,9 @@ app.post('/api/host/login', loginLimiter, (req, res) => {
     }
 
     log.info('Host login ok', { channelId, username: host.username });
-    res.json({ token: signConsoleToken({ role: 'host', channelId, username: host.username }, channelsCfg.hostJwtExp) });
+    const payload = { role: 'host', channelId, username: host.username };
+    if (host.via) payload.via = host.via; // 'default-moderator' fallback marker, re-checked at join
+    res.json({ token: signConsoleToken(payload, channelsCfg.hostJwtExp) });
 });
 
 // ---------------------------------------------------------------------------
@@ -408,7 +413,7 @@ app.post('/api/admin/login', loginLimiter, (req, res) => {
     if (!password || typeof password !== 'string') {
         return res.status(400).json({ error: 'Missing password' });
     }
-    if (password !== channelsCfg.adminPassword) {
+    if (!safeEqualStrings(password, channelsCfg.adminPassword)) {
         log.warn('Admin login failed', { ip: getIP(req) });
         return res.status(401).json({ error: 'unauthorized' });
     }
@@ -422,7 +427,8 @@ app.post('/api/admin/login', loginLimiter, (req, res) => {
  * disconnect cleanup tears the room structures down.
  */
 function evictChannelPeers(channelId, reason) {
-    const room = channels[channelId];
+    // Object.hasOwn: the id is client-visible via the admin API path
+    const room = Object.hasOwn(channels, channelId) ? channels[channelId] : null;
     if (!room) return 0;
     let evicted = 0;
     for (const sock of Object.values(room)) {
@@ -562,11 +568,12 @@ io.sockets.on('connect', async (socket) => {
      * On peer disconnected
      */
     socket.on('disconnect', async (reason) => {
-        for (let channel in socket.channels) {
+        for (const channel of Object.keys(socket.channels)) {
             await removePeerFrom(channel, socket, reason);
         }
         log.debug('[' + socket.id + '] disconnected', { reason });
         delete sockets[socket.id];
+        joinFailures.delete(socket.id); // per-socket state cleanup
     });
 
     /**
@@ -584,44 +591,72 @@ io.sockets.on('connect', async (socket) => {
 
         const { channel, peer_uuid, peer_name } = config;
 
+        // Brute-force guard: a socket with too many consecutive failed join
+        // authentications is silently ignored for the cooldown window
+        if (isJoinThrottled(socket.id)) {
+            log.warn('[' + socket.id + '] join dropped: auth-failure cooldown', { channel });
+            return;
+        }
+
         if (!Validate.isValidRoomName(channel) || !channelStore.isValidId(channel)) {
             log.warn('[' + socket.id + '] invalid channel id', { channel });
+            recordJoinFailure(socket.id);
             return socket.emit('unauthorized');
         }
 
-        if (channel in socket.channels) {
+        if (Object.hasOwn(socket.channels, channel)) {
             return log.debug('[' + socket.id + '] [Warning] already joined', channel);
         }
 
         // Channel must be registered — or, with temporary rooms enabled, any
-        // valid id spawns an ephemeral in-memory room
+        // valid id MAY become an ephemeral in-memory room. Temp creation is
+        // DEFERRED until every auth check passed so a rejected join (bad
+        // token/password) can never spawn (and later leak) an empty room.
         let channelDef = channelStore.get(channel);
-        if (!channelDef && tempRoomsEnabled()) {
-            channelDef = channelStore.getOrCreateTemp(channel);
-        }
-        if (!channelDef) {
+        const wouldCreateTemp = !channelDef && tempRoomsEnabled();
+        if (!channelDef && !wouldCreateTemp) {
             log.warn('[' + socket.id + '] channel not found in registry', { channel });
             return socket.emit('channelNotFound');
         }
 
         // Presenter: valid host JWT issued for THIS channel, and the host must
-        // still be configured (token may predate a config change).
+        // still be configured (token may predate a config change). Fallback
+        // tokens (via: 'default-moderator', issued by host login for channels
+        // without configured hosts) stay valid only while the channel is STILL
+        // hostless and the shared default-moderator feature is enabled.
         let is_presenter = false;
         if (peer_token) {
             const payload = verifyConsoleToken(peer_token);
-            if (payload && payload.role === 'host' && payload.channelId === channel && channelStore.isHost(channel, payload.username)) {
+            const fallbackModeratorOk =
+                payload?.via === 'default-moderator' &&
+                Boolean(channelsCfg.defaultModerator) &&
+                channelStore.isHostless(channel);
+            if (
+                payload &&
+                payload.role === 'host' &&
+                payload.channelId === channel &&
+                payload.username &&
+                (channelStore.isHost(channel, payload.username) || fallbackModeratorOk)
+            ) {
                 is_presenter = true;
-                log.debug('[' + socket.id + '] joining as configured host', { channel, username: payload.username });
+                log.debug('[' + socket.id + '] joining as host', {
+                    channel,
+                    username: payload.username,
+                    via: payload.via || 'configured',
+                });
             } else {
                 log.warn('[' + socket.id + '] invalid host token for channel', { channel });
+                recordJoinFailure(socket.id);
                 return socket.emit('unauthorized');
             }
         }
 
         // Persistent channel password (set in the admin console). Hosts
-        // authenticate with their own credentials and always pass.
-        if (!is_presenter && channelDef.passwordHash && !channelStore.verifyChannelPassword(channel, channel_password)) {
+        // authenticate with their own credentials and always pass. A pending
+        // temp room (channelDef still null) has no password yet.
+        if (!is_presenter && channelDef?.passwordHash && !channelStore.verifyChannelPassword(channel, channel_password)) {
             log.debug('[' + socket.id + '] [Warning] channel password required/invalid', { channel });
+            recordJoinFailure(socket.id);
             return socket.emit('channelPasswordRequired');
         }
 
@@ -645,7 +680,7 @@ io.sockets.on('connect', async (socket) => {
         }
 
         // Capacity hard check (hosts may always join to manage their channel)
-        const maxParticipants = channelDef.maxParticipants || 8;
+        const maxParticipants = channelDef?.maxParticipants || 8;
         if (!is_presenter && !is_rejoin && getPeerCount(channel) >= maxParticipants) {
             log.debug('[' + socket.id + '] channel is full', { channel, count: getPeerCount(channel), maxParticipants });
             return socket.emit('roomIsBusy', { maxParticipants });
@@ -656,6 +691,7 @@ io.sockets.on('connect', async (socket) => {
         const roomLocked = peers[channel]?.['lock'] === true && !safeEqualStrings(peers[channel]?.['password'], channel_password);
         if (roomLocked) {
             log.debug('[' + socket.id + '] [Warning] room is locked', { channel });
+            recordJoinFailure(socket.id);
             return socket.emit('roomIsLocked');
         }
 
@@ -676,10 +712,21 @@ io.sockets.on('connect', async (socket) => {
             return socket.emit('roomIsJoinLocked');
         }
 
+        // Auth passed — only now materialize a pending temporary room, so a
+        // rejected join never leaves one behind (getOrCreateTemp returns null
+        // at the temp room cap)
+        if (!channelDef) {
+            channelDef = channelStore.getOrCreateTemp(channel);
+            if (!channelDef) {
+                log.warn('[' + socket.id + '] temp room cap reached', { channel });
+                return socket.emit('channelNotFound');
+            }
+        }
+
         // Auth passed — safe to create the room structures now
-        if (!(channel in channels)) channels[channel] = {};
-        if (!(channel in peers)) peers[channel] = {};
-        if (!(channel in presenters)) presenters[channel] = {};
+        if (!Object.hasOwn(channels, channel)) channels[channel] = {};
+        if (!Object.hasOwn(peers, channel)) peers[channel] = {};
+        if (!Object.hasOwn(presenters, channel)) presenters[channel] = {};
 
         if (is_presenter) {
             const presenter = { peer_ip, peer_name, peer_uuid, is_presenter: true };
@@ -718,6 +765,8 @@ io.sockets.on('connect', async (socket) => {
         socket.channels[channel] = channel;
 
         log.debug('[join] channel peers', { channel, peers: getRoomPeers(channel) });
+
+        joinFailures.delete(socket.id); // a successful join resets the failure counter
 
         // Send room info to the joined peer
         await sendToPeer(socket.id, sockets, 'serverInfo', {
@@ -760,7 +809,9 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
-     * Handle Room action (presenter gated): lock/unlock/joinLock/checkPassword
+     * Handle Room action (presenter gated): lock/unlock/joinLock.
+     * (A former `checkPassword` action was removed: nothing in the client used
+     * it and it let any socket probe the room password unauthenticated.)
      */
     socket.on('roomAction', async (cfg) => {
         const config = checkXSS(cfg);
@@ -768,7 +819,9 @@ io.sockets.on('connect', async (socket) => {
 
         const { room_id, peer_name, peer_uuid, password, action } = config;
 
-        if (!peers[room_id]) return;
+        // the sender must be a joined member of the room (also blocks probes
+        // against arbitrary or inherited map keys)
+        if (!isPeerInRoom(room_id, socket.id)) return;
 
         const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
 
@@ -796,15 +849,6 @@ io.sockets.on('connect', async (socket) => {
                     delete peers[room_id]['joinLock'];
                     await sendToRoom(room_id, socket.id, 'roomAction', { peer_name, action });
                     break;
-                case 'checkPassword': {
-                    const data = {
-                        peer_name: peer_name,
-                        action: action,
-                        password: safeEqualStrings(password, peers[room_id]['password']) ? 'OK' : 'KO',
-                    };
-                    await sendToPeer(socket.id, sockets, 'roomAction', data);
-                    break;
-                }
                 default:
                     break;
             }
@@ -823,9 +867,9 @@ io.sockets.on('connect', async (socket) => {
         const { room_id, peer_name_old, peer_name_new } = config;
 
         let peer_id_to_update = null;
-        for (let peer_id in peers[room_id]) {
+        for (const [peer_id, peer] of Object.entries(peers[room_id] || {})) {
             if (peer_id == socket.id) {
-                peers[room_id][peer_id]['peer_name'] = peer_name_new;
+                peer['peer_name'] = peer_name_new;
                 if (presenters[room_id] && presenters[room_id][peer_id]) {
                     presenters[room_id][peer_id]['peer_name'] = peer_name_new;
                 }
@@ -863,7 +907,8 @@ io.sockets.on('connect', async (socket) => {
         }
 
         const name = typeof peer_name_new === 'string' ? peer_name_new.trim().slice(0, 24) : '';
-        if (!name || !peers[room_id]?.[peer_id]) return;
+        // the rename target must be a joined member of the room
+        if (!name || !isPeerInRoom(room_id, peer_id)) return;
 
         const old = peers[room_id][peer_id]['peer_name'];
         peers[room_id][peer_id]['peer_name'] = name;
@@ -874,8 +919,8 @@ io.sockets.on('connect', async (socket) => {
 
         // everyone INCLUDING the host gets the update — the host's member list
         // and the chat notice must follow too (sendToRoom would skip the sender)
-        for (const sid in channels[room_id]) {
-            await channels[room_id][sid].emit('peerName', { peer_id, peer_name: name, peer_name_old: old });
+        for (const sock of Object.values(channels[room_id] || {})) {
+            await sock.emit('peerName', { peer_id, peer_name: name, peer_name_old: old });
         }
     });
 
@@ -889,7 +934,7 @@ io.sockets.on('connect', async (socket) => {
         if (!Validate.isValidData(cfg)) return;
 
         const { room_id, avatar } = cfg;
-        if (!peers[room_id]?.[socket.id]) return;
+        if (!isPeerInRoom(room_id, socket.id)) return;
 
         const valid =
             typeof avatar === 'string' &&
@@ -907,8 +952,8 @@ io.sockets.on('connect', async (socket) => {
 
         // everyone INCLUDING the sender — the sender's own DOM is already
         // up to date, the echo just keeps the room in lockstep
-        for (const sid in channels[room_id]) {
-            await channels[room_id][sid].emit('peerAvatar', {
+        for (const sock of Object.values(channels[room_id] || {})) {
+            await sock.emit('peerAvatar', {
                 peer_id: socket.id,
                 peer_name,
                 avatar: valid ? avatar : null,
@@ -933,9 +978,9 @@ io.sockets.on('connect', async (socket) => {
         if (element !== 'audio') return;
 
         const data = { peer_id, peer_name, element, status: status === true };
-        for (let id in peers[room_id]) {
-            if (peers[room_id][id]['peer_name'] == peer_name && id == socket.id) {
-                peers[room_id][id]['peer_audio_status'] = status === true;
+        for (const [id, peer] of Object.entries(peers[room_id] || {})) {
+            if (peer['peer_name'] == peer_name && id == socket.id) {
+                peer['peer_audio_status'] = status === true;
                 break;
             }
         }
@@ -969,6 +1014,9 @@ io.sockets.on('connect', async (socket) => {
         if (send_to_all) {
             await sendToRoom(room_id, socket.id, 'peerAction', data);
         } else {
+            // targeted action: the target must share a room with the sender
+            // (same membership gate as the SDP/ICE relay)
+            if (!isRelayAllowed(socket, peer_id)) return;
             await sendToPeer(peer_id, sockets, 'peerAction', data);
         }
     });
@@ -983,6 +1031,9 @@ io.sockets.on('connect', async (socket) => {
         // peer_id here is the TARGET to kick; the caller's identity is the
         // server-controlled socket.id, not anything the client supplies.
         const { room_id, peer_id, peer_uuid, peer_name, peer_kicked_reason } = config;
+
+        // the sender and the kick target must both be members of the same room
+        if (!isPeerInRoom(room_id, socket.id) || !isPeerInRoom(room_id, peer_id)) return;
 
         const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
         if (isPresenter) {
@@ -1000,8 +1051,8 @@ io.sockets.on('connect', async (socket) => {
      */
     async function addPeerTo(channel) {
         const roomPeers = getRoomPeers(channel);
-        for (let id in channels[channel]) {
-            await channels[channel][id].emit('addPeer', {
+        for (const [id, sock] of Object.entries(channels[channel] || {})) {
+            await sock.emit('addPeer', {
                 peer_id: socket.id,
                 peers: roomPeers,
                 should_create_offer: false,
@@ -1022,7 +1073,7 @@ io.sockets.on('connect', async (socket) => {
      * @param {string} channel channel id
      */
     async function removePeerFrom(channel, socket, reason = 'unknown') {
-        if (!(channel in socket.channels)) {
+        if (!Object.hasOwn(socket.channels, channel)) {
             return log.debug('[' + socket.id + '] [Warning] not in ', channel);
         }
         try {
@@ -1044,8 +1095,8 @@ io.sockets.on('connect', async (socket) => {
 
         log.debug('[removePeerFrom]', { channel, reason, peers_left: getPeerCount(channel) });
 
-        for (let id in channels[channel]) {
-            await channels[channel][id].emit('removePeer', { peer_id: socket.id });
+        for (const [id, sock] of Object.entries(channels[channel] || {})) {
+            await sock.emit('removePeer', { peer_id: socket.id });
             socket.emit('removePeer', { peer_id: id });
             log.debug('[' + socket.id + '] emit removePeer [' + id + ']');
         }
@@ -1062,9 +1113,11 @@ io.sockets.on('connect', async (socket) => {
      * Send async data to all peers in the same room except yourself
      */
     async function sendToRoom(room_id, socket_id, msg, config = {}) {
-        for (let peer_id in channels[room_id]) {
+        // Object.hasOwn keeps inherited keys ('constructor' etc.) out of the lookup
+        const room = room_id && Object.hasOwn(channels, room_id) ? channels[room_id] : {};
+        for (const [peer_id, sock] of Object.entries(room)) {
             if (peer_id != socket_id) {
-                await channels[room_id][peer_id].emit(msg, config);
+                await sock.emit(msg, config);
             }
         }
     }
@@ -1073,7 +1126,7 @@ io.sockets.on('connect', async (socket) => {
      * Send async data to specified peer
      */
     async function sendToPeer(peer_id, sockets, msg, config = {}) {
-        if (peer_id in sockets) {
+        if (peer_id && Object.hasOwn(sockets, peer_id)) {
             await sockets[peer_id].emit(msg, config);
         }
     }
@@ -1083,11 +1136,41 @@ io.sockets.on('connect', async (socket) => {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Join authentication cooldown (brute-force guard)
+// ---------------------------------------------------------------------------
+
+// Consecutive failed join authentications (invalid id, bad/missing host token,
+// wrong channel or room password) per socket.id. At JOIN_FAIL_LIMIT further
+// joins from that socket are ignored for JOIN_FAIL_COOLDOWN_MS — the join path
+// must not become a password brute-force oracle. The counter resets on a
+// successful join and on disconnect.
+const JOIN_FAIL_LIMIT = 5;
+const JOIN_FAIL_COOLDOWN_MS = 60 * 1000;
+const joinFailures = new Map(); // socket.id -> { count, ts } (ts = last failure)
+
+function isJoinThrottled(socketId) {
+    const entry = joinFailures.get(socketId);
+    if (!entry || entry.count < JOIN_FAIL_LIMIT) return false;
+    // the window is measured from the last failure; once it elapses the socket
+    // gets a fresh attempt (a new failure re-arms the cooldown)
+    return Date.now() - entry.ts < JOIN_FAIL_COOLDOWN_MS;
+}
+
+function recordJoinFailure(socketId) {
+    const entry = joinFailures.get(socketId) || { count: 0, ts: 0 };
+    entry.count++;
+    entry.ts = Date.now();
+    joinFailures.set(socketId, entry);
+}
+
 /**
  * Check if a socket is a joined peer of the given room.
  */
 function isPeerInRoom(room_id, socket_id) {
-    return !!(room_id && peers[room_id] && peers[room_id][socket_id]);
+    if (!room_id || !socket_id || !Object.hasOwn(peers, room_id)) return false;
+    // room meta keys ('lock'/'password'/'joinLock') are never members
+    return Object.hasOwn(peers[room_id], socket_id) && !roomMetaKeys.has(socket_id);
 }
 
 /**
@@ -1098,7 +1181,8 @@ function isPeerInRoom(room_id, socket_id) {
 function isRelayAllowed(socket, peer_id) {
     if (!peer_id || typeof peer_id !== 'string') return false;
     for (const channel of Object.keys(socket.channels || {})) {
-        if (channels[channel] && peer_id in channels[channel]) return true;
+        // Object.hasOwn keeps inherited keys ('constructor' etc.) out of the lookup
+        if (Object.hasOwn(channels, channel) && Object.hasOwn(channels[channel], peer_id)) return true;
     }
     return false;
 }
@@ -1159,4 +1243,13 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
     log.debug('PROCESS', 'SIGTERM');
     process.exit();
+});
+
+// A rejected async socket handler must never take the whole process down
+// (Node >= 15 terminates on unhandled rejections): log and keep serving.
+process.on('unhandledRejection', (reason) => {
+    log.error(
+        'Unhandled promise rejection',
+        reason instanceof Error ? { error: reason.message, stack: reason.stack } : { reason: String(reason) }
+    );
 });

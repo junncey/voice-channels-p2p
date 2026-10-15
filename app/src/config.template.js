@@ -61,10 +61,13 @@ module.exports = {
          * Controls which origins are allowed to embed this app in an <iframe>
          * via the HTTP `Content-Security-Policy: frame-ancestors` header.
          *
-         * - Empty / unset  → header NOT set, embedding allowed anywhere (default)
+         * - Empty / unset  → same-origin only: frame-ancestors 'self' (default)
          * - 'none'         → block ALL embedding
-         * - 'self'         → only same-origin embedding
+         * - 'self'         → only same-origin embedding (same as the default)
          * - list           → comma-separated origins, 'self' implicitly included
+         *
+         * /admin and /api/admin/* always get frame-ancestors 'none' and
+         * X-Frame-Options: DENY regardless of this setting.
          */
         embed: {
             allowedOrigins: process.env.ALLOWED_EMBED_ORIGINS

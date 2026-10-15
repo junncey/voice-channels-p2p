@@ -137,6 +137,15 @@ describe('test-channelStore', () => {
             store.create({ id: 'x', name: 'too short' }).ok.should.be.false();
         });
 
+        it('should reject Object.prototype-poisoning reserved ids', () => {
+            for (const bad of ['constructor', '__proto__', 'prototype']) {
+                store.isValidId(bad).should.be.false(bad);
+                store.create({ id: bad, name: 'n' }).ok.should.be.false(bad);
+            }
+            // exact match only: the id pattern is case-sensitive
+            store.isValidId('Constructor').should.be.true();
+        });
+
         it('should reject duplicate ids and enforce field limits', () => {
             store.create({ id: 'dup', name: 'first' }).ok.should.be.true();
             store.create({ id: 'dup', name: 'second' }).ok.should.be.false();
@@ -302,6 +311,82 @@ describe('test-channelStore', () => {
         });
     });
 
+    describe('6. Temp room cap', () => {
+        it('should refuse to create temp rooms beyond MAX_TEMP_ROOMS', () => {
+            const store = newStore('tempcap');
+            for (let i = 0; i < ChannelStore.MAX_TEMP_ROOMS; i++) {
+                should(store.getOrCreateTemp(`tmp-${i}`)).be.ok();
+            }
+            should(store.getOrCreateTemp('overflow-room')).be.null();
+            // existing rooms stay reachable at the cap
+            store.getOrCreateTemp('tmp-0').should.be.ok();
+        });
+    });
+
+    describe('7. Registry corruption recovery', () => {
+        it('should quarantine an unreadable registry and start empty without a backup', () => {
+            const filePath = tempFile('quarantine');
+            fs.writeFileSync(filePath, '{ not json', 'utf8');
+            const store = new ChannelStore({ filePath, autoInit: false });
+            store.channels.should.be.an.Array().and.empty();
+            // the broken file was renamed aside, never silently overwritten
+            fs.existsSync(`${filePath}.corrupt`).should.be.true();
+            fs.readFileSync(`${filePath}.corrupt`, 'utf8').should.equal('{ not json');
+            fs.existsSync(filePath).should.be.false();
+        });
+
+        it('should restore a quarantined registry from the .bak copy', () => {
+            const filePath = tempFile('quarantine-bak');
+            const store = new ChannelStore({ filePath, autoInit: true });
+            store.create({ id: 'keep-me', name: 'kept' });
+            store.create({ id: 'second', name: 'kept2' }); // .bak now holds the pre-write state
+            fs.writeFileSync(filePath, 'garbage{', 'utf8'); // corrupt the live file
+
+            const reloaded = new ChannelStore({ filePath, autoInit: false });
+            reloaded.exists('keep-me').should.be.true();
+            reloaded.exists('second').should.be.false(); // .bak predates the last write
+            fs.existsSync(`${filePath}.corrupt`).should.be.true();
+        });
+
+        it('should refresh the .bak copy before every save', () => {
+            const filePath = tempFile('bak');
+            const store = new ChannelStore({ filePath, autoInit: true });
+            store.create({ id: 'one', name: 'first' });
+            fs.existsSync(`${filePath}.bak`).should.be.true();
+            JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.should.be.empty(); // pre-create state
+            store.create({ id: 'two', name: 'second' });
+            JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.map((c) => c.id).should.eql(['one']);
+        });
+    });
+
+    describe('8. Default-moderator fallback tokens', () => {
+        it('should mark fallback logins with a via claim and configured hosts without', () => {
+            const store = newStore('fallback-claim', { defaultModerator: 'letmein' });
+            store.create({ id: 'open', name: 'c' });
+            store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
+
+            const fallback = store.verifyHost('open', 'anyone', 'letmein');
+            fallback.should.be.ok();
+            fallback.username.should.equal('anyone');
+            fallback.via.should.equal('default-moderator');
+
+            store.verifyHost('hosted', 'a', 'b').should.eql({ username: 'a' }); // no via claim
+            should.not.exist(store.verifyHost('open', 'anyone', 'wrong'));
+        });
+
+        it('should report hostless channels for the join-time fallback re-check', () => {
+            const store = newStore('hostless', { defaultModerator: 'letmein' });
+            store.create({ id: 'open', name: 'c' });
+            store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
+            store.isHostless('open').should.be.true();
+            store.isHostless('hosted').should.be.false();
+            // configuring a real host revokes the fallback
+            store.update('open', { hosts: [{ username: 'real', password: 'pw' }] });
+            store.isHostless('open').should.be.false();
+            store.isHostless('missing').should.be.false();
+        });
+    });
+
     after(() => {
         for (const name of [
             'init',
@@ -319,9 +404,18 @@ describe('test-channelStore', () => {
             'settings-persist',
             'settings-bad',
             'settings-remove',
+            'reserved',
+            'tempcap',
+            'quarantine',
+            'quarantine-bak',
+            'bak',
+            'fallback-claim',
+            'hostless',
         ]) {
-            const filePath = tempFile(name);
-            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            for (const suffix of ['', '.bak', '.corrupt', '.tmp']) {
+                const filePath = tempFile(name) + suffix;
+                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            }
         }
     });
 });

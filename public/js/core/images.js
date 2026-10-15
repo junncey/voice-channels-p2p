@@ -15,6 +15,7 @@
 const CHUNK_CHARS = 12 * 1024; // base64 chars per frame — cross-browser safe
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // raw file picked/pasted by the user
 const MAX_TRANSFER_CHARS = 1600 * 1024; // receiver cap (~1.15 MB decoded)
+const MAX_INCOMING_TRANSFERS = 8; // concurrent reassemblies — img-start flood guard
 const SAFE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
@@ -97,7 +98,9 @@ export function sendImageData({ send, from, mime, dataUrl, batch = '' }) {
  * waste bandwidth up to the cap, never inject markup.
  *
  * @param {object} options
- * @param {function({from:string, dataUrl:string}):void} options.onDone
+ * @param {function({from:string, dataUrl:string, batch:string, peerId:string}):void} options.onDone
+ *        `peerId` is the DataChannel peer the frames arrived from — trust it
+ *        over the self-declared `from` field when picking a display name.
  * @param {function(reason:string):void} [options.onFail]
  */
 export function createImageReceiver({ onDone, onFail }) {
@@ -112,12 +115,15 @@ export function createImageReceiver({ onDone, onFail }) {
         if (onFail) onFail(reason, entry.batch);
     }
 
-    return function handleImageFrame(msg) {
+    return function handleImageFrame(msg, peerId) {
         if (!msg || typeof msg !== 'object') return;
 
         if (msg.type === 'img-start') {
             const { id, from, mime, size, total } = msg;
             if (typeof id !== 'string' || id.length > 64 || incoming.has(id)) return;
+            // at capacity: silently drop (fail() below is a no-op for
+            // never-registered ids) — a peer can't flood the map with ids
+            if (incoming.size >= MAX_INCOMING_TRANSFERS) return;
             if (!SAFE_MIMES.includes(mime)) return fail(id, 'bad-mime');
             if (typeof size !== 'number' || size <= 0 || size > MAX_TRANSFER_CHARS) return fail(id, 'bad-size');
             if (typeof total !== 'number' || total < 1 || total > 200) return fail(id, 'bad-total');
@@ -154,8 +160,14 @@ export function createImageReceiver({ onDone, onFail }) {
             const dataUrl = `data:${entry.mime};base64,${entry.parts.join('')}`;
             clearTimeout(entry.timer);
             incoming.delete(msg.id);
-            if (DATA_URL_RE.test(dataUrl)) onDone({ from: entry.from, dataUrl, batch: entry.batch });
-            else if (onFail) onFail('bad-data');
+            if (DATA_URL_RE.test(dataUrl)) {
+                onDone({
+                    from: entry.from,
+                    dataUrl,
+                    batch: entry.batch,
+                    peerId: typeof peerId === 'string' ? peerId : '',
+                });
+            } else if (onFail) onFail('bad-data');
         }
     };
 }

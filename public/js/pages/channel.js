@@ -26,6 +26,7 @@ const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
 const PEER_VOLUMES_KEY = 'vc_peer_volumes';
 const AVATAR_KEY = 'vc_avatar';
 const AVATAR_MAX_CHARS = 96 * 1024; // broadcast/storage cap for the avatar data URL
+const AVATARS_MAX = 100; // hard cap on remembered peer avatars (flood guard)
 const PTT_KEY_CODE = 'KeyV';
 
 const AVATAR_DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
@@ -172,12 +173,14 @@ let micDropdown = null;
 let spkDropdown = null;
 
 const imageReceiver = createImageReceiver({
-    onDone: ({ from, dataUrl, batch }) => {
+    onDone: ({ from, dataUrl, batch, peerId }) => {
         if (batch) chat.addBatchImage(batch, dataUrl, t('chat.image'));
         else {
             // a lone image IS the message — batched ones already chimed with
-            // their 'chat' text frame
-            chat.addImage({ name: from || '?', src: dataUrl, alt: t('chat.image') });
+            // their 'chat' text frame. The display name comes from the
+            // DataChannel peer, not the self-declared 'from' field.
+            const name = members.get(peerId)?.peer_name || from || '?';
+            chat.addImage({ name, src: dataUrl, alt: t('chat.image') });
             playSound('message');
         }
     },
@@ -452,7 +455,10 @@ function registerSocketHandlers() {
         updateMicIconNode(peer_id, status === true);
     });
 
-    socket.on('peerName', ({ peer_id, peer_name, peer_name_old }) => {
+    socket.on('peerName', ({ peer_id, peer_name: rawName, peer_name_old }) => {
+        // host-supplied: cap like the join/rename inputs so a hostile host
+        // can't push an oversized string into state or localStorage
+        const peer_name = String(rawName || '').slice(0, 24);
         if (!peer_name) return;
         const member = members.get(peer_id);
         const old = member?.peer_name;
@@ -499,8 +505,10 @@ function registerSocketHandlers() {
         const member = members.get(peerIdSafe(peer_id));
         if (member) member.avatar = url || undefined;
         if (peer_name) {
-            if (url) avatars.set(peer_name, url);
-            else avatars.delete(peer_name);
+            if (url) {
+                avatars.set(peer_name, url);
+                capAvatars();
+            } else avatars.delete(peer_name);
             chat.setAvatar(peer_name, url);
         }
         renderMembers();
@@ -619,7 +627,7 @@ function meshHandlers() {
                 return;
             }
             if (data.type === 'img-start' || data.type === 'img-chunk' || data.type === 'img-end') {
-                imageReceiver(data);
+                imageReceiver(data, peerId);
             }
         },
         onPeerState(peerId, state) {
@@ -863,7 +871,10 @@ function syncMembers(peersMap) {
             AVATAR_DATA_URL_RE.test(info.peer_avatar)
                 ? info.peer_avatar
                 : existing?.avatar;
-        if (avatar) avatars.set(name, avatar);
+        if (avatar) {
+            avatars.set(name, avatar);
+            capAvatars();
+        }
         members.set(peerId, {
             peer_name: name,
             peer_presenter: !!info.peer_presenter,
@@ -904,6 +915,7 @@ function dropPeer(peerId, { silent = false } = {}) {
     cancelPeerRecovery(peerId);
     clearConnectingBadge(peerId);
     members.delete(peerId);
+    pruneAvatars();
     mesh?.removePeer(peerId);
     hub?.unwatch(peerId);
     hub?.stopPeer(peerId);
@@ -914,6 +926,22 @@ function dropPeer(peerId, { silent = false } = {}) {
         audioEls.delete(peerId);
     }
     if (!silent) renderMembers();
+}
+
+/** avatars is keyed by display name — forget names no longer in the room. */
+function pruneAvatars() {
+    const present = new Set();
+    for (const info of members.values()) {
+        if (info.peer_name) present.add(info.peer_name);
+    }
+    for (const name of [...avatars.keys()]) {
+        if (!present.has(name)) avatars.delete(name);
+    }
+}
+
+/** Belt-and-braces: a peer cycling nicknames+avatars can't grow the map forever. */
+function capAvatars() {
+    while (avatars.size > AVATARS_MAX) avatars.delete(avatars.keys().next().value);
 }
 
 function memberAvatarNode(info) {
@@ -1119,6 +1147,12 @@ function onRenameSubmit(event) {
     closeRenameModal();
 }
 
+/** Button content from a static SVG constant + a textContent label — never
+ * string-built HTML, so a future interpolated label can't become an XSS sink. */
+function setIconBtn(btn, icon, label) {
+    btn.replaceChildren(el('span', { html: icon }), el('span', { text: label }));
+}
+
 function updateHeaderActions() {
     $('#hostBadge').classList.toggle('hidden', !isPresenter);
     // host login stays reachable after the auto-join (no pre-join overlay)
@@ -1126,8 +1160,7 @@ function updateHeaderActions() {
     const lockBtn = $('#lockBtn');
     lockBtn.classList.toggle('hidden', !isPresenter);
     if (isPresenter) {
-        const label = joinLockOn ? t('channel.unlockBtn') : t('channel.lockBtn');
-        lockBtn.innerHTML = (joinLockOn ? LOCK_SVG : UNLOCK_SVG) + `<span>${label}</span>`;
+        setIconBtn(lockBtn, joinLockOn ? LOCK_SVG : UNLOCK_SVG, joinLockOn ? t('channel.unlockBtn') : t('channel.lockBtn'));
     }
 }
 
@@ -1277,16 +1310,16 @@ function updateVoiceControls() {
     const live = onAir();
     if (!localStream) {
         micBtn.classList.add('muted');
-        micBtn.innerHTML = `${MIC_OFF_SVG}<span>${t('channel.enableVoice')}</span>`;
+        setIconBtn(micBtn, MIC_OFF_SVG, t('channel.enableVoice'));
     } else if (micOn && settings.ptt) {
         micBtn.classList.toggle('muted', !live);
-        micBtn.innerHTML = `${live ? MIC_ON_SVG : MIC_OFF_SVG}<span>${t('channel.pttOn')}</span>`;
+        setIconBtn(micBtn, live ? MIC_ON_SVG : MIC_OFF_SVG, t('channel.pttOn'));
     } else if (micOn) {
         micBtn.classList.remove('muted');
-        micBtn.innerHTML = `${MIC_ON_SVG}<span>${t('channel.micOn')}</span>`;
+        setIconBtn(micBtn, MIC_ON_SVG, t('channel.micOn'));
     } else {
         micBtn.classList.add('muted');
-        micBtn.innerHTML = `${MIC_OFF_SVG}<span>${t('channel.micOff')}</span>`;
+        setIconBtn(micBtn, MIC_OFF_SVG, t('channel.micOff'));
     }
     if (!live) {
         $('#micLevelBar').style.width = '0%';

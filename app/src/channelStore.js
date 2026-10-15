@@ -19,9 +19,18 @@ const Logs = require('./logs');
 const log = new Logs('channelStore');
 
 const CHANNEL_ID_PATTERN = /^[a-zA-Z0-9_-]{3,32}$/;
-const USERNAME_PATTERN = /^\S{1,32}$/;
+// IDs colliding with Object.prototype properties would poison the in-memory
+// maps keyed by channel id in server.js (a bracket lookup like map['constructor']
+// resolves to the inherited value instead of our entry) — reject them outright.
+// Exact match only: the id pattern is case-sensitive and generated ids (8 chars
+// from a reduced alphabet) can never collide with these reserved names.
+const RESERVED_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 const MAX_CHANNELS = 500;
+// Upper bound for live temporary rooms: getOrCreateTemp returns null at the cap
+// so a flood of joins on random ids can't grow the in-memory map without bound.
+const MAX_TEMP_ROOMS = 1000;
 const MIN_PARTICIPANTS = 2;
+const USERNAME_PATTERN = /^\S{1,32}$/;
 const MAX_PARTICIPANTS = 16; // mesh topology: keep small on purpose
 const NAME_MAX = 64;
 const DESCRIPTION_MAX = 200;
@@ -69,6 +78,11 @@ function isPlainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Pattern + reserved-name check shared by isValidId and validateDefinition. */
+function isAcceptableId(id) {
+    return CHANNEL_ID_PATTERN.test(id) && !RESERVED_IDS.has(id);
+}
+
 /**
  * Validate an incoming channel definition (admin API payload).
  * Returns { ok, errors, value } — `value` contains normalized fields.
@@ -88,6 +102,8 @@ function validateDefinition(input, { partial = false } = {}) {
         // empty id on CREATE means "auto-generate"; updates ignore the id field
         if (!id && partial) {
             errors.push(`id must match ${CHANNEL_ID_PATTERN} (3-32 chars: letters, digits, -, _)`);
+        } else if (id && RESERVED_IDS.has(id)) {
+            errors.push(`id is reserved: ${id}`);
         } else if (id && !CHANNEL_ID_PATTERN.test(id)) {
             errors.push(`id must match ${CHANNEL_ID_PATTERN} (3-32 chars: letters, digits, -, _)`);
         } else {
@@ -193,15 +209,9 @@ class ChannelStore {
     load({ createIfMissing = false } = {}) {
         try {
             if (fs.existsSync(this.filePath)) {
-                const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-                this.channels = Array.isArray(raw.channels)
-                    ? raw.channels.filter((ch) => isPlainObject(ch) && this.isValidId(ch.id))
-                    : [];
-                if (isPlainObject(raw.settings)) {
-                    for (const key of SETTING_KEYS) {
-                        if (typeof raw.settings[key] === 'boolean') this.settings[key] = raw.settings[key];
-                    }
-                }
+                const { channels, settings } = this.readRegistryFile(this.filePath);
+                this.channels = channels;
+                this.applySettings(settings);
                 log.info('Channel registry loaded', { file: this.filePath, channels: this.channels.length });
             } else if (createIfMissing) {
                 this.save();
@@ -209,14 +219,70 @@ class ChannelStore {
             }
         } catch (err) {
             log.error('Failed to load channel registry', { file: this.filePath, error: err.message });
-            this.channels = [];
+            this.recoverFromCorruptFile(err);
         }
     }
 
+    /** Parse a registry file into { channels, settings } — throws on unreadable/invalid JSON. */
+    readRegistryFile(file) {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        return {
+            channels: Array.isArray(raw.channels)
+                ? raw.channels.filter((ch) => isPlainObject(ch) && this.isValidId(ch.id))
+                : [],
+            settings: isPlainObject(raw.settings) ? raw.settings : {},
+        };
+    }
+
+    applySettings(settings) {
+        for (const key of SETTING_KEYS) {
+            if (typeof settings[key] === 'boolean') this.settings[key] = settings[key];
+        }
+    }
+
+    /**
+     * The registry file could not be parsed: quarantine it (rename to
+     * <file>.corrupt) so a future save can never silently overwrite the broken
+     * data with an empty registry, then try to restore <file>.bak. Starts empty
+     * only when neither file is usable.
+     */
+    recoverFromCorruptFile(err) {
+        const corruptPath = `${this.filePath}.corrupt`;
+        try {
+            fs.renameSync(this.filePath, corruptPath);
+            log.error('Channel registry quarantined', { from: this.filePath, to: corruptPath, error: err.message });
+        } catch (quarantineErr) {
+            log.error('Channel registry could not be quarantined', { file: this.filePath, error: quarantineErr.message });
+        }
+        const backupPath = `${this.filePath}.bak`;
+        try {
+            if (fs.existsSync(backupPath)) {
+                const { channels, settings } = this.readRegistryFile(backupPath);
+                this.channels = channels;
+                this.applySettings(settings);
+                log.warn('Channel registry restored from backup', { file: backupPath, channels: this.channels.length });
+                return;
+            }
+        } catch (bakErr) {
+            log.error('Channel registry backup unreadable', { file: backupPath, error: bakErr.message });
+        }
+        this.channels = [];
+    }
+
     save() {
+        // best-effort backup of the previous state before every write, so a
+        // corrupted main file can always be recovered (see recoverFromCorruptFile)
+        try {
+            if (fs.existsSync(this.filePath)) {
+                fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+            }
+        } catch (err) {
+            log.warn('Channel registry backup failed', { file: this.filePath, error: err.message });
+        }
         const data = JSON.stringify({ version: 1, settings: this.settings, channels: this.channels }, null, 4);
         const tmp = `${this.filePath}.tmp`;
-        fs.writeFileSync(tmp, data, 'utf8');
+        // mode 0o600: the registry holds password hashes (POSIX only; no-op on Windows)
+        fs.writeFileSync(tmp, data, { encoding: 'utf8', mode: 0o600 });
         try {
             fs.renameSync(tmp, this.filePath);
         } catch (err) {
@@ -231,7 +297,7 @@ class ChannelStore {
     }
 
     isValidId(id) {
-        return typeof id === 'string' && CHANNEL_ID_PATTERN.test(id);
+        return typeof id === 'string' && isAcceptableId(id);
     }
 
     /**
@@ -268,6 +334,10 @@ class ChannelStore {
     getOrCreateTemp(id, { maxParticipants = 8 } = {}) {
         let channel = this.temps.get(id);
         if (!channel) {
+            if (this.temps.size >= MAX_TEMP_ROOMS) {
+                log.warn('Temp channel cap reached, refusing to create', { id, cap: MAX_TEMP_ROOMS });
+                return null;
+            }
             const now = new Date().toISOString();
             channel = {
                 id,
@@ -443,7 +513,9 @@ class ChannelStore {
      * Verify host credentials for a channel.
      * Fallback: channels without configured hosts accept the shared
      * DEFAULT_CHANNEL_MODERATOR secret as the password (username is free-form).
-     * @returns {{username: string}|null}
+     * Fallback logins carry `via: 'default-moderator'` so the join path can
+     * re-check that the channel is STILL hostless before honoring the token.
+     * @returns {{username: string, via?: string}|null}
      */
     verifyHost(id, username, password) {
         const channel = this.get(id);
@@ -458,9 +530,15 @@ class ChannelStore {
         }
 
         if (this.defaultModerator && constantTimeEquals(password, this.defaultModerator)) {
-            return { username: (username || 'moderator').trim().slice(0, 32) };
+            return { username: (username || 'moderator').trim().slice(0, 32), via: 'default-moderator' };
         }
         return null;
+    }
+
+    /** True when the channel exists but has no hosts configured (fallback moderator territory). */
+    isHostless(id) {
+        const channel = this.get(id);
+        return !!(channel && (!Array.isArray(channel.hosts) || channel.hosts.length === 0));
     }
 
     /** Join-time re-check: is this username still a configured host? */
@@ -487,3 +565,4 @@ module.exports.verifyPassword = verifyPassword;
 module.exports.validateDefinition = validateDefinition;
 module.exports.CHANNEL_ID_PATTERN = CHANNEL_ID_PATTERN;
 module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
+module.exports.MAX_TEMP_ROOMS = MAX_TEMP_ROOMS;
