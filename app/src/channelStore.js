@@ -29,6 +29,18 @@ const MAX_CHANNELS = 500;
 // Upper bound for live temporary rooms: getOrCreateTemp returns null at the cap
 // so a flood of joins on random ids can't grow the in-memory map without bound.
 const MAX_TEMP_ROOMS = 1000;
+// Per-IP temp room quotas (counted on the normalized IP, see normalizeIp):
+// a single visitor may keep at most MAX_TEMPS_PER_IP live rooms and create
+// at most TEMP_CREATE_MAX_PER_WINDOW new ones per sliding window. Rooms count
+// as "owned" from creation until the last peer leaves (or admin removal), so
+// a normal "open, use, leave" cycle never hits either limit.
+const MAX_TEMPS_PER_IP = 3;
+const TEMP_CREATE_WINDOW_MS = 10 * 60 * 1000;
+const TEMP_CREATE_MAX_PER_WINDOW = 5;
+// Quota bookkeeping: one small timestamp array per IP. Stale arrays are pruned
+// on access; past this entry count the whole map is swept so IPs that never
+// come back can't accumulate.
+const TEMP_LOG_SWEEP_AT = 512;
 const MIN_PARTICIPANTS = 2;
 const USERNAME_PATTERN = /^\S{1,32}$/;
 const MAX_PARTICIPANTS = 16; // mesh topology: keep small on purpose
@@ -76,6 +88,40 @@ function constantTimeEquals(a, b) {
 
 function isPlainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Normalize a peer IP for per-IP temp room quotas: IPv6 collapses to its /64
+ * prefix (one machine can rotate addresses inside it at will), mapped IPv4
+ * (::ffff:1.2.3.4) keeps the IPv4 part, and "[v6]:port"/"v4:port" suffixes
+ * are dropped. Returns '' for anything unusable — quota tracking is skipped
+ * then (the global MAX_TEMP_ROOMS cap still applies).
+ */
+function normalizeIp(ip) {
+    if (typeof ip !== 'string') return '';
+    let addr = ip.trim().toLowerCase().split('%')[0];
+    if (!addr) return '';
+    if (addr.startsWith('[')) {
+        const end = addr.indexOf(']');
+        addr = end > 0 ? addr.slice(1, end) : addr.slice(1);
+    } else if ((addr.match(/:/g) || []).length === 1 && !addr.includes('::')) {
+        addr = addr.split(':')[0]; // bare "v4:port" — handshake.address carries no port, XFF might
+    }
+    if (!addr.includes(':')) return addr; // IPv4
+
+    const mapped = addr.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (mapped) return mapped[1];
+
+    // Expand "::" compression so the first 4 hextets (= /64) can be sliced off
+    const halves = addr.split('::');
+    if (halves.length > 2) return addr; // malformed — track as-is rather than mis-group
+    const head = halves[0] ? halves[0].split(':') : [];
+    const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+    const groups = [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail];
+    return groups
+        .slice(0, 4)
+        .map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? g.padStart(4, '0') : g))
+        .join(':');
 }
 
 /** Pattern + reserved-name check shared by isValidId and validateDefinition. */
@@ -203,6 +249,8 @@ class ChannelStore {
         this.channels = [];
         /** id -> ephemeral channel definition (see getTemp) */
         this.temps = new Map();
+        /** normalizedIp -> creation timestamps inside the rate window */
+        this.tempCreateLog = new Map();
         this.load({ createIfMissing: autoInit });
     }
 
@@ -331,14 +379,59 @@ class ChannelStore {
         return this.temps.has(id);
     }
 
-    getOrCreateTemp(id, { maxParticipants = 8 } = {}) {
+    /**
+     * Per-IP temp room quotas for a join that would CREATE a new room:
+     * concurrent live rooms owned by the IP + creations inside the sliding
+     * window. Pure check (no side effects beyond pruning expired timestamps)
+     * so the join path can pick a specific error for the client; getOrCreateTemp
+     * re-runs it as the real enforcement point.
+     * @returns {{ok: true}|{ok: false, reason: 'per-ip-limit'|'rate-limit'}}
+     */
+    checkTempQuota(creatorIp) {
+        const ip = normalizeIp(creatorIp);
+        if (!ip) return { ok: true };
+        return this.tempQuotaFor(ip);
+    }
+
+    /** Quota check on an already-normalized ip; prunes the ip's window in place. */
+    tempQuotaFor(ip, now = Date.now()) {
+        let owned = 0;
+        for (const ch of this.temps.values()) {
+            if (ch.creatorIp === ip) owned++;
+        }
+        if (owned >= MAX_TEMPS_PER_IP) return { ok: false, reason: 'per-ip-limit' };
+
+        const window = (this.tempCreateLog.get(ip) || []).filter((ts) => now - ts < TEMP_CREATE_WINDOW_MS);
+        this.tempCreateLog.set(ip, window);
+        if (this.tempCreateLog.size > TEMP_LOG_SWEEP_AT) this.sweepTempCreateLog(now);
+        if (window.length >= TEMP_CREATE_MAX_PER_WINDOW) return { ok: false, reason: 'rate-limit' };
+        return { ok: true };
+    }
+
+    /** Drop expired window arrays (and empty entries) across all tracked IPs. */
+    sweepTempCreateLog(now = Date.now()) {
+        for (const [ip, stamps] of this.tempCreateLog) {
+            const live = stamps.filter((ts) => now - ts < TEMP_CREATE_WINDOW_MS);
+            if (live.length) this.tempCreateLog.set(ip, live);
+            else this.tempCreateLog.delete(ip);
+        }
+    }
+
+    getOrCreateTemp(id, { maxParticipants = 8, creatorIp } = {}) {
         let channel = this.temps.get(id);
         if (!channel) {
             if (this.temps.size >= MAX_TEMP_ROOMS) {
                 log.warn('Temp channel cap reached, refusing to create', { id, cap: MAX_TEMP_ROOMS });
                 return null;
             }
-            const now = new Date().toISOString();
+            // per-IP quotas (skip when the caller gave no attributable IP)
+            const ip = normalizeIp(creatorIp);
+            const now = Date.now();
+            if (ip && !this.tempQuotaFor(ip, now).ok) {
+                log.warn('Temp channel per-IP quota exceeded, refusing to create', { id });
+                return null;
+            }
+            const isoNow = new Date(now).toISOString();
             channel = {
                 id,
                 name: id,
@@ -347,10 +440,12 @@ class ChannelStore {
                 maxParticipants,
                 hosts: [],
                 temporary: true,
-                createdAt: now,
-                updatedAt: now,
+                creatorIp: ip || undefined, // server-side only; never leaves sanitize()
+                createdAt: isoNow,
+                updatedAt: isoNow,
             };
             this.temps.set(id, channel);
+            if (ip) this.tempCreateLog.get(ip)?.push(now); // window array was just pruned by tempQuotaFor
             log.info('Temp channel created', { id });
         }
         return channel;
@@ -566,3 +661,7 @@ module.exports.validateDefinition = validateDefinition;
 module.exports.CHANNEL_ID_PATTERN = CHANNEL_ID_PATTERN;
 module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
 module.exports.MAX_TEMP_ROOMS = MAX_TEMP_ROOMS;
+module.exports.MAX_TEMPS_PER_IP = MAX_TEMPS_PER_IP;
+module.exports.TEMP_CREATE_MAX_PER_WINDOW = TEMP_CREATE_MAX_PER_WINDOW;
+module.exports.TEMP_CREATE_WINDOW_MS = TEMP_CREATE_WINDOW_MS;
+module.exports.normalizeIp = normalizeIp;

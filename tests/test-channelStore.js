@@ -323,6 +323,85 @@ describe('test-channelStore', () => {
         });
     });
 
+    describe('6b. Temp room per-IP quotas', () => {
+        const { normalizeIp } = ChannelStore;
+
+        it('should normalize IPs for quota tracking (IPv6 -> /64, mapped v4, ports)', () => {
+            normalizeIp('203.0.113.9').should.equal('203.0.113.9');
+            normalizeIp('203.0.113.9:8080').should.equal('203.0.113.9');
+            normalizeIp('2001:db8:1234:5678:aaaa:bbbb:cccc:dddd').should.equal('2001:0db8:1234:5678');
+            normalizeIp('2001:DB8::abcd').should.equal('2001:0db8:0000:0000');
+            normalizeIp('[2001:db8::1]:443').should.equal('2001:0db8:0000:0000');
+            normalizeIp('::ffff:192.168.1.5').should.equal('192.168.1.5');
+            normalizeIp('fe80::1%eth0').should.equal('fe80:0000:0000:0000');
+            normalizeIp('').should.equal('');
+            normalizeIp(null).should.equal('');
+        });
+
+        it('should cap live temp rooms per IP and free quota when rooms close', () => {
+            const store = newStore('tempip-cap');
+            const ip = '203.0.113.9';
+            for (let i = 0; i < ChannelStore.MAX_TEMPS_PER_IP; i++) {
+                should(store.getOrCreateTemp(`room-${i}`, { creatorIp: ip })).be.ok();
+            }
+            // a different visitor is unaffected
+            should(store.getOrCreateTemp('other-room', { creatorIp: '198.51.100.7' })).be.ok();
+            // ...but IPv6 rotation inside the creator's /64 must not grant fresh quota
+            should(store.getOrCreateTemp('v6-a', { creatorIp: '2001:db8::1' })).be.ok();
+            should(store.getOrCreateTemp('v6-b', { creatorIp: '2001:db8:0:0:0:0:0:2' })).be.ok();
+            should(store.getOrCreateTemp('v6-c', { creatorIp: '2001:db8::3' })).be.ok();
+            should(store.getOrCreateTemp('v6-d', { creatorIp: '2001:db8::4' })).be.null();
+            should(store.getOrCreateTemp('room-overflow', { creatorIp: ip })).be.null();
+            // the last peer leaving releases the slot
+            store.removeTempIfEmpty('room-0', 0);
+            should(store.getOrCreateTemp('room-new', { creatorIp: ip })).be.ok();
+            // an existing room is still reachable at the cap (no new creation)
+            store.getOrCreateTemp('room-1', { creatorIp: ip }).id.should.equal('room-1');
+        });
+
+        it('should report the exceeded quota with its reason', () => {
+            const store = newStore('tempip-reason');
+            const ip = '203.0.113.9';
+            store.checkTempQuota(ip).should.eql({ ok: true });
+            for (let i = 0; i < ChannelStore.MAX_TEMPS_PER_IP; i++) {
+                store.getOrCreateTemp(`r-${i}`, { creatorIp: ip });
+            }
+            store.checkTempQuota(ip).should.eql({ ok: false, reason: 'per-ip-limit' });
+            store.removeTemp('r-0');
+            store.checkTempQuota(ip).should.eql({ ok: true });
+            // no attributable IP -> never per-IP limited (global cap still applies)
+            store.checkTempQuota('').should.eql({ ok: true });
+        });
+
+        it('should rate-limit create-leave-create churn per IP within the window', () => {
+            const store = newStore('tempip-rate');
+            const ip = '192.0.2.10';
+            for (let i = 0; i < ChannelStore.TEMP_CREATE_MAX_PER_WINDOW; i++) {
+                should(store.getOrCreateTemp(`churn-${i}`, { creatorIp: ip })).be.ok();
+                store.removeTempIfEmpty(`churn-${i}`, 0); // room gone, creation still counted
+            }
+            store.checkTempQuota(ip).should.eql({ ok: false, reason: 'rate-limit' });
+            should(store.getOrCreateTemp('churn-next', { creatorIp: ip })).be.null();
+            // ...until the window has slid past the oldest creation
+            store.tempCreateLog.set(ip, [Date.now() - ChannelStore.TEMP_CREATE_WINDOW_MS - 1]);
+            should(store.getOrCreateTemp('churn-next', { creatorIp: ip })).be.ok();
+        });
+
+        it('should keep creatorIp server-side (never in sanitize/listTemps output)', () => {
+            const store = newStore('tempip-sanitize');
+            const temp = store.getOrCreateTemp('leaky', { creatorIp: '203.0.113.9' });
+            should(store.sanitize(temp).creatorIp).be.undefined();
+            JSON.stringify(store.listTemps()).should.not.containEql('203.0.113.9');
+        });
+
+        it('should leave legacy calls without creatorIp on the global cap only', () => {
+            const store = newStore('tempip-nocreator');
+            for (let i = 0; i < ChannelStore.MAX_TEMPS_PER_IP + 2; i++) {
+                should(store.getOrCreateTemp(`anon-${i}`)).be.ok();
+            }
+        });
+    });
+
     describe('7. Registry corruption recovery', () => {
         it('should quarantine an unreadable registry and start empty without a backup', () => {
             const filePath = tempFile('quarantine');

@@ -542,6 +542,14 @@ function registerSocketHandlers() {
     socket.on('roomIsBusy', (cfg) => showJoinError(t('channel.errors.roomIsBusy', { n: cfg?.maxParticipants || 0 })));
     socket.on('roomIsJoinLocked', () => showJoinError(t('channel.errors.roomIsJoinLocked')));
     socket.on('roomIsLocked', () => showJoinError(t('channel.errors.roomIsLocked')));
+    socket.on('tempRoomLimitReached', (cfg) =>
+        showJoinError(
+            cfg?.reason === 'rate-limit'
+                ? t('channel.errors.tempRateLimit')
+                : t('channel.errors.tempIpLimit', { n: cfg?.max || 0 }),
+        ),
+    );
+    socket.on('channelLimitReached', (cfg) => showJoinError(t('channel.errors.channelLimit', { n: cfg?.max || 0 })));
     socket.on('channelPasswordRequired', () => {
         // wrong or missing channel password — drop the stale remembered value
         // so the overlay stays up until a correct one is entered
