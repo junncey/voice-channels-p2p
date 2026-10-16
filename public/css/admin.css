@@ -173,6 +173,11 @@
     align-items: end;
 }
 
+/* 两列都是 label+input+hint 结构时用顶对齐，避免提示行数不同导致输入框错位 */
+.field-row.align-top {
+    align-items: flex-start;
+}
+
 .field-row .field {
     flex: 1;
 }
