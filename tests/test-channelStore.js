@@ -11,6 +11,10 @@ const path = require('path');
 const ChannelStore = require('../app/src/channelStore');
 const { verifyPassword, hashPassword } = require('../app/src/channelStore');
 
+const DEFAULT_SETTINGS = Object.fromEntries(
+    Object.entries(ChannelStore.SETTINGS_SCHEMA).map(([key, rule]) => [key, rule.default]),
+);
+
 function tempFile(name) {
     return path.join(os.tmpdir(), `mirotalk-channels-test-${process.pid}-${name}.json`);
 }
@@ -269,12 +273,12 @@ describe('test-channelStore', () => {
         });
     });
 
-    describe('5. Admin settings (temp rooms toggle)', () => {
+    describe('5. Admin settings (temp rooms toggle + quotas)', () => {
         it('should default tempRooms to true and honor the env-seeded default', () => {
-            newStore('settings-default').getSettings().should.eql({ tempRooms: true });
+            newStore('settings-default').getSettings().should.eql(DEFAULT_SETTINGS);
             newStore('settings-env', { defaultSettings: { tempRooms: false } })
                 .getSettings()
-                .should.eql({ tempRooms: false });
+                .should.eql({ ...DEFAULT_SETTINGS, tempRooms: false });
         });
 
         it('should toggle settings and persist them across reloads', () => {
@@ -282,21 +286,67 @@ describe('test-channelStore', () => {
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
             const store = new ChannelStore({ filePath, autoInit: true });
 
-            store.updateSettings({ tempRooms: false }).should.eql({ ok: true, settings: { tempRooms: false } });
+            store
+                .updateSettings({ tempRooms: false })
+                .should.eql({ ok: true, settings: { ...DEFAULT_SETTINGS, tempRooms: false } });
             const reloaded = new ChannelStore({ filePath, autoInit: false, defaultSettings: { tempRooms: true } });
             // file wins over the env-seeded default once a setting is stored
-            reloaded.getSettings().should.eql({ tempRooms: false });
+            reloaded.getSettings().should.eql({ ...DEFAULT_SETTINGS, tempRooms: false });
 
             store.updateSettings({ tempRooms: true }).ok.should.be.true();
-            JSON.parse(fs.readFileSync(filePath, 'utf8')).settings.should.eql({ tempRooms: true });
+            JSON.parse(fs.readFileSync(filePath, 'utf8')).settings.should.eql({ ...DEFAULT_SETTINGS, tempRooms: true });
         });
 
         it('should ignore non-boolean / unknown settings and malformed input', () => {
             const store = newStore('settings-bad');
             store.updateSettings({ tempRooms: 'yes' }).ok.should.be.false();
             store.updateSettings({ somethingElse: true }).ok.should.be.true(); // unknown key = no-op
-            store.getSettings().should.eql({ tempRooms: true });
+            store.getSettings().should.eql(DEFAULT_SETTINGS);
             store.updateSettings(null).ok.should.be.false();
+        });
+
+        it('should validate numeric settings (type/range) and accept numeric strings from forms', () => {
+            const store = newStore('settings-numeric');
+            store.updateSettings({ tempMaxPerIp: 'x' }).ok.should.be.false();
+            store.updateSettings({ tempMaxPerIp: 1.5 }).ok.should.be.false();
+            store.updateSettings({ tempMaxPerIp: 101 }).ok.should.be.false();
+            store.updateSettings({ tempCreateWindowMin: 0 }).ok.should.be.false();
+            store.updateSettings({ socketMaxChannels: true }).ok.should.be.false();
+            const res = store.updateSettings({ tempMaxPerIp: '5', tempCreateWindowMin: 30, socketMaxChannels: 3 });
+            res.ok.should.be.true();
+            res.settings.tempMaxPerIp.should.equal(5);
+            res.settings.tempCreateWindowMin.should.equal(30);
+            res.settings.socketMaxChannels.should.equal(3);
+        });
+
+        it('should persist numeric settings and ignore hand-edited garbage on load', () => {
+            const filePath = tempFile('settings-num-persist');
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            const store = new ChannelStore({ filePath, autoInit: true });
+            store
+                .updateSettings({ tempMaxRooms: 50, tempMaxPerIp: 1, tempCreateMax: 2, tempCreateWindowMin: 5, socketMaxChannels: 1 })
+                .ok.should.be.true();
+            new ChannelStore({ filePath, autoInit: false }).getSettings().should.eql({
+                ...DEFAULT_SETTINGS,
+                tempMaxRooms: 50,
+                tempMaxPerIp: 1,
+                tempCreateMax: 2,
+                tempCreateWindowMin: 5,
+                socketMaxChannels: 1,
+            });
+
+            // a hand-edited registry with out-of-range values falls back per key
+            const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            raw.settings.tempMaxPerIp = 9999;
+            raw.settings.tempRooms = 'nope';
+            fs.writeFileSync(filePath, JSON.stringify(raw), 'utf8');
+            new ChannelStore({ filePath, autoInit: false }).getSettings().should.eql({
+                ...DEFAULT_SETTINGS,
+                tempMaxRooms: 50,
+                tempCreateMax: 2,
+                tempCreateWindowMin: 5,
+                socketMaxChannels: 1,
+            });
         });
 
         it('should force-remove a temp room regardless of occupancy', () => {
@@ -383,8 +433,27 @@ describe('test-channelStore', () => {
             store.checkTempQuota(ip).should.eql({ ok: false, reason: 'rate-limit' });
             should(store.getOrCreateTemp('churn-next', { creatorIp: ip })).be.null();
             // ...until the window has slid past the oldest creation
-            store.tempCreateLog.set(ip, [Date.now() - ChannelStore.TEMP_CREATE_WINDOW_MS - 1]);
+            store.tempCreateLog.set(ip, [Date.now() - store.settings.tempCreateWindowMin * 60000 - 1]);
             should(store.getOrCreateTemp('churn-next', { creatorIp: ip })).be.ok();
+        });
+
+        it('should honor admin-tuned quotas at runtime', () => {
+            const store = newStore('tempip-tuned');
+            store.updateSettings({ tempMaxPerIp: 1, tempCreateMax: 1 }).ok.should.be.true();
+            should(store.getOrCreateTemp('t-one', { creatorIp: '203.0.113.9' })).be.ok();
+            should(store.getOrCreateTemp('t-two', { creatorIp: '203.0.113.9' })).be.null(); // per-ip cap 1
+            store.checkTempQuota('203.0.113.9').reason.should.equal('per-ip-limit');
+            store.removeTempIfEmpty('t-one', 0); // frees the owned slot, creation still counted
+            store.checkTempQuota('203.0.113.9').reason.should.equal('rate-limit');
+            // 0 = refuse every new temp room for everyone
+            store.updateSettings({ tempMaxPerIp: 0 }).ok.should.be.true();
+            should(store.getOrCreateTemp('t-three', { creatorIp: '198.51.100.1' })).be.null();
+            // …but a room that is already live stays reachable regardless of the quotas
+            store.updateSettings({ tempMaxPerIp: 1, tempCreateMax: 5, tempCreateWindowMin: 1 }).ok.should.be.true();
+            should(store.getOrCreateTemp('t-live', { creatorIp: '198.51.100.1' })).be.ok();
+            store.updateSettings({ tempMaxPerIp: 0, tempMaxRooms: 0 }).ok.should.be.true();
+            should(store.getOrCreateTemp('t-four', { creatorIp: '198.51.100.1' })).be.null();
+            store.getOrCreateTemp('t-live').id.should.equal('t-live');
         });
 
         it('should keep creatorIp server-side (never in sanitize/listTemps output)', () => {

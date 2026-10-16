@@ -35,7 +35,6 @@ const MAX_TEMP_ROOMS = 1000;
 // as "owned" from creation until the last peer leaves (or admin removal), so
 // a normal "open, use, leave" cycle never hits either limit.
 const MAX_TEMPS_PER_IP = 3;
-const TEMP_CREATE_WINDOW_MS = 10 * 60 * 1000;
 const TEMP_CREATE_MAX_PER_WINDOW = 5;
 // Quota bookkeeping: one small timestamp array per IP. Stale arrays are pruned
 // on access; past this entry count the whole map is swept so IPs that never
@@ -53,8 +52,29 @@ const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1 };
 
 // Admin-managed runtime settings persisted alongside the channel list. The
 // env value (TEMP_ROOMS_ENABLED etc.) only seeds the default on first boot;
-// after that the console toggle in channels.json is the source of truth.
-const SETTING_KEYS = ['tempRooms'];
+// after that the console values in channels.json are the source of truth.
+// Numeric entries bound the temp-room anti-abuse quotas (see getOrCreateTemp);
+// all ranges are sanity caps so a hand-edited registry can't break the server.
+const SETTINGS_SCHEMA = {
+    tempRooms: { type: 'boolean', default: true },
+    // live temp rooms across all IPs (0 = refuse every new one)
+    tempMaxRooms: { type: 'number', min: 0, max: 10000, default: MAX_TEMP_ROOMS },
+    // live temp rooms one IP may own at once (0 = refuse every new one)
+    tempMaxPerIp: { type: 'number', min: 0, max: 100, default: MAX_TEMPS_PER_IP },
+    // temp room creations per IP per sliding window (0 = refuse every new one)
+    tempCreateMax: { type: 'number', min: 0, max: 1000, default: TEMP_CREATE_MAX_PER_WINDOW },
+    // length of that sliding window, in minutes
+    tempCreateWindowMin: { type: 'number', min: 1, max: 1440, default: 10 },
+    // channels one socket may be joined to at once (a page joins exactly one)
+    socketMaxChannels: { type: 'number', min: 1, max: 16, default: 2 },
+};
+const SETTING_KEYS = Object.keys(SETTINGS_SCHEMA);
+
+/** Type+range check shared by the load path and the admin update API. */
+function isValidSettingValue(value, rule) {
+    if (rule.type === 'boolean') return typeof value === 'boolean';
+    return Number.isInteger(value) && value >= rule.min && value <= rule.max;
+}
 
 function hashPassword(password) {
     const salt = crypto.randomBytes(16).toString('hex');
@@ -245,7 +265,11 @@ class ChannelStore {
     constructor({ filePath = path.join(__dirname, 'channels.json'), autoInit = true, defaultModerator = '', defaultSettings = {} } = {}) {
         this.filePath = filePath;
         this.defaultModerator = String(defaultModerator || '');
-        this.settings = { tempRooms: true, ...defaultSettings };
+        this.settings = Object.fromEntries(
+            Object.entries(SETTINGS_SCHEMA).map(([key, rule]) => [key, rule.default]),
+        );
+        // env-seeded defaults (TEMP_ROOMS_ENABLED) win over the schema defaults
+        this.applySettings(defaultSettings);
         this.channels = [];
         /** id -> ephemeral channel definition (see getTemp) */
         this.temps = new Map();
@@ -284,7 +308,7 @@ class ChannelStore {
 
     applySettings(settings) {
         for (const key of SETTING_KEYS) {
-            if (typeof settings[key] === 'boolean') this.settings[key] = settings[key];
+            if (isValidSettingValue(settings[key], SETTINGS_SCHEMA[key])) this.settings[key] = settings[key];
         }
     }
 
@@ -395,23 +419,25 @@ class ChannelStore {
 
     /** Quota check on an already-normalized ip; prunes the ip's window in place. */
     tempQuotaFor(ip, now = Date.now()) {
+        const windowMs = this.settings.tempCreateWindowMin * 60 * 1000;
         let owned = 0;
         for (const ch of this.temps.values()) {
             if (ch.creatorIp === ip) owned++;
         }
-        if (owned >= MAX_TEMPS_PER_IP) return { ok: false, reason: 'per-ip-limit' };
+        if (owned >= this.settings.tempMaxPerIp) return { ok: false, reason: 'per-ip-limit' };
 
-        const window = (this.tempCreateLog.get(ip) || []).filter((ts) => now - ts < TEMP_CREATE_WINDOW_MS);
+        const window = (this.tempCreateLog.get(ip) || []).filter((ts) => now - ts < windowMs);
         this.tempCreateLog.set(ip, window);
         if (this.tempCreateLog.size > TEMP_LOG_SWEEP_AT) this.sweepTempCreateLog(now);
-        if (window.length >= TEMP_CREATE_MAX_PER_WINDOW) return { ok: false, reason: 'rate-limit' };
+        if (window.length >= this.settings.tempCreateMax) return { ok: false, reason: 'rate-limit' };
         return { ok: true };
     }
 
     /** Drop expired window arrays (and empty entries) across all tracked IPs. */
     sweepTempCreateLog(now = Date.now()) {
+        const windowMs = this.settings.tempCreateWindowMin * 60 * 1000;
         for (const [ip, stamps] of this.tempCreateLog) {
-            const live = stamps.filter((ts) => now - ts < TEMP_CREATE_WINDOW_MS);
+            const live = stamps.filter((ts) => now - ts < windowMs);
             if (live.length) this.tempCreateLog.set(ip, live);
             else this.tempCreateLog.delete(ip);
         }
@@ -420,8 +446,8 @@ class ChannelStore {
     getOrCreateTemp(id, { maxParticipants = 8, creatorIp } = {}) {
         let channel = this.temps.get(id);
         if (!channel) {
-            if (this.temps.size >= MAX_TEMP_ROOMS) {
-                log.warn('Temp channel cap reached, refusing to create', { id, cap: MAX_TEMP_ROOMS });
+            if (this.temps.size >= this.settings.tempMaxRooms) {
+                log.warn('Temp channel cap reached, refusing to create', { id, cap: this.settings.tempMaxRooms });
                 return null;
             }
             // per-IP quotas (skip when the caller gave no attributable IP)
@@ -470,17 +496,21 @@ class ChannelStore {
         return { ...this.settings };
     }
 
-    /** Partial update of known boolean settings; persists atomically. */
+    /** Partial update of known settings; unknown keys are ignored, invalid values rejected. Persists atomically. */
     updateSettings(input) {
         if (!isPlainObject(input)) return { ok: false, errors: ['settings must be an object'] };
         const errors = [];
         const next = { ...this.settings };
         for (const key of SETTING_KEYS) {
             if (input[key] === undefined) continue;
-            if (typeof input[key] !== 'boolean') {
-                errors.push(`${key} must be a boolean`);
+            const rule = SETTINGS_SCHEMA[key];
+            const value = rule.type === 'number' && (typeof input[key] === 'string' && input[key].trim() !== '')
+                ? Number(input[key]) // accept numeric strings from HTML forms
+                : input[key];
+            if (!isValidSettingValue(value, rule)) {
+                errors.push(this.describeSettingError(key, rule));
             } else {
-                next[key] = input[key];
+                next[key] = value;
             }
         }
         if (errors.length) return { ok: false, errors };
@@ -488,6 +518,11 @@ class ChannelStore {
         this.save();
         log.info('Settings updated', this.settings);
         return { ok: true, settings: this.getSettings() };
+    }
+
+    describeSettingError(key, rule) {
+        if (rule.type === 'boolean') return `${key} must be a boolean`;
+        return `${key} must be an integer between ${rule.min} and ${rule.max}`;
     }
 
     listTemps({ onlineOf = null } = {}) {
@@ -663,5 +698,5 @@ module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
 module.exports.MAX_TEMP_ROOMS = MAX_TEMP_ROOMS;
 module.exports.MAX_TEMPS_PER_IP = MAX_TEMPS_PER_IP;
 module.exports.TEMP_CREATE_MAX_PER_WINDOW = TEMP_CREATE_MAX_PER_WINDOW;
-module.exports.TEMP_CREATE_WINDOW_MS = TEMP_CREATE_WINDOW_MS;
+module.exports.SETTINGS_SCHEMA = SETTINGS_SCHEMA;
 module.exports.normalizeIp = normalizeIp;

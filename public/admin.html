@@ -45,10 +45,9 @@
                         </svg>
                         <span data-i18n="admin.newChannel">新建频道</span>
                     </button>
-                    <label id="tempRoomsToggleWrap" class="temp-toggle" data-i18n-title="admin.tempRoomsHint">
-                        <input id="tempRoomsToggle" type="checkbox" checked />
-                        <span data-i18n="admin.tempRoomsToggle">临时房间</span>
-                    </label>
+                    <button id="tempSettingsBtn" class="btn ghost sm" data-i18n="admin.tempSettings" data-i18n-title="admin.tempRoomsHint">
+                        临时房间设置
+                    </button>
                     <span id="loadError" class="admin-error"></span>
                 </div>
 
@@ -122,6 +121,55 @@
                     <div class="modal-actions">
                         <button type="button" id="editorCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
                         <button type="submit" id="editorSubmit" class="btn primary" data-i18n="admin.create">创建</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 临时房间设置弹窗 -->
+        <div id="settingsModal" class="overlay hidden">
+            <div class="modal editor-modal">
+                <h2 data-i18n="admin.tempSettings">临时房间设置</h2>
+                <form id="settingsForm">
+                    <div class="field check-field">
+                        <label>
+                            <input id="sTempRooms" type="checkbox" checked />
+                            <span data-i18n="admin.tempRoomsToggle">允许创建临时房间</span>
+                        </label>
+                    </div>
+                    <div class="field">
+                        <label for="sTempMaxRooms" data-i18n="admin.s.tempMaxRooms">临时房间总数上限</label>
+                        <input id="sTempMaxRooms" class="input" type="number" min="0" max="10000" step="1" required />
+                        <span class="field-hint" data-i18n="admin.s.tempMaxRoomsHint">全服务器同时存活的临时房间数，0 表示不再新建</span>
+                    </div>
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="sTempMaxPerIp" data-i18n="admin.s.tempMaxPerIp">每 IP 同时创建上限</label>
+                            <input id="sTempMaxPerIp" class="input" type="number" min="0" max="100" step="1" required />
+                            <span class="field-hint" data-i18n="admin.s.tempMaxPerIpHint">0 表示不再新建</span>
+                        </div>
+                        <div class="field">
+                            <label for="sSocketMaxChannels" data-i18n="admin.s.socketMaxChannels">单连接频道数上限</label>
+                            <input id="sSocketMaxChannels" class="input" type="number" min="1" max="16" step="1" required />
+                            <span class="field-hint" data-i18n="admin.s.socketMaxChannelsHint">正常页面为 1</span>
+                        </div>
+                    </div>
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="sTempCreateMax" data-i18n="admin.s.tempCreateMax">窗口内创建上限</label>
+                            <input id="sTempCreateMax" class="input" type="number" min="0" max="1000" step="1" required />
+                            <span class="field-hint" data-i18n="admin.s.tempCreateMaxHint">0 表示不再新建</span>
+                        </div>
+                        <div class="field">
+                            <label for="sTempCreateWindowMin" data-i18n="admin.s.tempCreateWindowMin">频率窗口（分钟）</label>
+                            <input id="sTempCreateWindowMin" class="input" type="number" min="1" max="1440" step="1" required />
+                            <span class="field-hint" data-i18n="admin.s.tempCreateWindowMinHint">创建频率限制的滑动窗口长度</span>
+                        </div>
+                    </div>
+                    <p id="settingsError" class="login-error" role="alert"></p>
+                    <div class="modal-actions">
+                        <button type="button" id="settingsCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                        <button type="submit" id="settingsSave" class="btn primary" data-i18n="admin.save">保存</button>
                     </div>
                 </form>
             </div>

@@ -123,10 +123,6 @@ const channelStore = new ChannelStore({
 // persisted in channels.json — the env value only seeded the initial default)
 const tempRoomsEnabled = () => channelStore.settings.tempRooms !== false;
 
-// A browser page joins exactly one channel per socket; more is a scripted
-// client hopping rooms (e.g. farming temp rooms), never a real visitor.
-const MAX_CHANNELS_PER_SOCKET = 2;
-
 // The admin console stays completely DISABLED (404 on /admin and every
 // /api/admin/* route) until BOTH a password and a dedicated JWT secret are
 // configured — there are no insecure defaults.
@@ -613,13 +609,15 @@ io.sockets.on('connect', async (socket) => {
         }
 
         // one page = one channel; a socket juggling several live channels at
-        // once is a scripted client, not a browser visitor
-        if (Object.keys(socket.channels).length >= MAX_CHANNELS_PER_SOCKET) {
+        // once is a scripted client, not a browser visitor (admin-tunable:
+        // settings.socketMaxChannels)
+        const socketMaxChannels = channelStore.settings.socketMaxChannels;
+        if (Object.keys(socket.channels).length >= socketMaxChannels) {
             log.warn('[' + socket.id + '] socket channel limit reached', {
                 channel,
                 joined: Object.keys(socket.channels),
             });
-            return socket.emit('channelLimitReached', { max: MAX_CHANNELS_PER_SOCKET });
+            return socket.emit('channelLimitReached', { max: socketMaxChannels });
         }
 
         // Channel must be registered — or, with temporary rooms enabled, any
@@ -740,7 +738,7 @@ io.sockets.on('connect', async (socket) => {
                     log.warn('[' + socket.id + '] temp room quota exceeded', { channel, reason: quota.reason });
                     return socket.emit('tempRoomLimitReached', {
                         reason: quota.reason,
-                        max: ChannelStore.MAX_TEMPS_PER_IP,
+                        max: channelStore.settings.tempMaxPerIp,
                     });
                 }
                 channelDef = channelStore.getOrCreateTemp(channel, { creatorIp: peer_ip });

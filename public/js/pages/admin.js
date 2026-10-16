@@ -50,7 +50,9 @@ function bindUi() {
     $('#editorForm').addEventListener('submit', onEditorSubmit);
     $('#addHostBtn').addEventListener('click', () => addHostRow('', ''));
 
-    $('#tempRoomsToggle').addEventListener('change', onTempRoomsToggle);
+    $('#tempSettingsBtn').addEventListener('click', openSettings);
+    $('#settingsCancel').addEventListener('click', () => $('#settingsModal').classList.add('hidden'));
+    $('#settingsForm').addEventListener('submit', onSettingsSubmit);
 
     $('#confirmCancel').addEventListener('click', () => {
         pendingDelete = null;
@@ -87,7 +89,7 @@ async function load() {
         channels = data.channels || [];
         temps = data.temps || [];
         $('#loadError').textContent = '';
-        syncSettingsToggle(data.settings);
+        syncSettingsFields(data.settings);
         renderTable();
     } catch (err) {
         if (err.status === 401) {
@@ -99,25 +101,41 @@ async function load() {
     }
 }
 
-/** Reflect server settings in the toggle — unless a save is in flight. */
-function syncSettingsToggle(settings) {
+/** Reflect server settings in the form — unless a save is in flight. */
+function syncSettingsFields(settings) {
     if (settingsSaving || !settings) return;
-    $('#tempRoomsToggle').checked = settings.tempRooms !== false;
+    $('#sTempRooms').checked = settings.tempRooms !== false;
+    $('#sTempMaxRooms').value = settings.tempMaxRooms ?? 1000;
+    $('#sTempMaxPerIp').value = settings.tempMaxPerIp ?? 3;
+    $('#sTempCreateMax').value = settings.tempCreateMax ?? 5;
+    $('#sTempCreateWindowMin').value = settings.tempCreateWindowMin ?? 10;
+    $('#sSocketMaxChannels').value = settings.socketMaxChannels ?? 2;
 }
 
-async function onTempRoomsToggle() {
-    if (settingsSaving) return;
-    const toggle = $('#tempRoomsToggle');
-    const next = toggle.checked;
+function openSettings() {
+    $('#settingsError').textContent = '';
+    $('#settingsModal').classList.remove('hidden');
+}
+
+async function onSettingsSubmit(event) {
+    event.preventDefault();
+    $('#settingsError').textContent = '';
     settingsSaving = true;
     try {
-        const { settings } = await api.adminUpdateSettings({ tempRooms: next });
-        toggle.checked = settings.tempRooms !== false;
+        const { settings } = await api.adminUpdateSettings({
+            tempRooms: $('#sTempRooms').checked,
+            tempMaxRooms: Number($('#sTempMaxRooms').value),
+            tempMaxPerIp: Number($('#sTempMaxPerIp').value),
+            tempCreateMax: Number($('#sTempCreateMax').value),
+            tempCreateWindowMin: Number($('#sTempCreateWindowMin').value),
+            socketMaxChannels: Number($('#sSocketMaxChannels').value),
+        });
+        syncSettingsFields(settings);
+        $('#settingsModal').classList.add('hidden');
         toast(t('admin.settingsSaved'), 'ok');
         load();
     } catch (err) {
-        toggle.checked = !next; // revert on failure
-        toast(t('admin.settingsError'), 'error');
+        $('#settingsError').textContent = err.message || t('admin.settingsError');
     } finally {
         settingsSaving = false;
     }
