@@ -271,7 +271,12 @@ function isPlainMessage(m) {
         Number.isFinite(m.ts) &&
         typeof m.name === 'string' &&
         typeof m.text === 'string' &&
-        (m.imgs === undefined || (Array.isArray(m.imgs) && m.imgs.every((s) => typeof s === 'string')))
+        (m.imgs === undefined ||
+            // legacy rows (≤ voice.21) kept the image COUNT only — accepted on
+            // load so an upgrade never drops earlier history; the client shows
+            // them as a "[image×N]" placeholder (the data itself never existed)
+            Number.isInteger(m.imgs) ||
+            (Array.isArray(m.imgs) && m.imgs.every((s) => typeof s === 'string')))
     );
 }
 

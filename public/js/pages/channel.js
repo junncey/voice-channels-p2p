@@ -434,8 +434,11 @@ function registerSocketHandlers() {
         for (const msg of messages) {
             if (!msg || typeof msg !== 'object') continue;
             const name = String(msg.name || '?').slice(0, 24);
-            const text = typeof msg.text === 'string' ? msg.text : '';
+            let text = typeof msg.text === 'string' ? msg.text : '';
             const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // addHistory re-validates each URL
+            // legacy rows (≤ voice.21) kept only the image count — show it as a placeholder
+            const legacyCount = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
+            if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
             if (!text && !imgs.length) continue;
             const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
             history.push({ name, text, imgs, self: name === selfName, time: ts ? new Date(ts) : new Date() });

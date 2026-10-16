@@ -160,6 +160,29 @@ describe('test-chatStore', () => {
             second.destroy();
         });
 
+        it('should keep loading legacy rows that stored an image count only', () => {
+            const dir = tempDir('legacy');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'room1.json'),
+                JSON.stringify({
+                    version: 1,
+                    messages: [
+                        { ts: Date.now() - 1000, name: 'a', text: 'old text', imgs: 0 },
+                        { ts: Date.now(), name: 'a', text: '', imgs: 2 },
+                    ],
+                }),
+                'utf8'
+            );
+
+            const legacyStore = new ChatStore({ dir, sweepMs: 0 });
+            const history = legacyStore.history('room1');
+            history.should.have.length(2);
+            history[0].text.should.equal('old text');
+            history[1].imgs.should.equal(2); // count preserved as-is; the client renders the placeholder
+            legacyStore.destroy();
+        });
+
         it('should quarantine a corrupt history file', () => {
             const dir = tempDir('corrupt');
             fs.mkdirSync(dir, { recursive: true });
