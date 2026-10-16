@@ -10,6 +10,8 @@ const path = require('path');
 
 const ChatStore = require('../app/src/chatStore');
 
+const IMG = (tag, repeat = 16) => `data:image/png;base64,${tag}${'A'.repeat(repeat)}`;
+
 function tempDir(name) {
     const dir = path.join(os.tmpdir(), `mirotalk-chat-test-${process.pid}-${name}`);
     fs.rmSync(dir, { recursive: true, force: true });
@@ -31,15 +33,16 @@ describe('test-chatStore', () => {
         it('should store and return messages oldest-first', () => {
             store = newStore('basic');
             store.append('room1', { name: 'alice', text: 'hello' });
-            store.append('room1', { name: 'bob', text: 'hi', imgs: 2 });
+            store.append('room1', { name: 'bob', text: 'hi', imgs: [IMG('b1='), IMG('b2=')] });
 
             const history = store.history('room1');
             history.should.have.length(2);
             history[0].name.should.equal('alice');
             history[0].text.should.equal('hello');
-            history[0].imgs.should.equal(0);
+            should.equal(history[0].imgs, undefined); // text-only rows stay compact
             history[1].text.should.equal('hi');
-            history[1].imgs.should.equal(2);
+            history[1].imgs.should.have.length(2);
+            history[1].imgs[0].should.startWith('data:image/png;base64,b1=');
         });
 
         it('should trim name/text and reject empty payloads', () => {
@@ -51,10 +54,11 @@ describe('test-chatStore', () => {
 
             should.equal(store.append('room1', { name: 'a', text: '' }), null);
             should.equal(store.append('room1', { name: 'a', text: '   ' }), null);
-            // a bogus image count is clamped to none, the text itself still lands
-            const clamped = store.append('room1', { name: 'a', text: 'ok', imgs: 99 });
-            clamped.should.be.an.Object();
-            clamped.imgs.should.equal(0);
+            // a bogus image payload (not an array) is dropped, the text still lands
+            const noImages = store.append('room1', { name: 'a', text: 'ok', imgs: 99 });
+            noImages.should.be.an.Object();
+            should.equal(noImages.imgs, undefined);
+            should.equal(store.append('room1', { name: 'a', text: '', imgs: [] }), null);
         });
 
         it('should reject invalid ids (path safety) and serve them empty', () => {
@@ -64,14 +68,51 @@ describe('test-chatStore', () => {
             store.history('../etc/passwd').should.be.empty();
         });
 
-        it('should cap the number of stored messages', () => {
+        it('should keep only whitelisted, size-capped image data URLs', () => {
+            store = newStore('images');
+            // of the five entries only the first is valid (wrong mime, bad
+            // base64, non-URL and over-cap rows are dropped)
+            const stored = store.append('room1', {
+                name: 'a',
+                text: '',
+                imgs: [
+                    IMG('ok='),
+                    'data:image/png;base64,!!!',
+                    'data:text/html;base64,AAA=',
+                    'not-a-data-url',
+                    IMG('big=', 1600 * 1024),
+                ],
+            });
+            stored.should.be.an.Object();
+            stored.imgs.should.have.length(1);
+            stored.imgs[0].should.startWith('data:image/png;base64,ok=');
+        });
+
+        it('should serve history inside the catch-up byte budget', () => {
+            store = newStore('budget-send');
+            store.append('room1', { name: 'a', text: 'old text' });
+            store.append('room1', { name: 'a', text: 'big pics', imgs: [IMG('p1=', 400 * 1024), IMG('p2=', 400 * 1024)] });
+            store.append('room1', { name: 'a', text: 'fresh text' });
+
+            // default budget: everything fits
+            store.history('room1').should.have.length(3);
+            // 512KB budget: the newest row plus the 800KB image row would not
+            // fit → the newest row (always included) + nothing older
+            const trimmed = store.history('room1', { maxBytes: 512 * 1024 });
+            trimmed.should.have.length(1);
+            trimmed[0].text.should.equal('fresh text');
+        });
+
+        it('should cap stored messages and serve at most MAX_SEND_MESSAGES', () => {
             store = newStore('cap');
             for (let i = 0; i < ChatStore.MAX_MESSAGES + 20; i++) {
                 store.append('room1', { name: 'a', text: `m${i}` });
             }
+            // 320 stored → capped at MAX_MESSAGES on disk, and history()
+            // serves only the newest MAX_SEND_MESSAGES rows
             const history = store.history('room1');
-            history.should.have.length(ChatStore.MAX_MESSAGES);
-            history[0].text.should.equal('m20'); // oldest dropped
+            history.should.have.length(Math.min(ChatStore.MAX_MESSAGES, 200));
+            history[0].text.should.equal('m120'); // oldest dropped
             history[history.length - 1].text.should.equal(`m${ChatStore.MAX_MESSAGES + 19}`);
         });
     });
@@ -104,14 +145,18 @@ describe('test-chatStore', () => {
     });
 
     describe('2. persistence', () => {
-        it('should survive a reload from disk', () => {
+        it('should survive a reload from disk (text and images)', () => {
             const dir = tempDir('reload');
             const first = new ChatStore({ dir, sweepMs: 0 });
             first.append('room1', { name: 'a', text: 'persisted' });
+            first.append('room1', { name: 'b', text: 'pic', imgs: [IMG('keep=')] });
             first.destroy();
 
             const second = new ChatStore({ dir, sweepMs: 0 });
-            second.history('room1')[0].text.should.equal('persisted');
+            const history = second.history('room1');
+            history.should.have.length(2);
+            history[0].text.should.equal('persisted');
+            history[1].imgs.should.eql([IMG('keep=')]);
             second.destroy();
         });
 

@@ -191,7 +191,7 @@
     "admin.s.socketMaxChannels": "Channels per connection",
     "admin.s.socketMaxChannelsHint": "Channels one connection may join at once; a normal page joins 1",
     "admin.s.chatRetentionHours": "Chat history retention (hours)",
-    "admin.s.chatRetentionHoursHint": "How long text chat history stays visible to members joining later; 0 keeps nothing (images are never persisted)",
+    "admin.s.chatRetentionHoursHint": "How long chat history (text and images) stays visible to members joining later; 0 keeps nothing",
     "admin.settingsSaved": "Settings saved",
     "admin.settingsError": "Failed to save settings",
     "admin.empty": "No channels yet — click \"New channel\" to create the first one",

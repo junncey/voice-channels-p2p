@@ -3,13 +3,13 @@
 /**
  * Chat history store for the voice-channel edition.
  *
- * Chat itself travels peer-to-peer over WebRTC DataChannels; the sender's page
- * additionally relays every text message here so late joiners can catch up.
- * Messages are kept per channel in app/src/chat_history/<id>.json (atomic
- * write on every append — voice-channel traffic is human-scale) and pruned to
- * the admin-configured retention window (channels.json settings:
- * chatRetentionHours, 0 = keep nothing). Temporary rooms keep history in
- * memory only; it vanishes together with the room.
+ * Chat itself travels peer-to-peer over WebRTC DataChannels; the sender's
+ * page additionally relays every message (text + compressed image data URLs)
+ * here so late joiners can catch up. Messages are kept per channel in
+ * app/src/chat_history/<id>.json (atomic write on every append — voice-channel
+ * traffic is human-scale) and pruned to the admin-configured retention window
+ * (channels.json settings: chatRetentionHours, 0 = keep nothing). Temporary
+ * rooms keep history in memory only; it vanishes together with the room.
  */
 
 const fs = require('fs');
@@ -23,13 +23,21 @@ const log = new Logs('chatStore');
 // doubles as path-traversal protection.
 const ID_PATTERN = /^[a-zA-Z0-9_-]{3,32}$/;
 
+const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 const MAX_MESSAGES = 300; // per channel: stored, kept in memory and served
+const MAX_IMAGES = 9; // same cap as the client batch protocol
+// mirrors the client transfer cap (images.js MAX_TRANSFER_CHARS) — anything
+// larger was never deliverable P2P either
+const MAX_IMAGE_CHARS = 1600 * 1024;
 const NAME_MAX = 24;
 const TEXT_MAX = 500;
-const MAX_IMAGES = 9; // same cap as the client batch protocol
-// Disk guard: even within the message cap a pathological row can't grow a
-// history file past this — rows drop from the oldest end until it fits.
-const MAX_FILE_BYTES = 512 * 1024;
+// Disk budget per channel, images included; rows drop from the oldest end
+// until a file fits (images dominate — text rows are a few hundred bytes).
+const MAX_FILE_BYTES = 12 * 1024 * 1024;
+// Catch-up block sent on join: message count and payload budget (images
+// dominate — the newest row is always included, older ones drop first)
+const MAX_SEND_MESSAGES = 200;
+const MAX_SEND_BYTES = 2 * 1024 * 1024;
 // How often background pruning walks the store (in-memory entries + files on
 // disk) so messages past the retention window actually disappear even for
 // channels nobody touches (e.g. after the admin shortens the window).
@@ -104,10 +112,12 @@ class ChatStore {
     }
 
     /**
-     * Store one chat message. Returns the stored message or null (feature
-     * off, invalid id/payload). `ts` override exists for tests.
+     * Store one chat message. `imgs` is an array of validated data:image/*
+     * URLs (server-side sanitized before this point; re-validated here).
+     * Returns the stored message or null (feature off, invalid id/payload).
+     * `ts` override exists for tests.
      */
-    append(id, { name, text, imgs = 0 }, { persistent = true, ts = Date.now() } = {}) {
+    append(id, { name, text, imgs = [] }, { persistent = true, ts = Date.now() } = {}) {
         if (!ID_PATTERN.test(id)) return null;
         if (this.retentionMs() <= 0) return null;
 
@@ -115,23 +125,39 @@ class ChatStore {
         // so a stored message never differs from what was rendered live
         const cleanName = typeof name === 'string' ? name.slice(0, NAME_MAX) : '';
         const cleanText = typeof text === 'string' ? text.trim().slice(0, TEXT_MAX) : '';
-        const cleanImgs = Number.isInteger(imgs) && imgs > 0 && imgs <= MAX_IMAGES ? imgs : 0;
-        if (!cleanText && !cleanImgs) return null;
+        const images = sanitizeImages(imgs);
+        if (!cleanText && !images.length) return null;
 
         const entry = this.entry(id, { persistent });
-        entry.messages.push({ ts, name: cleanName, text: cleanText, imgs: cleanImgs });
+        const message = { ts, name: cleanName, text: cleanText };
+        if (images.length) message.imgs = images; // omitted for text-only rows: keeps files compact
+        entry.messages.push(message);
         this.prune(entry.messages);
         while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
         if (persistent) this.save(id, entry);
-        return entry.messages[entry.messages.length - 1];
+        return message;
     }
 
-    /** Kept messages for a joiner, oldest first (empty when disabled/unknown). */
-    history(id, { persistent = true } = {}) {
+    /**
+     * Kept messages for a joiner, oldest first, inside the catch-up budget
+     * (newest row always included, older ones dropped first). Empty when
+     * disabled/unknown.
+     */
+    history(id, { persistent = true, maxBytes = MAX_SEND_BYTES } = {}) {
         if (!ID_PATTERN.test(id) || this.retentionMs() <= 0) return [];
         const entry = this.entry(id, { persistent });
         this.prune(entry.messages);
-        return entry.messages.slice();
+
+        const picked = [];
+        let used = 0;
+        for (let i = entry.messages.length - 1; i >= 0 && picked.length < MAX_SEND_MESSAGES; i--) {
+            const message = entry.messages[i];
+            const size = estimateBytes(message);
+            if (picked.length && used + size > maxBytes) break;
+            picked.push(message);
+            used += size;
+        }
+        return picked.reverse();
     }
 
     /** Drop rows older than the retention window, in place. */
@@ -245,11 +271,32 @@ function isPlainMessage(m) {
         Number.isFinite(m.ts) &&
         typeof m.name === 'string' &&
         typeof m.text === 'string' &&
-        (m.imgs === undefined || typeof m.imgs === 'number')
+        (m.imgs === undefined || (Array.isArray(m.imgs) && m.imgs.every((s) => typeof s === 'string')))
     );
+}
+
+/** Keep only whitelisted, size-capped data:image/* URLs, at most MAX_IMAGES. */
+function sanitizeImages(input) {
+    const images = [];
+    if (!Array.isArray(input)) return images;
+    for (const item of input) {
+        if (images.length >= MAX_IMAGES) break;
+        if (typeof item === 'string' && item.length > 0 && item.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(item)) {
+            images.push(item);
+        }
+    }
+    return images;
+}
+
+/** Rough serialized size of one row — good enough for the send budget. */
+function estimateBytes(message) {
+    let size = 80 + (message.name?.length || 0) + (message.text?.length || 0);
+    if (Array.isArray(message.imgs)) for (const img of message.imgs) size += img.length + 8;
+    return size;
 }
 
 module.exports = ChatStore;
 module.exports.MAX_MESSAGES = MAX_MESSAGES;
 module.exports.MAX_FILE_BYTES = MAX_FILE_BYTES;
+module.exports.MAX_SEND_BYTES = MAX_SEND_BYTES;
 module.exports.SWEEP_INTERVAL_MS = SWEEP_INTERVAL_MS;

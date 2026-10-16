@@ -431,22 +431,16 @@ function registerSocketHandlers() {
         const messages = Array.isArray(cfg?.messages) ? cfg.messages : [];
         if (!messages.length) return;
         const history = [];
-        for (const msg of messages.slice(-200)) {
+        for (const msg of messages) {
             if (!msg || typeof msg !== 'object') continue;
             const name = String(msg.name || '?').slice(0, 24);
             const text = typeof msg.text === 'string' ? msg.text : '';
-            const imgs = Number.isInteger(msg.imgs) && msg.imgs > 0 && msg.imgs <= 9 ? msg.imgs : 0;
-            if (!text && !imgs) continue;
+            const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // addHistory re-validates each URL
+            if (!text && !imgs.length) continue;
             const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
-            history.push({
-                name,
-                text,
-                imgs,
-                self: name === selfName,
-                time: ts ? new Date(ts) : new Date(),
-            });
+            history.push({ name, text, imgs, self: name === selfName, time: ts ? new Date(ts) : new Date() });
         }
-        chat.addHistory(history, { dividerText: t('chat.historyDivider'), imageText: t('chat.image') });
+        chat.addHistory(history, { dividerText: t('chat.historyDivider'), imageAlt: t('chat.image') });
     });
 
     socket.on('addPeer', (cfg) => {
@@ -1771,12 +1765,22 @@ function insertChatNewline() {
 }
 
 /**
- * Give the server a copy of an outgoing chat message for the history store.
+ * Give the server copies of an outgoing chat message for the history store.
  * Live delivery stays P2P over the DataChannel mesh; this relay is storage
- * only (the sender is the single reporting point, so nothing is stored twice).
+ * only (the sender is the single reporting point, so nothing is stored
+ * twice). A submit with images = one head event + one event per image —
+ * each image rides alone because a whole batch can exceed the socket.io
+ * packet cap; the server assembles the batch into one history row.
  */
-function emitChatForHistory(text, imgs = 0) {
-    socket?.emit('chat', { room_id: channelId, msg: text, imgs });
+function emitChatForHistory(text, images = []) {
+    if (!socket) return;
+    if (!images.length) {
+        socket.emit('chat', { room_id: channelId, msg: text });
+        return;
+    }
+    const batch = crypto.randomUUID();
+    socket.emit('chat', { room_id: channelId, msg: text, batch, imgs: images.length });
+    for (const img of images) socket.emit('chat', { room_id: channelId, batch, img });
 }
 
 async function onChatSubmit(event) {
@@ -1819,7 +1823,7 @@ async function onChatSubmit(event) {
     const batch = crypto.randomUUID();
     mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length });
     chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true });
-    emitChatForHistory(text, payloads.length); // image data is not persisted, only the count
+    emitChatForHistory(text, payloads.map((payload) => payload.dataUrl));
     for (const payload of payloads) {
         sendImageData({
             send: (frame) => mesh.sendChat(frame),

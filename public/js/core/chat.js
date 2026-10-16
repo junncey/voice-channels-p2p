@@ -11,6 +11,8 @@ import { el, formatTime, formatDate, avatarColor } from './utils.js';
 const TIME_GAP_MS = 5 * 60 * 1000;
 
 const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+// mirrors the server-side persisted-image cap — reject anything bigger on render
+const MAX_IMAGE_CHARS = 1600 * 1024;
 
 /**
  * @param {HTMLElement} container scrollable message list
@@ -100,25 +102,36 @@ export function initChat(
 
     /**
      * Render server-persisted history before the live session starts. Rows
-     * keep their original send times (time chips rebuild naturally); batches
-     * appear as their text plus an image-count note — image data itself is
-     * never persisted, only the text part is.
-     * @param {Array<{name:string,text:string,imgs?:number,self?:boolean,time:Date}>} messages
+     * keep their original send times (time chips rebuild naturally); image
+     * batches render like the live merged bubbles — the data URLs were
+     * persisted by the sender and are re-validated here before touching the DOM.
+     * @param {Array<{name:string,text:string,imgs?:string[],self?:boolean,time:Date}>} messages
      * @param {object} [options]
      * @param {string} [options.dividerText] system line shown after the block
-     * @param {string} [options.imageText]   localized word for "image" in the count note
+     * @param {string} [options.imageAlt]    alt/title for persisted images
      */
-    function addHistory(messages, { dividerText = '', imageText = '' } = {}) {
+    function addHistory(messages, { dividerText = '', imageAlt = 'image' } = {}) {
         let shown = 0;
         for (const msg of Array.isArray(messages) ? messages : []) {
             if (!msg || typeof msg !== 'object') continue;
             const time = msg.time instanceof Date && !isNaN(msg.time) ? msg.time : new Date();
-            const imgs = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
             const text = typeof msg.text === 'string' ? msg.text : '';
-            const note = imgs ? `[${imageText}×${imgs}]` : '';
-            const full = [text, note].filter(Boolean).join(' ');
-            if (!full) continue;
-            add({ name: msg.name, text: full, self: !!msg.self, time });
+            const images = (Array.isArray(msg.imgs) ? msg.imgs : [])
+                .filter((src) => typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src))
+                .slice(0, 9);
+            if (!text && !images.length) continue;
+
+            if (images.length) {
+                const stick = nearBottom();
+                maybeTimeChip(time, stick);
+                const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(images.length, 6))}` });
+                for (const src of images) imagesEl.append(imageNode(src, imageAlt));
+                const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
+                if (text) bubble.append(el('div', { class: 'msg-text', text }));
+                append(buildMessage({ name: msg.name, self: !!msg.self, bubble }), stick);
+            } else {
+                add({ name: msg.name, text, self: !!msg.self, time });
+            }
             shown++;
         }
         if (shown && dividerText) add({ text: dividerText, system: true });

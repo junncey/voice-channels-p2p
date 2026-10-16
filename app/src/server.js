@@ -75,7 +75,10 @@ const corsOptions = {
 };
 
 const io = new Server({
-    maxHttpBufferSize: 1e6,
+    // 2MB: chat-history image relay events carry ONE compressed image each
+    // (up to ~1.6MB of base64, see the 'chat' handler). A packet over the
+    // limit closes its own connection, so the raise stays self-limiting.
+    maxHttpBufferSize: 2e6,
     transports: ['websocket'],
     cors: corsOptions,
     // reap connections that died without a FIN (ghost members) within ~18s
@@ -132,7 +135,6 @@ const chatStore = new ChatStore({
     dir: path.join(__dirname, 'chat_history'),
     retentionHours: () => channelStore.settings.chatRetentionHours,
 });
-const CHAT_HISTORY_SEND_MAX = 200; // cap the catch-up block sent on join
 
 // The admin console stays completely DISABLED (404 on /admin and every
 // /api/admin/* route) until BOTH a password and a dedicated JWT secret are
@@ -590,6 +592,7 @@ io.sockets.on('connect', async (socket) => {
         delete sockets[socket.id];
         joinFailures.delete(socket.id); // per-socket state cleanup
         chatSends.delete(socket.id);
+        chatBatches.delete(socket.id); // pending image batches die with the sender
     });
 
     /**
@@ -814,10 +817,9 @@ io.sockets.on('connect', async (socket) => {
         // serverInfo, so it renders above the "you joined" line. Emitted on
         // every (re)join — possibly empty — so the client sees exactly one
         // block per join and can ignore the replays after reconnects.
+        // chatStore.history() applies the message-count AND payload budgets.
         const chatHistory = chatStore.history(channel, { persistent: !channelStore.isTemp(channel) });
-        await sendToPeer(socket.id, sockets, 'chatHistory', {
-            messages: chatHistory.slice(-CHAT_HISTORY_SEND_MAX),
-        });
+        await sendToPeer(socket.id, sockets, 'chatHistory', { messages: chatHistory });
 
         // Send room info to the joined peer
         await sendToPeer(socket.id, sockets, 'serverInfo', {
@@ -1041,16 +1043,17 @@ io.sockets.on('connect', async (socket) => {
 
     /**
      * Chat persistence: the DataChannel mesh delivers messages live; the
-     * SENDER relays a copy of each text message here so it lands in the
-     * history store for late joiners. The server never broadcasts on this
-     * path — storage only. Flood-gated and member-gated, and contents are
-     * never logged.
+     * SENDER relays a copy here so it lands in the history store for late
+     * joiners. The server never broadcasts on this path — storage only.
+     *
+     * A submit with images = one HEAD event ({msg, batch, imgs: count}) plus
+     * one event per image ({batch, img: dataUrl}) — each image rides alone
+     * because a whole batch can exceed the socket.io packet cap. Flood-gated
+     * and member-gated; contents are never logged.
      */
     socket.on('chat', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
-
-        const { room_id, msg, imgs } = config;
+        if (!Validate.isValidData(cfg)) return;
+        const { room_id } = cfg;
         if (!isPeerInRoom(room_id, socket.id)) return;
 
         if (isChatFlooded(socket.id)) {
@@ -1058,18 +1061,50 @@ io.sockets.on('connect', async (socket) => {
             return;
         }
 
-        const text = typeof msg === 'string' ? msg.slice(0, 500) : '';
-        const imageCount = Number.isInteger(imgs) && imgs > 0 && imgs <= 9 ? imgs : 0;
+        // image part of a pending batch
+        if (typeof cfg.img === 'string') {
+            const batch = typeof cfg.batch === 'string' && cfg.batch.length <= 64 ? cfg.batch : '';
+            const pending = batch ? chatBatches.get(socket.id)?.get(batch) : null;
+            if (!pending || pending.room_id !== room_id) return;
+            // push only up to the announced count so duplicate/extra events can't bloat the row
+            if (pending.images.length < pending.expected) {
+                const image = sanitizeChatImage(cfg.img);
+                if (image) pending.images.push(image);
+            }
+            if (pending.images.length >= pending.expected) {
+                chatBatches.get(socket.id).delete(batch);
+                finalizeChatBatch(socket.id, pending);
+            }
+            return;
+        }
+
+        // text-only send, or the head of an image batch
+        // (checkXSS on the text ONLY — DOMPurify strips data: URIs, so image
+        // payloads must never ride through it; same split as peerAvatar)
+        const sanitized = checkXSS(typeof cfg.msg === 'string' ? cfg.msg : '');
+        const text = typeof sanitized === 'string' ? sanitized.slice(0, 500) : '';
+        const imageCount = Number.isInteger(cfg.imgs) && cfg.imgs > 0 && cfg.imgs <= 9 ? cfg.imgs : 0;
         if (!text && !imageCount) return;
 
         const peer_name = peers[room_id]?.[socket.id]?.peer_name; // the JOINED name, server-side state
         if (!peer_name) return;
 
-        chatStore.append(
-            room_id,
-            { name: peer_name, text, imgs: imageCount },
-            { persistent: !channelStore.isTemp(room_id) }
-        );
+        if (!imageCount) {
+            chatStore.append(room_id, { name: peer_name, text, imgs: [] }, { persistent: !channelStore.isTemp(room_id) });
+            return;
+        }
+
+        const batch = typeof cfg.batch === 'string' && cfg.batch.length <= 64 ? cfg.batch : '';
+        if (!batch) return; // image batches must carry a client-generated id
+        chatBatchSweep();
+        let batches = chatBatches.get(socket.id);
+        if (!batches) {
+            batches = new Map();
+            chatBatches.set(socket.id, batches);
+        } else if (batches.size >= CHAT_BATCHES_PER_SOCKET) {
+            return; // finish what's in flight before opening another batch
+        }
+        batches.set(batch, { room_id, name: peer_name, text, expected: imageCount, images: [], ts: Date.now() });
     });
 
     /**
@@ -1257,10 +1292,33 @@ function recordJoinFailure(socketId) {
 
 // Per-socket persistence rate: human typing never approaches this; a scripted
 // flood would grow (and constantly rewrite) the history files. The live P2P
-// delivery is unaffected — only the history copy is dropped.
-const CHAT_FLOOD_MAX = 12;
+// delivery is unaffected — only the history copy is dropped. The budget must
+// cover image batches too (1 head + up to 9 image events).
+const CHAT_FLOOD_MAX = 24;
 const CHAT_FLOOD_WINDOW_MS = 10 * 1000;
 const chatSends = new Map(); // socket.id -> timestamps inside the window
+
+// Pending image batches: head event received, image events still arriving.
+// Keyed per socket so ids can never collide across senders; entries flush
+// (with whatever images arrived) after the TTL.
+const CHAT_BATCH_TTL_MS = 30 * 1000;
+const CHAT_BATCHES_PER_SOCKET = 3;
+const chatBatches = new Map(); // socket.id -> Map(batchId -> pending)
+
+// The persisted-image whitelist — validated directly, never routed through
+// checkXSS (DOMPurify strips data: URIs). Same rules as the peerAvatar
+// handler; the size cap mirrors the client transfer cap (images.js).
+const CHAT_IMAGE_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+const CHAT_IMAGE_MAX_CHARS = 1600 * 1024;
+
+function sanitizeChatImage(url) {
+    return typeof url === 'string' &&
+        url.length > 0 &&
+        url.length <= CHAT_IMAGE_MAX_CHARS &&
+        CHAT_IMAGE_RE.test(url)
+        ? url
+        : '';
+}
 
 function isChatFlooded(socketId, now = Date.now()) {
     const stamps = (chatSends.get(socketId) || []).filter((ts) => now - ts < CHAT_FLOOD_WINDOW_MS);
@@ -1271,6 +1329,29 @@ function isChatFlooded(socketId, now = Date.now()) {
     stamps.push(now);
     chatSends.set(socketId, stamps);
     return false;
+}
+
+/** Store a completed (or TTL-expired) batch as one history row. */
+function finalizeChatBatch(socketId, pending) {
+    chatStore.append(
+        pending.room_id,
+        { name: pending.name, text: pending.text, imgs: pending.images },
+        { persistent: !channelStore.isTemp(pending.room_id) }
+    );
+}
+
+/** Flush expired pending batches so a sender whose image events never
+ * completed doesn't lose the text of the message. */
+function chatBatchSweep(now = Date.now()) {
+    for (const [socketId, batches] of chatBatches) {
+        for (const [batch, pending] of batches) {
+            if (now - pending.ts > CHAT_BATCH_TTL_MS) {
+                batches.delete(batch);
+                finalizeChatBatch(socketId, pending);
+            }
+        }
+        if (!batches.size) chatBatches.delete(socketId);
+    }
 }
 
 /**

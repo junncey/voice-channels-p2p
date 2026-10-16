@@ -191,7 +191,7 @@
     "admin.s.socketMaxChannels": "单连接频道数上限",
     "admin.s.socketMaxChannelsHint": "单个连接可同时加入的频道数，正常页面为 1",
     "admin.s.chatRetentionHours": "聊天记录保留时长（小时）",
-    "admin.s.chatRetentionHoursHint": "新成员加入频道时可见的文字聊天历史保留时长；0 表示不保留任何记录（图片消息不持久化）",
+    "admin.s.chatRetentionHoursHint": "新成员加入频道时可见的聊天记录保留时长（文字与图片）；0 表示不保留任何记录",
     "admin.settingsSaved": "设置已保存",
     "admin.settingsError": "设置保存失败",
     "admin.empty": "还没有频道，点击「新建频道」创建第一个",
