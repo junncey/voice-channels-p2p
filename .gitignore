@@ -25,3 +25,6 @@ env.txt
 
 .idea
 app/src/channels.json
+
+# runtime chat history
+app/src/chat_history/

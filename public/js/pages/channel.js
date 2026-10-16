@@ -90,6 +90,9 @@ let channelPassword = '';
 // composer send key preference (QQ style): Enter or Ctrl+Enter sends, the
 // other combinations insert a newline
 let sendKey = localStorage.getItem(SEND_KEY_STORE) === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
+// the server replays the persisted chat history on EVERY join (reconnects
+// included) — only the first block of a page load is ever rendered
+let chatHistorySeen = false;
 
 // ----- media self-healing (see the recovery engine section below) -----
 const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated }
@@ -418,6 +421,32 @@ function registerSocketHandlers() {
             updateHeaderActions();
         }
         updateOnlineCount();
+    });
+
+    socket.on('chatHistory', (cfg) => {
+        // reconnect replays are ignored: the live DOM already holds the
+        // recent context, rendering again would duplicate every row
+        if (chatHistorySeen) return;
+        chatHistorySeen = true;
+        const messages = Array.isArray(cfg?.messages) ? cfg.messages : [];
+        if (!messages.length) return;
+        const history = [];
+        for (const msg of messages.slice(-200)) {
+            if (!msg || typeof msg !== 'object') continue;
+            const name = String(msg.name || '?').slice(0, 24);
+            const text = typeof msg.text === 'string' ? msg.text : '';
+            const imgs = Number.isInteger(msg.imgs) && msg.imgs > 0 && msg.imgs <= 9 ? msg.imgs : 0;
+            if (!text && !imgs) continue;
+            const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
+            history.push({
+                name,
+                text,
+                imgs,
+                self: name === selfName,
+                time: ts ? new Date(ts) : new Date(),
+            });
+        }
+        chat.addHistory(history, { dividerText: t('chat.historyDivider'), imageText: t('chat.image') });
     });
 
     socket.on('addPeer', (cfg) => {
@@ -1741,6 +1770,15 @@ function insertChatNewline() {
     autoGrowChatInput();
 }
 
+/**
+ * Give the server a copy of an outgoing chat message for the history store.
+ * Live delivery stays P2P over the DataChannel mesh; this relay is storage
+ * only (the sender is the single reporting point, so nothing is stored twice).
+ */
+function emitChatForHistory(text, imgs = 0) {
+    socket?.emit('chat', { room_id: channelId, msg: text, imgs });
+}
+
 async function onChatSubmit(event) {
     event.preventDefault();
     if (!joined) return;
@@ -1755,6 +1793,7 @@ async function onChatSubmit(event) {
     if (!images.length) {
         mesh.sendChat({ type: 'chat', from: selfName, msg: text });
         chat.add({ name: selfName, text, self: true });
+        emitChatForHistory(text);
         return;
     }
 
@@ -1772,6 +1811,7 @@ async function onChatSubmit(event) {
         if (text) {
             mesh.sendChat({ type: 'chat', from: selfName, msg: text });
             chat.add({ name: selfName, text, self: true });
+            emitChatForHistory(text);
         }
         return;
     }
@@ -1779,6 +1819,7 @@ async function onChatSubmit(event) {
     const batch = crypto.randomUUID();
     mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length });
     chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true });
+    emitChatForHistory(text, payloads.length); // image data is not persisted, only the count
     for (const payload of payloads) {
         sendImageData({
             send: (frame) => mesh.sendChat(frame),

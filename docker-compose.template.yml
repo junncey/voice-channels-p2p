@@ -14,6 +14,9 @@ services:
             # Persistent channel registry (channels created in the /admin
             # console). Without this mount the registry is lost on rebuild:
             - ./app/src/channels.json:/src/app/src/channels.json
+            # Persistent text chat history (retention configurable in /admin →
+            # server settings). Without this mount the history is lost on rebuild:
+            - ./app/src/chat_history:/src/app/src/chat_history
 # Uncomment below, remove "ports:" section above and configure labels as
 # needed for LetsEncrypt TLS certificates with Traefik.
 # See https://doc.traefik.io/traefik/user-guides/docker-compose/basic-example/

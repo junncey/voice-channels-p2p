@@ -110,6 +110,7 @@ function syncSettingsFields(settings) {
     $('#sTempCreateMax').value = settings.tempCreateMax ?? 5;
     $('#sTempCreateWindowMin').value = settings.tempCreateWindowMin ?? 10;
     $('#sSocketMaxChannels').value = settings.socketMaxChannels ?? 2;
+    $('#sChatRetentionHours').value = settings.chatRetentionHours ?? 24;
 }
 
 function openSettings() {
@@ -129,6 +130,7 @@ async function onSettingsSubmit(event) {
             tempCreateMax: Number($('#sTempCreateMax').value),
             tempCreateWindowMin: Number($('#sTempCreateWindowMin').value),
             socketMaxChannels: Number($('#sSocketMaxChannels').value),
+            chatRetentionHours: Number($('#sChatRetentionHours').value),
         });
         syncSettingsFields(settings);
         $('#settingsModal').classList.add('hidden');

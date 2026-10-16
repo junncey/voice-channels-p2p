@@ -33,6 +33,7 @@ const checkXSS = require('./xss.js');
 const Validate = require('./validate');
 const Logs = require('./logs');
 const ChannelStore = require('./channelStore');
+const ChatStore = require('./chatStore');
 const { applyEmbedHeaders } = require('./middleware/embedHeaders');
 
 const log = new Logs('server');
@@ -122,6 +123,16 @@ const channelStore = new ChannelStore({
 // Runtime source of truth for the temporary-rooms feature (admin-managed,
 // persisted in channels.json — the env value only seeded the initial default)
 const tempRoomsEnabled = () => channelStore.settings.tempRooms !== false;
+
+// Text chat history: delivery stays P2P over the DataChannel mesh, but the
+// SENDER relays a copy of every text message here so late joiners can catch
+// up. Retention is admin-tunable (chatRetentionHours in channels.json, 0 =
+// keep nothing); temp rooms keep history in memory only.
+const chatStore = new ChatStore({
+    dir: path.join(__dirname, 'chat_history'),
+    retentionHours: () => channelStore.settings.chatRetentionHours,
+});
+const CHAT_HISTORY_SEND_MAX = 200; // cap the catch-up block sent on join
 
 // The admin console stays completely DISABLED (404 on /admin and every
 // /api/admin/* route) until BOTH a password and a dedicated JWT secret are
@@ -480,6 +491,8 @@ app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
     // temp rooms live outside the persistent registry but are deletable too
     const result = channelStore.isTemp(id) ? channelStore.removeTemp(id) : channelStore.remove(id);
     if (!result.ok) return res.status(404).json({ error: result.errors[0] });
+    // the persisted chat history is part of the channel — gone with it
+    chatStore.removeChannel(id);
     const evicted = evictChannelPeers(id, 'channelDeleted');
     if (evicted) log.info('Channel deleted by admin, peers evicted', { channel: id, evicted });
     res.json({ success: true });
@@ -544,6 +557,8 @@ server.listen(port, null, () => {
         trust_proxy: trustProxy,
         channels_registered: channelStore.channels.length,
         channels_file: channelStore.filePath,
+        chat_history_dir: chatStore.dir,
+        chat_retention_hours: channelStore.settings.chatRetentionHours,
         admin_console: consoleEnabled ? 'enabled' : 'disabled',
         default_moderator_fallback: channelsCfg.defaultModerator ? 'enabled' : 'disabled',
         ice_servers: iceServers.length,
@@ -574,6 +589,7 @@ io.sockets.on('connect', async (socket) => {
         log.debug('[' + socket.id + '] disconnected', { reason });
         delete sockets[socket.id];
         joinFailures.delete(socket.id); // per-socket state cleanup
+        chatSends.delete(socket.id);
     });
 
     /**
@@ -793,6 +809,15 @@ io.sockets.on('connect', async (socket) => {
         log.debug('[join] channel peers', { channel, peers: getRoomPeers(channel) });
 
         joinFailures.delete(socket.id); // a successful join resets the failure counter
+
+        // Catch the newcomer up on the persisted chat history BEFORE
+        // serverInfo, so it renders above the "you joined" line. Emitted on
+        // every (re)join — possibly empty — so the client sees exactly one
+        // block per join and can ignore the replays after reconnects.
+        const chatHistory = chatStore.history(channel, { persistent: !channelStore.isTemp(channel) });
+        await sendToPeer(socket.id, sockets, 'chatHistory', {
+            messages: chatHistory.slice(-CHAT_HISTORY_SEND_MAX),
+        });
 
         // Send room info to the joined peer
         await sendToPeer(socket.id, sockets, 'serverInfo', {
@@ -1015,6 +1040,39 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
+     * Chat persistence: the DataChannel mesh delivers messages live; the
+     * SENDER relays a copy of each text message here so it lands in the
+     * history store for late joiners. The server never broadcasts on this
+     * path — storage only. Flood-gated and member-gated, and contents are
+     * never logged.
+     */
+    socket.on('chat', async (cfg) => {
+        const config = checkXSS(cfg);
+        if (!Validate.isValidData(config)) return;
+
+        const { room_id, msg, imgs } = config;
+        if (!isPeerInRoom(room_id, socket.id)) return;
+
+        if (isChatFlooded(socket.id)) {
+            log.debug('[' + socket.id + '] chat dropped: flood guard', { room_id });
+            return;
+        }
+
+        const text = typeof msg === 'string' ? msg.slice(0, 500) : '';
+        const imageCount = Number.isInteger(imgs) && imgs > 0 && imgs <= 9 ? imgs : 0;
+        if (!text && !imageCount) return;
+
+        const peer_name = peers[room_id]?.[socket.id]?.peer_name; // the JOINED name, server-side state
+        if (!peer_name) return;
+
+        chatStore.append(
+            room_id,
+            { name: peer_name, text, imgs: imageCount },
+            { persistent: !channelStore.isTemp(room_id) }
+        );
+    });
+
+    /**
      * Relay actions to peers (presenter gated for moderation actions)
      */
     socket.on('peerAction', async (cfg) => {
@@ -1112,8 +1170,11 @@ io.sockets.on('connect', async (socket) => {
                 delete peers[channel];
                 delete presenters[channel];
                 delete channels[channel]; // clean up to prevent memory leaks
-                // an empty temporary room is gone for good
-                channelStore.removeTempIfEmpty(channel, 0);
+                // an empty temporary room is gone for good — its (memory-only)
+                // chat history goes with it
+                if (channelStore.removeTempIfEmpty(channel, 0)) {
+                    chatStore.removeChannel(channel);
+                }
             }
         } catch (err) {
             log.error('Remove Peer', toJson(err));
@@ -1188,6 +1249,28 @@ function recordJoinFailure(socketId) {
     entry.count++;
     entry.ts = Date.now();
     joinFailures.set(socketId, entry);
+}
+
+// ---------------------------------------------------------------------------
+// Chat history flood guard
+// ---------------------------------------------------------------------------
+
+// Per-socket persistence rate: human typing never approaches this; a scripted
+// flood would grow (and constantly rewrite) the history files. The live P2P
+// delivery is unaffected — only the history copy is dropped.
+const CHAT_FLOOD_MAX = 12;
+const CHAT_FLOOD_WINDOW_MS = 10 * 1000;
+const chatSends = new Map(); // socket.id -> timestamps inside the window
+
+function isChatFlooded(socketId, now = Date.now()) {
+    const stamps = (chatSends.get(socketId) || []).filter((ts) => now - ts < CHAT_FLOOD_WINDOW_MS);
+    if (stamps.length >= CHAT_FLOOD_MAX) {
+        chatSends.set(socketId, stamps);
+        return true;
+    }
+    stamps.push(now);
+    chatSends.set(socketId, stamps);
+    return false;
 }
 
 /**

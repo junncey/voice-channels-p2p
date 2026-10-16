@@ -67,6 +67,9 @@ const SETTINGS_SCHEMA = {
     tempCreateWindowMin: { type: 'number', min: 1, max: 1440, default: 10 },
     // channels one socket may be joined to at once (a page joins exactly one)
     socketMaxChannels: { type: 'number', min: 1, max: 16, default: 2 },
+    // how long text chat history is kept, in hours (0 = keep nothing) — see
+    // chatStore.js; images are never persisted, only the text part is
+    chatRetentionHours: { type: 'number', min: 0, max: 2160, default: 24 },
 };
 const SETTING_KEYS = Object.keys(SETTINGS_SCHEMA);
 
@@ -477,11 +480,14 @@ class ChannelStore {
         return channel;
     }
 
+    /** @returns {boolean} true when the temp room existed and was removed */
     removeTempIfEmpty(id, onlineCount = 0) {
         if (this.temps.has(id) && onlineCount <= 0) {
             this.temps.delete(id);
             log.info('Temp channel removed (empty)', { id });
+            return true;
         }
+        return false;
     }
 
     /** Force-remove a temp room regardless of occupancy (admin delete). */

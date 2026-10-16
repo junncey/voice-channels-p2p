@@ -99,6 +99,32 @@ export function initChat(
     }
 
     /**
+     * Render server-persisted history before the live session starts. Rows
+     * keep their original send times (time chips rebuild naturally); batches
+     * appear as their text plus an image-count note — image data itself is
+     * never persisted, only the text part is.
+     * @param {Array<{name:string,text:string,imgs?:number,self?:boolean,time:Date}>} messages
+     * @param {object} [options]
+     * @param {string} [options.dividerText] system line shown after the block
+     * @param {string} [options.imageText]   localized word for "image" in the count note
+     */
+    function addHistory(messages, { dividerText = '', imageText = '' } = {}) {
+        let shown = 0;
+        for (const msg of Array.isArray(messages) ? messages : []) {
+            if (!msg || typeof msg !== 'object') continue;
+            const time = msg.time instanceof Date && !isNaN(msg.time) ? msg.time : new Date();
+            const imgs = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
+            const text = typeof msg.text === 'string' ? msg.text : '';
+            const note = imgs ? `[${imageText}×${imgs}]` : '';
+            const full = [text, note].filter(Boolean).join(' ');
+            if (!full) continue;
+            add({ name: msg.name, text: full, self: !!msg.self, time });
+            shown++;
+        }
+        if (shown && dividerText) add({ text: dividerText, system: true });
+    }
+
+    /**
      * Open a merged bubble for one send of text + N images (QQ style: images
      * stacked in the bubble, text underneath). Images are appended later via
      * addBatchImage as their transfers complete.
@@ -274,5 +300,5 @@ export function initChat(
     }
 
     showEmpty();
-    return { add, addImage, openBatch, addBatchImage, failBatchImage, setAvatar, renamePeer };
+    return { add, addHistory, addImage, openBatch, addBatchImage, failBatchImage, setAvatar, renamePeer };
 }

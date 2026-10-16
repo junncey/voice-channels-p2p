@@ -45,8 +45,8 @@
                         </svg>
                         <span data-i18n="admin.newChannel">新建频道</span>
                     </button>
-                    <button id="tempSettingsBtn" class="btn ghost sm" data-i18n="admin.tempSettings" data-i18n-title="admin.tempRoomsHint">
-                        临时房间设置
+                    <button id="tempSettingsBtn" class="btn ghost sm" data-i18n="admin.serverSettings" data-i18n-title="admin.serverSettingsHint">
+                        服务器设置
                     </button>
                     <span id="loadError" class="admin-error"></span>
                 </div>
@@ -126,10 +126,10 @@
             </div>
         </div>
 
-        <!-- 临时房间设置弹窗 -->
+        <!-- 服务器设置弹窗（临时房间 + 聊天记录） -->
         <div id="settingsModal" class="overlay hidden">
             <div class="modal editor-modal">
-                <h2 data-i18n="admin.tempSettings">临时房间设置</h2>
+                <h2 data-i18n="admin.serverSettings">服务器设置</h2>
                 <form id="settingsForm">
                     <div class="field check-field">
                         <label>
@@ -165,6 +165,11 @@
                             <input id="sTempCreateWindowMin" class="input" type="number" min="1" max="1440" step="1" required />
                             <span class="field-hint" data-i18n="admin.s.tempCreateWindowMinHint">创建频率限制的滑动窗口长度</span>
                         </div>
+                    </div>
+                    <div class="field">
+                        <label for="sChatRetentionHours" data-i18n="admin.s.chatRetentionHours">聊天记录保留时长（小时）</label>
+                        <input id="sChatRetentionHours" class="input" type="number" min="0" max="2160" step="1" required />
+                        <span class="field-hint" data-i18n="admin.s.chatRetentionHoursHint">新成员加入频道时可见的文字聊天历史保留时长；0 表示不保留任何记录（图片消息不持久化）</span>
                     </div>
                     <p id="settingsError" class="login-error" role="alert"></p>
                     <div class="modal-actions">
