@@ -99,7 +99,26 @@ docker run -d -p 3000:3000 \
 
 > ACR 个人版在**产品层面**就封了删除：Registry 的 `DELETE` 返回 `UNAUTHORIZED … Action:"delete"`，且官方《个人版与企业版实例差异化说明》明确写「**个人版不对外提供 OpenAPI 接口**」，`DeleteRepoTag` 需要企业版实例的 `InstanceId`/`RepoId`，生命周期规则同样仅企业版可用。因此 GitHub Actions 只能推送、无法删除，清理只能在控制台手动执行；发布流水线每次会把 `scripts/acr-tags.sh` 的审计结果写进运行摘要，提示该删哪几个标签。
 >
-> GHCR 不受此限制——GitHub Packages 提供完整的删除 API，`prune-ghcr` 任务因此可以真正做自动清理。⚠️ GHCR 包**首次推送后默认是私有**，若要匿名拉取，需在包的设置页把可见性改为 public。
+> GHCR 不受此限制——GitHub Packages 提供完整的删除 API，`prune-ghcr` 任务因此可以真正做自动清理。GHCR 包默认沿用仓库可见性（本仓库为 public），已验证匿名可拉取。
+
+### 发布流程
+
+1. **改版本号** — `package.json` 与 `package-lock.json`（两处 `version`）
+2. **本地校验** — `npm test`
+3. **打 tag 推送** — tag 形如 `v*` 会触发构建，请勿用 `git push --tags`
+   ```bash
+   git tag -a v1.0.1 -m "v1.0.1 — …" && git push origin v1.0.1
+   ```
+4. **写发布说明** — 等构建完成后执行（`DIGEST` 从 GHCR 读取），再创建 Release
+   ```bash
+   CHANGES=$'- 新增…\n- 修复…' PREV_VERSION=1.0.0 \
+     ./scripts/release-notes.sh 1.0.1 > body.md
+   gh release create v1.0.1 --title "v1.0.1 — …" --notes-file body.md
+   ```
+   模板见 [`.github/release-template.md`](.github/release-template.md)。脚本自动填 `DIGEST`（GHCR 匿名读取，ACR 与 GHCR 同 digest）、`BUILD_ID`（前端内容指纹）、`TEST_COUNT`（`mocha --dry-run` 统计）；`IMAGE_SIZE` / `BUILD_ID` / `TEST_COUNT` 可用环境变量覆盖。镜像尚未推送时会提示 digest 待回填，重跑即可。
+5. **服务器升级** — compose 改固定版本号后 `docker compose pull && docker compose up -d`
+
+> ⚠️ 工作区有未提交改动时，脚本会告警：此时自动算出的 `BUILD_ID` 只代表当前工作区，不代表任何已发布版本。补发旧版本的说明请显式传 `BUILD_ID`，或直接取线上 `/api/version` 的值。
 
 ## 架构
 
