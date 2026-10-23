@@ -88,7 +88,7 @@ function showUpdateBar(build) {
             text: t('update.refreshNow'),
             onclick: () => {
                 if (isBusy && isBusy() && !window.confirm(t('update.reloadInCall'))) return;
-                location.reload();
+                reloadNow();
             },
         }),
         el('button', {
@@ -104,6 +104,17 @@ function showUpdateBar(build) {
     // measured, not hard-coded: the bar wraps to two lines on narrow screens
     // and the outage banner keeps its distance from it
     document.body.style.setProperty(HEIGHT_VAR, `${bar.offsetHeight}px`);
+}
+
+/**
+ * A script-driven reload is still a navigation: pages that guard against
+ * accidental exits (an active call) would otherwise confirm twice — once from
+ * this bar, once from the browser's own prompt. Announce the intent first so
+ * they can stand down; the listener runs synchronously, before beforeunload.
+ */
+function reloadNow() {
+    window.dispatchEvent(new Event('vc:unload-intent'));
+    location.reload();
 }
 
 function dismissBuild(build) {
