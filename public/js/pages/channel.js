@@ -669,18 +669,18 @@ function registerSocketHandlers() {
 
     socket.on('disconnect', (reason) => {
         if (!joined) return;
-        // a disconnect WE asked for (leave(), the unload handlers) is not an
-        // outage — socket.io only auto-reconnects after unplanned drops anyway
-        if (reason === 'io client disconnect') return;
         // full reset: socket.io reconnects with a NEW socket id, the server
-        // treats us as a fresh join and re-sends addPeer for everyone
+        // treats us as a fresh join and re-sends addPeer for everyone —
+        // attemptSignalingReconnect() counts on this even for the disconnect
+        // IT triggers, so the reset must run before the intentional-exit skip
         mesh?.clear();
         for (const peerId of [...members.keys()]) {
             if (peerId !== socket.id) dropPeer(peerId, { silent: true });
         }
-        // a signaling reconnect WE triggered as the media-recovery fallback
-        // is expected — don't alarm the user about it
-        if (!selfReconnecting) toast(t('channel.errors.disconnected'), 'warn');
+        // a disconnect WE asked for (leave(), the unload handlers, our own B1
+        // reconnect) is not an outage — skip the alarm, keep the reset above
+        if (reason === 'io client disconnect' || selfReconnecting) return;
+        toast(t('channel.errors.disconnected'), 'warn');
     });
 }
 
