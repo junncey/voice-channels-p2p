@@ -131,11 +131,13 @@ jobs:
           ACR_REPO: ${{ env.IMAGE_NAME }}
           KEEP: '3'
         run: |
+          set -o pipefail
           {
             echo ""
             echo "## 标签审计（保留最新 ${KEEP} 个版本）"
             echo ""
             echo '```'
-            bash scripts/acr-tags.sh 2>&1 || echo "审计失败（不影响构建）"
-            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/acr-tags.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" ||
+            echo "审计失败（不影响构建）" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
