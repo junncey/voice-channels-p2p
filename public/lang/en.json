@@ -91,6 +91,8 @@
     "chat.imageUnsupported": "Can't read this image",
     "chat.imageBroken": "Image transfer failed",
     "chat.historyDivider": "End of earlier messages",
+    "chat.historyLoading": "Loading earlier messages…",
+    "chat.historyEnd": "No earlier messages",
     "settings.title": "Settings",
     "settings.profile": "Profile",
     "settings.avatarChange": "Change avatar",

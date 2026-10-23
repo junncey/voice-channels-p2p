@@ -91,6 +91,8 @@
     "chat.imageUnsupported": "无法读取该图片",
     "chat.imageBroken": "图片接收失败",
     "chat.historyDivider": "以上为历史消息",
+    "chat.historyLoading": "正在加载更早的消息…",
+    "chat.historyEnd": "没有更早的消息了",
     "settings.title": "设置",
     "settings.profile": "个人资料",
     "settings.avatarChange": "更换头像",

@@ -34,9 +34,11 @@ const TEXT_MAX = 500;
 // Disk budget per channel, images included; rows drop from the oldest end
 // until a file fits (images dominate — text rows are a few hundred bytes).
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-// Catch-up block sent on join: message count and payload budget (images
-// dominate — the newest row is always included, older ones drop first)
-const MAX_SEND_MESSAGES = 200;
+// Catch-up pagination: one page sent per request — on join and per
+// scroll-up fetch. The byte budget keeps a single emit under the socket.io
+// packet cap (images dominate — the newest row is always included, older
+// ones drop first).
+const CHAT_PAGE_SIZE = 10;
 const MAX_SEND_BYTES = 2 * 1024 * 1024;
 // How often background pruning walks the store (in-memory entries + files on
 // disk) so messages past the retention window actually disappear even for
@@ -139,25 +141,48 @@ class ChatStore {
     }
 
     /**
-     * Kept messages for a joiner, oldest first, inside the catch-up budget
-     * (newest row always included, older ones dropped first). Empty when
-     * disabled/unknown.
+     * One page of kept messages for a joiner / scroll-up fetch, oldest
+     * first, inside the payload budget (newest row always included, older
+     * ones drop first). `before` (a ts) pages backwards: only rows strictly
+     * older are considered. ts is the only cursor and it is not unique, so
+     * a page boundary never splits a group sharing one ts — the whole group
+     * rides the older page (or this one), otherwise the next page's cursor
+     * would skip its remainder for good. `hasMore` says whether the store
+     * still holds older rows (rows already shifted off MAX_MESSAGES are
+     * gone for good and don't count). Empty when disabled/unknown.
      */
-    history(id, { persistent = true, maxBytes = MAX_SEND_BYTES } = {}) {
-        if (!ID_PATTERN.test(id) || this.retentionMs() <= 0) return [];
+    history(id, { persistent = true, before = 0, limit = CHAT_PAGE_SIZE, maxBytes = MAX_SEND_BYTES } = {}) {
+        if (!ID_PATTERN.test(id) || this.retentionMs() <= 0) return { messages: [], hasMore: false };
         const entry = this.entry(id, { persistent });
         this.prune(entry.messages);
 
+        const messages = entry.messages;
+        let end = messages.length;
+        if (Number.isFinite(before) && before > 0) {
+            while (end > 0 && messages[end - 1].ts >= before) end--;
+        }
+        const count = Number.isFinite(limit) && limit > 0 ? limit : CHAT_PAGE_SIZE;
+        const start = Math.max(0, end - count);
+
         const picked = [];
         let used = 0;
-        for (let i = entry.messages.length - 1; i >= 0 && picked.length < MAX_SEND_MESSAGES; i--) {
-            const message = entry.messages[i];
-            const size = estimateBytes(message);
+        let i = end - 1;
+        for (; i >= start; i--) {
+            const size = estimateBytes(messages[i]);
+            // the newest row of the page always rides along; older ones drop
+            // first once the budget is hit and wait for the next page
             if (picked.length && used + size > maxBytes) break;
-            picked.push(message);
+            picked.push(messages[i]);
             used += size;
         }
-        return picked.reverse();
+        // heal a cut that landed inside a same-ts group (limit or budget):
+        // rows the cursor cannot address individually must ship whole
+        while (i >= 0 && messages[i].ts === messages[i + 1]?.ts) {
+            picked.push(messages[i]);
+            i--;
+        }
+        const first = end - picked.length;
+        return { messages: messages.slice(first, end), hasMore: first > 0 };
     }
 
     /** Drop rows older than the retention window, in place. */
@@ -304,4 +329,5 @@ module.exports = ChatStore;
 module.exports.MAX_MESSAGES = MAX_MESSAGES;
 module.exports.MAX_FILE_BYTES = MAX_FILE_BYTES;
 module.exports.MAX_SEND_BYTES = MAX_SEND_BYTES;
+module.exports.CHAT_PAGE_SIZE = CHAT_PAGE_SIZE;
 module.exports.SWEEP_INTERVAL_MS = SWEEP_INTERVAL_MS;
