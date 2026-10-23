@@ -1112,23 +1112,32 @@ function relayUpgradeTick(peerId) {
         scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
         return;
     }
-    const info = connPaths.get(peerId);
-    if (
-        !mesh?.entries.has(peerId) ||
-        peerRecovery.has(peerId) ||
-        !info ||
-        info.state !== 'connected' ||
-        info.type !== 'relay' ||
-        !socket?.id ||
-        socket.id >= peerId
-    ) {
+    // Peer gone, broken link, or not our turn to initiate: nothing left to judge.
+    if (!mesh?.entries.has(peerId) || peerRecovery.has(peerId) || !socket?.id || socket.id >= peerId) {
         cancelRelayUpgrade(peerId);
         return;
     }
+    // connPaths is written only by the 5s path poll, so this snapshot can still
+    // describe the restart that just finished (state 'connecting', type
+    // 'unknown'). Only a proven 'p2p' ends the cycle — treating "no verdict yet"
+    // as "upgrade not needed" would drop the record and hand the link a fresh
+    // 2 attempts, which is how a slow-settling restart turns into an endless
+    // renegotiation loop. Unknown waits for the next poll instead.
+    const info = connPaths.get(peerId);
+    if (info?.type === 'p2p') {
+        cancelRelayUpgrade(peerId);
+        return;
+    }
+    const relayed = info?.state === 'connected' && info.type === 'relay';
     if (rec.attempts >= RELAY_UPGRADE_MAX_ATTEMPTS || Date.now() - rec.since >= RELAY_UPGRADE_TOTAL_MS) {
-        console.warn('[mesh] relay upgrade: giving up, link stays on TURN', peerId);
+        if (relayed) console.warn('[mesh] relay upgrade: giving up, link stays on TURN', peerId);
         // tombstone: stay in the map so the poll doesn't re-arm a fresh cycle
         rec.done = true;
+        return;
+    }
+    if (!relayed) {
+        // no verdict yet (restart still settling / candidates unreadable): look again
+        scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
         return;
     }
     rec.busy = true;
