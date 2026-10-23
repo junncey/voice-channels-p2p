@@ -63,6 +63,14 @@ npm start                  # http://localhost:3000
 
 ## Docker
 
+已发布的镜像在 ACR **公开命名空间**，匿名即可拉取（无需 `docker login`）：
+
+```bash
+docker pull crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com/b1at-public/voice-channels:1.0.0
+```
+
+本地自行构建：
+
 ```bash
 docker build -t voice-channels:latest .
 docker run -d -p 3000:3000 \
@@ -73,6 +81,17 @@ docker run -d -p 3000:3000 \
 ```
 
 必须挂载 `channels.json` 与 `chat_history/`，否则容器重建后频道注册表 / 聊天记录会丢失（compose 模板见 `docker-compose.template.yml`）。
+
+### 标签策略
+
+| 项 | 约定 |
+| --- | --- |
+| 每次发布 | 只推「版本号 + `latest`」两个标签，**不推短 SHA 标签** |
+| 版本保留 | 公开库只保留最新 **3** 个版本标签，超出部分在 ACR 控制台手动删除 |
+| 部署 | 一律使用固定版本标签（如 `:1.0.0`），不用 `latest`，避免隐式升级 |
+| 查待清理 | `ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh`（只读，列出保留与待删标签） |
+
+> ACR 个人版不提供 Registry 删除接口（`DELETE` 返回 `UNAUTHORIZED … Action:"delete"`），也没有生命周期规则（`CreateArtifactLifecycleRule` 仅企业版），因此清理只能在控制台手动执行。
 
 ## 架构
 

@@ -39,6 +39,7 @@
 - remote：`origin` = 本仓库、`upstream` = [miroslavpejic85/mirotalk](https://github.com/miroslavpejic85/mirotalk)（只读参考）、`legacy` = 拆分前的旧仓库。
 - 本仓库是 MiroTalk P2P 的衍生作品（AGPL-3.0），来源与分叉基线见 `README.md`「来源与版本」与 `NOTICE`。
 - 版本号自 **v1.0.0** 独立计数，不要沿用上游 `2.0.30` 序列；**只推指定 tag**，别用 `git push --tags`。
+- 镜像标签纪律：每次构建只推「版本号 + `latest`」，**不要恢复短 SHA 标签**（每次构建多一个 tag，仓库会迅速膨胀）。公开库 `b1at-public/voice-channels` 只保留最新 **3** 个版本标签，超出需在 ACR 控制台手动删（个人版无删除 API、无生命周期规则）；`ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh` 可只读列出待删标签。
 - Shell 为 Windows Git Bash（本机推送遇网络问题时，可临时加 `git -c http.proxy=…`）。
 
 ## 浏览器自动化备忘（实测坑）
