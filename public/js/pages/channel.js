@@ -75,6 +75,9 @@ let chat = null;
 let selfName = '';
 let selfUuid = null;
 let joined = false;
+// set before in-app navigations (leave/reload) so the beforeunload prompt
+// doesn't fire for exits the user explicitly asked for
+let intentionalUnload = false;
 let textOnly = false;
 let micOn = false;
 let pttActive = false;
@@ -299,8 +302,10 @@ function bindUi() {
 
     $('#leaveBtn').addEventListener('click', leave);
     $('#outageActionBtn').addEventListener('click', () => {
-        if ($('#outageBanner').dataset.mode === 'failed') location.reload();
-        else attemptSignalingReconnect({ manual: true });
+        if ($('#outageBanner').dataset.mode === 'failed') {
+            intentionalUnload = true;
+            location.reload();
+        } else attemptSignalingReconnect({ manual: true });
     });
     $('#micBtn').addEventListener('click', onMicBtnClick);
     $('#chatForm').addEventListener('submit', onChatSubmit);
@@ -324,15 +329,33 @@ function bindUi() {
         });
     });
 
-    window.addEventListener('beforeunload', () => {
-        socket?.disconnect();
-        teardownMedia();
+    // the version bar reloads after its own confirmation — take that as a yes
+    // so the browser doesn't ask a second time (see reloadNow in version.js)
+    window.addEventListener('vc:unload-intent', () => {
+        intentionalUnload = true;
     });
-    // beforeunload never fires when iOS Safari swipes a tab away — pagehide
-    // does; the duplicate disconnect() on desktop unload paths is harmless
+    // Native "leave site?" confirmation while connected to the channel —
+    // browsers render their own localized text, returnValue is the legacy
+    // Chrome/Edge toggle. No cleanup here: the dialog is cancellable and the
+    // session must keep working afterwards, so teardown waits for pagehide
+    // (which only fires on a real unload, including the iOS swipe-away that
+    // skips beforeunload entirely).
+    window.addEventListener('beforeunload', (e) => {
+        if (intentionalUnload || !joined) return;
+        e.preventDefault();
+        e.returnValue = '';
+    });
     window.addEventListener('pagehide', () => {
         socket?.disconnect();
         teardownMedia();
+    });
+    // Back from bfcache: pagehide already dropped the socket and the mic, but
+    // the page still looks joined — a silent, deaf channel. Reload to rejoin
+    // instead of leaving the user talking to nobody.
+    window.addEventListener('pageshow', (e) => {
+        if (!e.persisted) return;
+        intentionalUnload = true;
+        location.reload();
     });
 }
 
@@ -2346,7 +2369,11 @@ async function onHostLoginSubmit(event) {
         $('#hostReadyHint').classList.remove('hidden');
         closeHostModal();
         if (!joined) join({ textOnly: false });
-        else location.reload(); // presenter status is granted at join time — rejoin with the token
+        else {
+            // presenter status is granted at join time — rejoin with the token
+            intentionalUnload = true;
+            location.reload();
+        }
     } catch (err) {
         const key = err?.status === 503 ? 'channel.hostLoginUnavailable' : 'channel.hostLoginFailed';
         $('#hostLoginError').textContent = t(key);
@@ -2358,11 +2385,10 @@ async function onHostLoginSubmit(event) {
 // ---------------------------------------------------------------------------
 
 function leave() {
-    // intentional exit: mark as not joined BEFORE disconnecting so the socket
-    // 'disconnect' handler skips its "connection lost, reconnecting…" toast —
-    // without this, navigating away flashes that warning while the socket from
-    // beforeunload/pagehide tears down. Also drops peers and stops the mic at
-    // once instead of waiting for the unload handlers.
+    // intentional exit: teardown marks us as not joined BEFORE the navigation,
+    // so the beforeunload guard stays quiet, and the socket 'disconnect' handler
+    // skips its "connection lost, reconnecting…" toast. Also drops peers and
+    // stops the mic at once instead of waiting for pagehide.
     teardown();
     location.href = '/';
 }
