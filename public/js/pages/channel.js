@@ -277,7 +277,7 @@ async function boot() {
 }
 
 function bindUi() {
-    $('#backBtn').addEventListener('click', () => (location.href = '/'));
+    $('#backBtn').addEventListener('click', leave);
     $('#joinBtn').addEventListener('click', () => join({ textOnly: false }));
     $('#textOnlyBtn').addEventListener('click', () => join({ textOnly: true }));
 
@@ -667,8 +667,11 @@ function registerSocketHandlers() {
         }
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
         if (!joined) return;
+        // a disconnect WE asked for (leave(), the unload handlers) is not an
+        // outage — socket.io only auto-reconnects after unplanned drops anyway
+        if (reason === 'io client disconnect') return;
         // full reset: socket.io reconnects with a NEW socket id, the server
         // treats us as a fresh join and re-sends addPeer for everyone
         mesh?.clear();
@@ -2212,6 +2215,12 @@ async function onHostLoginSubmit(event) {
 // ---------------------------------------------------------------------------
 
 function leave() {
+    // intentional exit: mark as not joined BEFORE disconnecting so the socket
+    // 'disconnect' handler skips its "connection lost, reconnecting…" toast —
+    // without this, navigating away flashes that warning while the socket from
+    // beforeunload/pagehide tears down. Also drops peers and stops the mic at
+    // once instead of waiting for the unload handlers.
+    teardown();
     location.href = '/';
 }
 
