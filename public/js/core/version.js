@@ -1,26 +1,40 @@
 /**
- * Frontend version guard: polls the server build fingerprint
- * (GET /api/version); when it no longer matches the build this page was
- * loaded with, a soft top-center banner offers a refresh. Used by all
- * pages (index/channel/admin).
+ * Frontend version guard.
+ *
+ * Every page ships with its build id baked into the HTML (`<meta name="vc-build">`)
+ * and compares it with the id the server reports on GET /api/version, polled
+ * every minute while the tab is visible (and immediately when it regains
+ * focus). On a mismatch a slim bar appears at the top of the page offering a
+ * reload. The bar is in normal flow, so it never covers the page; dismissing it
+ * only silences that one build, a newer one prompts again.
  */
 
 import { t } from './i18n.js';
 import { el } from './utils.js';
 
 const CHECK_MS = 60_000;
+const BODY_CLASS = 'has-update-bar';
+const HEIGHT_VAR = '--update-bar-h';
 
 const INFO_SVG =
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>';
 const X_SVG =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>';
 
-let loaded = null; // build fingerprint this page booted with
+let loaded = null; // build id this page was served with
 let dismissedBuild = null; // build closed via × — a newer build re-prompts
-let banner = null;
+let bar = null;
 let inFlight = false;
+let isBusy = null;
 
-export function initVersionCheck() {
+/**
+ * @param {object}   [options]
+ * @param {function} [options.isBusy] returns true while reloading would interrupt
+ *        the user (an active call) — the reload then asks for confirmation
+ */
+export function initVersionCheck(options = {}) {
+    isBusy = typeof options.isBusy === 'function' ? options.isBusy : null;
+    loaded = bakedBuild();
     check();
     setInterval(() => {
         if (!document.hidden) check();
@@ -28,6 +42,12 @@ export function initVersionCheck() {
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) check();
     });
+}
+
+/** Build id the server baked into this page — the exact code it is running. */
+function bakedBuild() {
+    const meta = document.querySelector('meta[name="vc-build"]');
+    return meta ? meta.getAttribute('content') : null;
 }
 
 async function check() {
@@ -45,37 +65,49 @@ async function check() {
     if (!build) return;
 
     if (!loaded) {
-        // first successful fetch = the build this page is actually running
+        // no baked id (page HTML served by an older build) — fall back to the
+        // first response we can get
         loaded = build;
     } else if (build !== loaded && build !== dismissedBuild) {
-        showUpdateBanner(build);
+        showUpdateBar(build);
     }
 }
 
-function showUpdateBanner(build) {
-    if (banner) return;
-    banner = el(
+function showUpdateBar(build) {
+    if (bar) return;
+    bar = el(
         'div',
-        { class: 'update-banner', role: 'status' },
+        { class: 'update-bar', role: 'status' },
         el('span', { class: 'update-icon', html: INFO_SVG, 'aria-hidden': 'true' }),
         el('span', { class: 'update-text', text: t('update.availableDesc') }),
         el('button', {
             class: 'update-link',
             type: 'button',
             text: t('update.refreshNow'),
-            onclick: () => location.reload(),
+            onclick: () => {
+                if (isBusy && isBusy() && !window.confirm(t('update.reloadInCall'))) return;
+                location.reload();
+            },
         }),
         el('button', {
             class: 'update-close',
             type: 'button',
             html: X_SVG,
             'aria-label': t('update.dismiss'),
-            onclick: () => {
-                dismissedBuild = build;
-                banner.remove();
-                banner = null;
-            },
+            onclick: () => dismissBuild(build),
         })
     );
-    document.body.append(banner);
+    document.body.prepend(bar);
+    document.body.classList.add(BODY_CLASS);
+    // measured, not hard-coded: the bar wraps to two lines on narrow screens
+    // and the outage banner keeps its distance from it
+    document.body.style.setProperty(HEIGHT_VAR, `${bar.offsetHeight}px`);
+}
+
+function dismissBuild(build) {
+    dismissedBuild = build;
+    if (bar) bar.remove();
+    bar = null;
+    document.body.classList.remove(BODY_CLASS);
+    document.body.style.removeProperty(HEIGHT_VAR);
 }

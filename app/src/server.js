@@ -272,6 +272,8 @@ app.use(
 app.use(applyEmbedHeaders);
 
 const staticOptions = {
+    // "/" must reach the page route so index.html is served with its build id
+    index: false,
     setHeaders: (res, filePath) => {
         if (filePath.endsWith('.js')) res.setHeader('Content-Type', 'application/javascript');
     },
@@ -300,9 +302,25 @@ app.use((req, res, next) => {
 // Pages
 // ---------------------------------------------------------------------------
 
+// Pages carry their build id in a <meta> (see app/src/version.js) and are sent
+// `Cache-Control: no-cache`, so a reload always revalidates the HTML instead of
+// running a stale copy out of the HTTP cache. Rendered copies are memoized:
+// frontend files never change inside a running container.
+const renderedPages = new Map();
+
+function sendPage(res, file, status = 200) {
+    let html = renderedPages.get(file);
+    if (!html) {
+        const { build } = Version.getVersionInfo(dir.public);
+        html = Version.injectBuildMeta(fs.readFileSync(file, 'utf8'), build);
+        renderedPages.set(file, html);
+    }
+    res.status(status).set('Cache-Control', 'no-cache').type('html').send(html);
+}
+
 // Channel list (homepage)
 app.get('/', (req, res) => {
-    res.sendFile(views.index);
+    sendPage(res, views.index);
 });
 
 // Voice channel page — registered channels always resolve; any other valid id
@@ -313,7 +331,7 @@ app.get('/c/:channelId', (req, res) => {
     if (!known && !(tempRoomsEnabled() && channelStore.isValidId(channelId))) {
         return res.status(404).sendFile(views.notFound);
     }
-    res.sendFile(views.channel);
+    sendPage(res, views.channel);
 });
 
 // Legacy links compatibility: /join/<room> -> /c/<room>
@@ -324,7 +342,7 @@ app.get('/join/:roomId', (req, res) => {
 // Admin console (404 unless enabled via env)
 app.get('/admin', (req, res) => {
     if (!consoleEnabled) return res.status(404).sendFile(views.notFound);
-    res.sendFile(views.admin);
+    sendPage(res, views.admin);
 });
 
 // Legacy single-segment links -> /c/<id> (old shared /<room> URLs)

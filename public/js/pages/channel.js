@@ -207,7 +207,8 @@ async function boot() {
     }
 
     await initI18n();
-    initVersionCheck();
+    // a reload drops the call, so ask first while any peer link is up
+    initVersionCheck({ isBusy: () => !!mesh && mesh.entries.size > 0 });
     chat = initChat($('#chatMessages'), {
         emptyText: t('chat.empty'),
         downloadText: t('chat.saveImage'),

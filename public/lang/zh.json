@@ -222,5 +222,6 @@
     "chat.imageTooMany": "一次最多发送 6 张图片",
     "update.availableDesc": "检测到新版本，为了更好的体验，请",
     "update.refreshNow": "立即刷新",
+    "update.reloadInCall": "当前正在通话中，刷新会断开这次通话。确定要刷新吗？",
     "update.dismiss": "关闭"
 }

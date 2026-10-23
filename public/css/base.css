@@ -272,24 +272,21 @@ select {
     margin-top: 6px;
 }
 
-/* ---------- update banner (soft prompt, non-blocking) ---------- */
+/* ---------- update bar (soft prompt, in flow so it never covers content) ---------- */
 
-.update-banner {
-    position: fixed;
-    top: 14px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 150;
+.update-bar {
+    /* the channel page body is a flex column — never squeeze the bar away */
+    flex: 0 0 auto;
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 9px;
-    max-width: min(92vw, 560px);
-    padding: 10px 12px 10px 14px;
-    background: var(--bg-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow-1);
+    justify-content: center;
+    gap: 8px;
+    padding: 9px 44px 9px 16px;
+    background: var(--warn-dim);
+    border-bottom: 1px solid var(--border);
     font-size: 13.5px;
+    text-align: center;
     animation: toast-in 0.2s var(--ease);
 }
 
@@ -320,12 +317,14 @@ select {
 }
 
 .update-close {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    transform: translateY(-50%);
     display: inline-flex;
-    flex-shrink: 0;
     border: none;
     background: none;
     padding: 3px;
-    margin-left: 4px;
     cursor: pointer;
     color: var(--text-2);
     border-radius: var(--radius-s);

@@ -8,7 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const pkg = require('../package.json');
-const { computeBuildId, getVersionInfo } = require('../app/src/version');
+const { computeBuildId, getVersionInfo, injectBuildMeta } = require('../app/src/version');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
@@ -66,6 +66,36 @@ describe('test-version', () => {
 
         it('should memoize the info object', () => {
             getVersionInfo(PUBLIC_DIR).should.equal(getVersionInfo(PUBLIC_DIR));
+        });
+    });
+
+    describe('2. injectBuildMeta', () => {
+        it('should insert the meta right after <head>', () => {
+            const out = injectBuildMeta('<html><head><title>x</title></head></html>', 'abc123');
+            out.should.match(/<head>\s*<meta name="vc-build" content="abc123" \/>/);
+            out.should.match(/<title>x<\/title>/);
+        });
+
+        it('should keep <head> attributes', () => {
+            injectBuildMeta('<head data-x="1">', 'abc123').should.match(/<head data-x="1">\s*<meta name="vc-build"/);
+        });
+
+        it('should replace an existing meta instead of duplicating it', () => {
+            const once = injectBuildMeta('<head></head>', 'old');
+            const twice = injectBuildMeta(once, 'new');
+            twice.should.containEql('content="new"');
+            twice.should.not.containEql('content="old"');
+            (twice.match(/vc-build/g) || []).length.should.equal(1);
+        });
+
+        it('should return the html untouched when there is no <head>', () => {
+            const html = '<p>no head here</p>';
+            injectBuildMeta(html, 'abc123').should.equal(html);
+        });
+
+        it('should be idempotent for the same build', () => {
+            const once = injectBuildMeta('<head></head>', 'abc123');
+            injectBuildMeta(once, 'abc123').should.equal(once);
         });
     });
 });

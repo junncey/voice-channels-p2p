@@ -311,6 +311,12 @@ body {
     border-color: var(--danger);
 }
 
+/* the outage pill floats over the header; when a new build is announced at the
+   same time the update bar (in flow, above the header) pushes it down */
+body.has-update-bar .outage-banner {
+    top: calc(14px + var(--update-bar-h, 0px));
+}
+
 .outage-icon {
     color: var(--danger);
     display: inline-flex;

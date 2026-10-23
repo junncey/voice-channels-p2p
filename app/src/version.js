@@ -48,4 +48,21 @@ function getVersionInfo(publicDir) {
     return cached;
 }
 
-module.exports = { computeBuildId, getVersionInfo };
+const BUILD_META_NAME = 'vc-build';
+
+/**
+ * Bake the build id into a page's <head>.
+ *
+ * A page's FIRST /api/version response is not proof of what it is running: a
+ * deploy can land between the page load and that call, and treating the newer
+ * id as "mine" would silently hide the update forever. With the id in the HTML
+ * every page knows exactly which build it booted with.
+ */
+function injectBuildMeta(html, build) {
+    const meta = `<meta name="${BUILD_META_NAME}" content="${build}" />`;
+    const existing = new RegExp(`<meta\\s+name=["']${BUILD_META_NAME}["'][^>]*>`, 'i');
+    if (existing.test(html)) return html.replace(existing, meta);
+    return html.replace(/<head([^>]*)>/i, `<head$1>\n        ${meta}`);
+}
+
+module.exports = { computeBuildId, getVersionInfo, injectBuildMeta, BUILD_META_NAME };

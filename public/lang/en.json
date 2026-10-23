@@ -222,5 +222,6 @@
     "chat.imageTooMany": "Up to 6 images per message",
     "update.availableDesc": "New version detected. For a better experience, please",
     "update.refreshNow": "Refresh now",
+    "update.reloadInCall": "You are in a call. Refreshing will drop it. Refresh anyway?",
     "update.dismiss": "Dismiss"
 }
