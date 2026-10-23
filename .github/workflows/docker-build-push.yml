@@ -1,5 +1,5 @@
 # ============================================================
-# Voice Channels P2P - 构建 Docker 镜像并推送到阿里云 ACR
+# Voice Channels P2P - 构建 Docker 镜像，同时推送阿里云 ACR 与 GHCR
 #
 # 上游参考：https://github.com/miroslavpejic85/mirotalk (AGPL-3.0)
 #
@@ -8,20 +8,25 @@
 #      "Run workflow" 手动触发（最常用）
 #   2) 打 tag 推送触发：git tag v1.0.1 && git push origin v1.0.1
 #
+# 两个仓库的分工：
+#   ACR  (b1at-public/voice-channels) —— 国内部署拉取，快；个人版无删除 API，
+#        超期标签只能控制台手动删，构建后由 Tag audit 步骤提示。
+#   GHCR (ghcr.io/<owner>/voice-channels) —— 归档 + 自动清理，构建后由
+#        prune-ghcr 任务保留最新 3 个版本，其余自动删除。
+#
 # 需要配置的仓库 Secrets（Settings -> Secrets and variables -> Actions）：
 #   ALIYUN_REGISTRY_USERNAME : 阿里云 ACR 用户名
 #   ALIYUN_REGISTRY_PASSWORD : 阿里云 ACR 密码
+#   GHCR 用内置 GITHUB_TOKEN，无需额外 Secret（只需 packages: write 权限）
 #
 # 可选 Variables（不配置则用下方默认值）：
 #   ALIYUN_REGISTRY  : 默认 crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com
 #   ALIYUN_NAMESPACE : 默认 b1at-public（公开命名空间，匿名可拉取）
 #   IMAGE_NAME       : 默认 voice-channels
 #
-# 标签纪律（配合 ACR 个人版无删除 API 的限制）：
+# 标签纪律：
 #   每次构建只推「版本号 + latest」两个标签，不再推短 SHA 标签（否则每次
-#   构建都多一个 tag，仓库迅速膨胀）。
-#   公开库只保留最新 3 个版本标签，超出部分需在 ACR 控制台手动删除。
-#   本地可用 scripts/acr-tags.sh 列出待清理标签（只读，不删）。
+#   构建都多一个 tag，仓库迅速膨胀）。两边都只保留最新 3 个版本。
 # ============================================================
 name: Docker Build & Push
 
@@ -41,6 +46,8 @@ env:
   REGISTRY: ${{ vars.ALIYUN_REGISTRY || 'crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com' }}
   NAMESPACE: ${{ vars.ALIYUN_NAMESPACE || 'b1at-public' }}
   IMAGE_NAME: ${{ vars.IMAGE_NAME || 'voice-channels' }}
+  # GHCR 归档库（GitHub 用户名须小写）
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/voice-channels
 
 concurrency:
   group: docker-build-${{ github.ref }}
@@ -53,6 +60,7 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,6 +74,13 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
           password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute image tags
         id: tags
@@ -103,6 +118,8 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ steps.tags.outputs.CUSTOM_TAG }}
+            ${{ env.GHCR_IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -110,10 +127,11 @@ jobs:
         run: |
           {
             echo "## 构建完成 🎉"
-            echo "- 镜像: \`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
-            echo "- 同时更新 \`latest\`"
+            echo "- ACR: \`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
+            echo "- GHCR: \`${{ env.GHCR_IMAGE }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
+            echo "- 两边同时更新 \`latest\`"
             echo ""
-            echo "服务器拉取："
+            echo "服务器拉取（ACR，国内快）："
             echo '```bash'
             echo "docker pull ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}"
             echo '```'
@@ -140,4 +158,38 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           bash scripts/acr-tags.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" ||
             echo "审计失败（不影响构建）" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  prune-ghcr:
+    name: Prune GHCR (keep newest 3)
+    # GHCR 有完整删除 API，这一边可以真正自动清理，无需人工介入。
+    needs: build-and-push
+    if: needs.build-and-push.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prune old package versions
+        # 清理失败不应让发布失败，但会以失败步骤的形式暴露在运行记录里
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+          GHCR_PACKAGE: ${{ env.IMAGE_NAME }}
+          KEEP: '3'
+        run: |
+          set -o pipefail
+          {
+            echo ""
+            echo "## GHCR 版本清理（保留最新 ${KEEP} 个）"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/ghcr-prune.py --keep "${KEEP}" --apply 2>&1 |
+            tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
