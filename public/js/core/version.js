@@ -3,7 +3,7 @@
  *
  * Every page ships with its build id baked into the HTML (`<meta name="vc-build">`)
  * and compares it with the id the server reports on GET /api/version, polled
- * every minute while the tab is visible (and immediately when it regains
+ * every 5 minutes while the tab is visible (and immediately when it regains
  * focus). On a mismatch a slim bar appears at the top of the page offering a
  * reload. The bar is in normal flow, so it never covers the page; dismissing it
  * only silences that one build, a newer one prompts again.
@@ -12,7 +12,9 @@
 import { t } from './i18n.js';
 import { el } from './utils.js';
 
-const CHECK_MS = 60_000;
+// Deploys are rare and switching back to the tab checks right away, so a slow
+// background poll is enough — 12 requests/hour/tab instead of 60.
+const CHECK_MS = 5 * 60_000;
 const BODY_CLASS = 'has-update-bar';
 const HEIGHT_VAR = '--update-bar-h';
 
