@@ -16,6 +16,12 @@
 #   ALIYUN_REGISTRY  : 默认 crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com
 #   ALIYUN_NAMESPACE : 默认 b1at-public（公开命名空间，匿名可拉取）
 #   IMAGE_NAME       : 默认 voice-channels
+#
+# 标签纪律（配合 ACR 个人版无删除 API 的限制）：
+#   每次构建只推「版本号 + latest」两个标签，不再推短 SHA 标签（否则每次
+#   构建都多一个 tag，仓库迅速膨胀）。
+#   公开库只保留最新 3 个版本标签，超出部分需在 ACR 控制台手动删除。
+#   本地可用 scripts/acr-tags.sh 列出待清理标签（只读，不删）。
 # ============================================================
 name: Docker Build & Push
 
@@ -23,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: '镜像标签（留空则打 latest + 短SHA 两个标签）'
+        description: '镜像标签（留空则只打 latest）'
         required: false
         default: ''
         type: string
@@ -71,7 +77,6 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          SHA_TAG="${GITHUB_SHA::10}"
           CUSTOM_TAG="latest"
           if [ "${REF_TYPE}" = "tag" ]; then
             CUSTOM_TAG="${REF_NAME#v}"
@@ -84,7 +89,6 @@ jobs:
             CUSTOM_TAG="${INPUT_IMAGE_TAG}"
           fi
           echo "CUSTOM_TAG=${CUSTOM_TAG}" >> "$GITHUB_OUTPUT"
-          echo "SHA_TAG=${SHA_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -98,7 +102,6 @@ jobs:
           sbom: false
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}
-            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.SHA_TAG }}
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -108,7 +111,7 @@ jobs:
           {
             echo "## 构建完成 🎉"
             echo "- 镜像: \`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
-            echo "- SHA 标签: \`${{ steps.tags.outputs.SHA_TAG }}\`"
+            echo "- 同时更新 \`latest\`"
             echo ""
             echo "服务器拉取："
             echo '```bash'
