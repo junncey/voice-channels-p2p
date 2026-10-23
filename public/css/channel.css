@@ -289,6 +289,23 @@ body {
     display: inline-flex;
 }
 
+/* connection path badge: P2P direct vs TURN relay — hidden until the
+   getStats poll resolves the selected candidate pair (seconds after join) */
+.member-sub .badge.path-badge {
+    display: none;
+    background: var(--accent-dim);
+    color: var(--accent);
+}
+
+.member-sub .badge.path-badge.on {
+    display: inline-flex;
+}
+
+.member-sub .badge.path-badge.relay {
+    background: var(--warn-dim);
+    color: var(--warn);
+}
+
 /* media outage banner — shown when automatic recovery is running/failed */
 .outage-banner {
     position: fixed;

@@ -474,6 +474,7 @@ function registerSocketHandlers() {
         if (!joined) {
             joined = true;
             startRecoveryScan();
+            startPathMonitor();
             isPresenter = !!cfg.is_presenter;
             joinLockOn = !!cfg.join_locked;
             $('#joinOverlay').classList.add('hidden');
@@ -733,6 +734,8 @@ function meshHandlers() {
             const node = $(`#memberList .member[data-id="${peerId}"]`);
             if (node) node.classList.toggle('bad', state === 'failed' || state === 'disconnected');
             notePeerState(peerId, state);
+            // first path read right after the link settles; the poll keeps it fresh
+            if (state === 'connected') checkPeerPath(peerId, PATH_FIRST_CHECK_MS);
         },
     };
 }
@@ -941,6 +944,94 @@ function updatePeerCardConnecting(peerId, on) {
     if (node) node.classList.toggle('connecting', on);
 }
 
+// ---------------------------------------------------------------------------
+// connection path monitor — per-peer badge telling P2P (hole punching
+// succeeded) apart from TURN relay. Read from the selected ICE candidate
+// pair via mesh.connPath() every few seconds: an ICE restart that flips the
+// path gets picked up too. Client-side only — in a mesh no one (not even the
+// server) sees anyone's media path but their own.
+// ---------------------------------------------------------------------------
+
+const PATH_POLL_MS = 5000;
+const PATH_FIRST_CHECK_MS = 1200; // just-connected: let the selected pair settle, then read at once
+const connPaths = new Map(); // peerId -> { type, local, remote, rtt } from mesh.connPath()
+const pathChecks = new Set(); // peers with a getStats round-trip in flight
+const pathEarlyTimers = new Map(); // peerId -> post-connect one-shot check
+let pathPollTimer = null;
+
+function startPathMonitor() {
+    if (pathPollTimer) return;
+    pathPollTimer = setInterval(() => {
+        if (!joined || !mesh) return;
+        for (const peerId of mesh.entries.keys()) checkPeerPath(peerId);
+    }, PATH_POLL_MS);
+}
+
+function stopPathMonitor() {
+    clearInterval(pathPollTimer);
+    pathPollTimer = null;
+    for (const timer of pathEarlyTimers.values()) clearTimeout(timer);
+    pathEarlyTimers.clear();
+    connPaths.clear();
+}
+
+function checkPeerPath(peerId, delay = 0) {
+    if (delay) {
+        if (pathEarlyTimers.has(peerId)) return;
+        pathEarlyTimers.set(
+            peerId,
+            setTimeout(() => {
+                pathEarlyTimers.delete(peerId);
+                checkPeerPath(peerId);
+            }, delay)
+        );
+        return;
+    }
+    if (pathChecks.has(peerId)) return;
+    if (!mesh?.entries.has(peerId)) return;
+    pathChecks.add(peerId);
+    mesh
+        .connPath(peerId)
+        .then((info) => {
+            if (!info || !mesh?.entries.has(peerId)) return; // peer left meanwhile
+            connPaths.set(peerId, info);
+            updatePeerPathBadge(peerId);
+        })
+        .catch(() => {
+            connPaths.delete(peerId);
+            updatePeerPathBadge(peerId); // don't leave a stale "P2P"/relay badge behind
+        })
+        .finally(() => pathChecks.delete(peerId));
+}
+
+function pathBadgeNode(peerId) {
+    const node = el('span', { class: 'badge path-badge' });
+    fillPathBadge(node, peerId);
+    return node;
+}
+
+function updatePeerPathBadge(peerId) {
+    const node = $(`#memberList .member[data-id="${peerId}"] .path-badge`);
+    if (node) fillPathBadge(node, peerId);
+}
+
+function fillPathBadge(node, peerId) {
+    const info = connPaths.get(peerId);
+    const known = !!info && (info.type === 'p2p' || info.type === 'relay');
+    node.classList.toggle('on', known);
+    node.classList.toggle('relay', known && info.type === 'relay');
+    node.textContent = known ? t(info.type === 'p2p' ? 'channel.pathP2p' : 'channel.pathRelay') : '';
+    if (!known) {
+        node.removeAttribute('title');
+        return;
+    }
+    // hover detail: candidate types on both ends (host/srflx/prflx/relay) + RTT
+    const parts = [t(info.type === 'p2p' ? 'channel.pathP2pTitle' : 'channel.pathRelayTitle')];
+    if (info.local && info.remote) parts.push(`${info.local} ↔ ${info.remote}`);
+    if (info.rtt !== null) parts.push(t('channel.pathRtt', { n: info.rtt }));
+    node.title = parts.join(' · ');
+}
+
 function showOutageBanner(mode) {
     $('#outageBanner').classList.remove('hidden');
     $('#outageBanner').dataset.mode = mode;
@@ -1013,6 +1104,9 @@ function ensureSelfMember() {
 function dropPeer(peerId, { silent = false } = {}) {
     cancelPeerRecovery(peerId);
     clearConnectingBadge(peerId);
+    clearTimeout(pathEarlyTimers.get(peerId));
+    pathEarlyTimers.delete(peerId);
+    connPaths.delete(peerId);
     members.delete(peerId);
     pruneAvatars();
     mesh?.removePeer(peerId);
@@ -1129,6 +1223,7 @@ function renderMembers() {
                         info.self && textOnly ? el('span', { class: 'badge', text: t('channel.textOnlyBadge') }) : null,
                         !info.self ? el('span', { class: 'badge connect-badge', text: t('channel.peerConnecting') }) : null,
                         !info.self ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') }) : null,
+                        !info.self ? pathBadgeNode(peerId) : null,
                         micIconNode(info.peer_audio_status)
                     )
                 )
@@ -2131,6 +2226,7 @@ function teardown() {
 function teardownMedia() {
     stopRecoveryScan();
     clearPeerRecovery();
+    stopPathMonitor();
     // the connecting-badge state is per-peer too — drop it with the rest
     for (const timer of connectingTimers.values()) clearTimeout(timer);
     connectingTimers.clear();
@@ -2241,6 +2337,7 @@ if (location.hash === '#debug') {
                 volume: info.volume ?? 1,
                 gain: hub?.players.get(peerId)?.gain.gain.value ?? null,
                 elVolume: audioEls.get(peerId)?.volume ?? null,
+                path: connPaths.get(peerId) ?? null,
             })),
         recovery: {
             peers: Object.fromEntries(
@@ -2302,7 +2399,8 @@ if (location.hash === '#debug') {
                 if (r.type === 'outbound-rtp' && r.kind === 'audio')
                     rows.push({ dir: 'out', bytes: r.bytesSent, packets: r.packetsSent });
             });
-            out.push({ peerId, state: entry.pc.connectionState, rows });
+            const path = await mesh.connPath(peerId).catch(() => null);
+            out.push({ peerId, state: entry.pc.connectionState, path, rows });
         }
         return out;
     };
