@@ -774,13 +774,11 @@ function notePeerState(peerId, state) {
         }
         clearConnectingBadge(peerId);
         cancelPeerRecovery(peerId);
-        // A re-connect restarts the relay-upgrade clock: judge the new attempt on
-        // its own merits instead of carrying the old timer across. Exception: the
-        // 'connected' that follows our own iceRestart must keep the budget, or
-        // every restart would reset the cap that keeps relay-only links quiet.
-        const upgrade = relayUpgrades.get(peerId);
-        if (upgrade?.restartPending) upgrade.restartPending = false;
-        else cancelRelayUpgrade(peerId);
+        // 🔴 Nothing may reset the relay-upgrade budget here: the 10s recovery
+        // scan re-reports 'connected' for every healthy peer, so a cancel in this
+        // branch kills the 12s grace timer before it can ever fire (1.1.5 shipped
+        // with exactly that bug — the upgrade never ran). A real break clears the
+        // budget through peerRecovery instead; see noteRelayUpgrade.
         return;
     }
     if (state !== 'disconnected' && state !== 'failed') return; // new/checking/connecting
@@ -1060,16 +1058,23 @@ function fillPathBadge(node, peerId) {
 // re-runs checks on BOTH ends, so the peer needs no watchdog of its own.
 // Attempts are capped: when direct is impossible (symmetric NAT, blocked UDP)
 // another restart is pointless churn that only blips the audio.
+//
+// 🔴 The budget must survive everything the app reports about a healthy link:
+// the 10s recovery scan re-emits 'connected' for every peer, and a restart makes
+// the path read 'unknown' for a moment. Cancelling the record on either signal
+// resets `since`/`attempts` from inside the attempt it is supposed to bound —
+// which is how 1.1.5 ended up never firing (grace 12s > scan 10s).
+// Only these clear it: path is p2p, peer left / link broken (peerRecovery), the
+// peer left the room, or we left.
 // ---------------------------------------------------------------------------
 
 const RELAY_UPGRADE_GRACE_MS = 12000; // relayed this long after connect → try re-punching
 const RELAY_UPGRADE_RETRY_MS = 10000; // after a restart, let fresh checks settle before judging
 const RELAY_UPGRADE_MAX_ATTEMPTS = 2;
 const RELAY_UPGRADE_TOTAL_MS = 45000; // hard window, also bounds restartIce deferrals
-// peerId -> { timer, attempts, since, done, busy, restartPending }
-//   done           = attempts exhausted, tombstone so the poll stops re-arming
-//   busy           = our re-offer is in flight, don't stack a second one
-//   restartPending = the next 'connected' belongs to that re-offer, keep the budget
+// peerId -> { timer, attempts, since, done, busy }
+//   done = attempts exhausted, tombstone so the poll stops re-arming
+//   busy = our re-offer is in flight, don't stack a second one
 const relayUpgrades = new Map();
 
 function noteRelayUpgrade(peerId, info) {
@@ -1090,7 +1095,7 @@ function noteRelayUpgrade(peerId, info) {
 
     let rec = relayUpgrades.get(peerId);
     if (!rec) {
-        rec = { timer: null, attempts: 0, since: Date.now(), done: false, busy: false, restartPending: false };
+        rec = { timer: null, attempts: 0, since: Date.now(), done: false, busy: false };
         relayUpgrades.set(peerId, rec);
     }
     if (rec.done || rec.timer || rec.busy) return; // exhausted / armed / offer in flight
@@ -1139,7 +1144,6 @@ function relayUpgradeTick(peerId) {
                 return;
             }
             rec.attempts += 1;
-            rec.restartPending = true;
             console.log('[mesh] relay upgrade: ice restart sent', peerId, `${rec.attempts}/${RELAY_UPGRADE_MAX_ATTEMPTS}`);
             scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
         },
