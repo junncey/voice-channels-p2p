@@ -28,3 +28,7 @@ app/src/channels.json
 
 # runtime chat history
 app/src/chat_history/
+
+# Python
+__pycache__/
+*.pyc
