@@ -220,6 +220,9 @@ export function initChat(
                 if (!topChip) frag.append(timeChipNode(new Date(Number(topRow.dataset.ts))));
                 // else the existing chip already separates the two blocks
             } else if (topChip) {
+                // the boundary chip may itself be the insert anchor (first
+                // child of the list) — re-point the anchor before dropping it
+                if (topChip === anchor) anchor = topChip.nextSibling;
                 topChip.remove();
             }
         }
