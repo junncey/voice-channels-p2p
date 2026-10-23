@@ -774,6 +774,13 @@ function notePeerState(peerId, state) {
         }
         clearConnectingBadge(peerId);
         cancelPeerRecovery(peerId);
+        // A re-connect restarts the relay-upgrade clock: judge the new attempt on
+        // its own merits instead of carrying the old timer across. Exception: the
+        // 'connected' that follows our own iceRestart must keep the budget, or
+        // every restart would reset the cap that keeps relay-only links quiet.
+        const upgrade = relayUpgrades.get(peerId);
+        if (upgrade?.restartPending) upgrade.restartPending = false;
+        else cancelRelayUpgrade(peerId);
         return;
     }
     if (state !== 'disconnected' && state !== 'failed') return; // new/checking/connecting
@@ -976,6 +983,7 @@ function stopPathMonitor() {
     for (const timer of pathEarlyTimers.values()) clearTimeout(timer);
     pathEarlyTimers.clear();
     connPaths.clear();
+    for (const peerId of [...relayUpgrades.keys()]) cancelRelayUpgrade(peerId);
 }
 
 function checkPeerPath(peerId, delay = 0) {
@@ -993,16 +1001,17 @@ function checkPeerPath(peerId, delay = 0) {
     if (pathChecks.has(peerId)) return;
     if (!mesh?.entries.has(peerId)) return;
     pathChecks.add(peerId);
-    mesh
-        .connPath(peerId)
+    mesh.connPath(peerId)
         .then((info) => {
             if (!info || !mesh?.entries.has(peerId)) return; // peer left meanwhile
             connPaths.set(peerId, info);
             updatePeerPathBadge(peerId);
+            noteRelayUpgrade(peerId, info);
         })
         .catch(() => {
             connPaths.delete(peerId);
             updatePeerPathBadge(peerId); // don't leave a stale "P2P"/relay badge behind
+            cancelRelayUpgrade(peerId);
         })
         .finally(() => pathChecks.delete(peerId));
 }
@@ -1038,6 +1047,121 @@ function fillPathBadge(node, peerId) {
     if (info.local && info.remote) parts.push(`${info.local} ↔ ${info.remote}`);
     if (info.rtt !== null) parts.push(t('channel.pathRtt', { n: info.rtt }));
     node.title = parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------
+// relay upgrade — ICE nominates the first working pair, which can be the TURN
+// relay when direct checks were still in flight (cold DNS, slow NAT binding,
+// coturn auth round-trip); WebRTC never re-runs checks on a connected link, so
+// a connected-but-relayed path stays relayed forever. Fed by the path poll:
+// once a link sits on relay past RELAY_UPGRADE_GRACE_MS, re-punch with an
+// iceRestart (chat DataChannel preserved). Glare arbitration mirrors the
+// recovery ladder — only the lower socket.id side initiates, and the restart
+// re-runs checks on BOTH ends, so the peer needs no watchdog of its own.
+// Attempts are capped: when direct is impossible (symmetric NAT, blocked UDP)
+// another restart is pointless churn that only blips the audio.
+// ---------------------------------------------------------------------------
+
+const RELAY_UPGRADE_GRACE_MS = 12000; // relayed this long after connect → try re-punching
+const RELAY_UPGRADE_RETRY_MS = 10000; // after a restart, let fresh checks settle before judging
+const RELAY_UPGRADE_MAX_ATTEMPTS = 2;
+const RELAY_UPGRADE_TOTAL_MS = 45000; // hard window, also bounds restartIce deferrals
+// peerId -> { timer, attempts, since, done, busy, restartPending }
+//   done           = attempts exhausted, tombstone so the poll stops re-arming
+//   busy           = our re-offer is in flight, don't stack a second one
+//   restartPending = the next 'connected' belongs to that re-offer, keep the budget
+const relayUpgrades = new Map();
+
+function noteRelayUpgrade(peerId, info) {
+    if (!info || peerRecovery.has(peerId) || !socket?.id || socket.id >= peerId) {
+        // link gone, or this side isn't the one allowed to re-punch
+        cancelRelayUpgrade(peerId);
+        return;
+    }
+    if (info.type === 'p2p') {
+        // direct — the upgrade landed (or was never needed): start clean next time
+        cancelRelayUpgrade(peerId);
+        return;
+    }
+    // 'unknown' is transitional: our own restart is re-checking, or the candidate
+    // reports aren't readable yet. Keep the budget — cancelling here would reset
+    // the attempt counter from inside the restart it is supposed to bound.
+    if (info.state !== 'connected' || info.type !== 'relay') return;
+
+    let rec = relayUpgrades.get(peerId);
+    if (!rec) {
+        rec = { timer: null, attempts: 0, since: Date.now(), done: false, busy: false, restartPending: false };
+        relayUpgrades.set(peerId, rec);
+    }
+    if (rec.done || rec.timer || rec.busy) return; // exhausted / armed / offer in flight
+    const due = Math.max(RELAY_UPGRADE_GRACE_MS - (Date.now() - rec.since), 0);
+    rec.timer = setTimeout(() => relayUpgradeTick(peerId), due);
+}
+
+function relayUpgradeTick(peerId) {
+    const rec = relayUpgrades.get(peerId);
+    if (!rec) return;
+    rec.timer = null;
+    if (rec.busy) {
+        // the previous offer hasn't settled — let it, then judge again
+        scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
+        return;
+    }
+    const info = connPaths.get(peerId);
+    if (
+        !mesh?.entries.has(peerId) ||
+        peerRecovery.has(peerId) ||
+        !info ||
+        info.state !== 'connected' ||
+        info.type !== 'relay' ||
+        !socket?.id ||
+        socket.id >= peerId
+    ) {
+        cancelRelayUpgrade(peerId);
+        return;
+    }
+    if (rec.attempts >= RELAY_UPGRADE_MAX_ATTEMPTS || Date.now() - rec.since >= RELAY_UPGRADE_TOTAL_MS) {
+        console.warn('[mesh] relay upgrade: giving up, link stays on TURN', peerId);
+        // tombstone: stay in the map so the poll doesn't re-arm a fresh cycle
+        rec.done = true;
+        return;
+    }
+    rec.busy = true;
+    // restartIce resolves false (never rejects) when the pc is mid-negotiation
+    // or closed; the catch arm only guards a future signature change.
+    mesh.restartIce(peerId).then(
+        (sent) => {
+            rec.busy = false;
+            if (!relayUpgrades.has(peerId)) return; // cancelled while the offer was in flight
+            if (!sent) {
+                // mid-negotiation (reverse offer in flight): retry soon, don't burn an attempt
+                scheduleRelayUpgradeRetry(peerId, 6000);
+                return;
+            }
+            rec.attempts += 1;
+            rec.restartPending = true;
+            console.log('[mesh] relay upgrade: ice restart sent', peerId, `${rec.attempts}/${RELAY_UPGRADE_MAX_ATTEMPTS}`);
+            scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
+        },
+        () => {
+            rec.busy = false;
+            if (relayUpgrades.has(peerId)) scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
+        }
+    );
+}
+
+function scheduleRelayUpgradeRetry(peerId, delay) {
+    const rec = relayUpgrades.get(peerId);
+    if (!rec) return;
+    clearTimeout(rec.timer);
+    rec.timer = setTimeout(() => relayUpgradeTick(peerId), delay);
+}
+
+function cancelRelayUpgrade(peerId) {
+    const rec = relayUpgrades.get(peerId);
+    if (!rec) return;
+    clearTimeout(rec.timer);
+    relayUpgrades.delete(peerId);
 }
 
 function showOutageBanner(mode) {
@@ -1111,6 +1235,7 @@ function ensureSelfMember() {
 
 function dropPeer(peerId, { silent = false } = {}) {
     cancelPeerRecovery(peerId);
+    cancelRelayUpgrade(peerId);
     clearConnectingBadge(peerId);
     clearTimeout(pathEarlyTimers.get(peerId));
     pathEarlyTimers.delete(peerId);
