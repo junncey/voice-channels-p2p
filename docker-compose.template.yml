@@ -1,8 +1,8 @@
 services:
-    mirotalk:
-        image: mirotalk/p2p:latest
-        container_name: mirotalk
-        hostname: mirotalk
+    voice-channels:
+        image: voice-channels:latest
+        container_name: voice-channels
+        hostname: voice-channels
         # Run as non-root (uid:gid). The image already defaults to the non-root
         # "node" user (1000:1000); set this to override with a different uid/gid.
         user: '1000:1000'
@@ -24,7 +24,7 @@ services:
 #     - 3000
 #   labels:
 #     - "traefik.enable=true"
-#     - "traefik.http.routers.mirotalk.rule=Host(`mirotalk.example.com`)"
-#     - "traefik.http.routers.mirotalk.entrypoints=websecure"
-#     - "traefik.http.routers.mirotalk.tls.certresolver=myresolver"
-#     - "traefik.http.services.mirotalk.loadbalancer.server.port=3000"
+#     - "traefik.http.routers.voice-channels.rule=Host(`voice-channels.example.com`)"
+#     - "traefik.http.routers.voice-channels.entrypoints=websecure"
+#     - "traefik.http.routers.voice-channels.tls.certresolver=myresolver"
+#     - "traefik.http.services.voice-channels.loadbalancer.server.port=3000"
