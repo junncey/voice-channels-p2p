@@ -1028,6 +1028,11 @@ function fillPathBadge(node, peerId) {
         node.removeAttribute('title');
         return;
     }
+    // inline latency right after the link label; null = the selected pair
+    // report didn't expose currentRoundTripTime — badge stays label-only.
+    // the lone space text node is swallowed by the flex layout (gap: 4px
+    // already separates) but keeps "P2P 45ms" as the badge's text content
+    if (info.rtt !== null) node.append(' ', el('span', { class: 'rtt', text: `${info.rtt}ms` }));
     // hover detail: candidate types on both ends (host/srflx/prflx/relay) + RTT
     const parts = [t(info.type === 'p2p' ? 'channel.pathP2pTitle' : 'channel.pathRelayTitle')];
     if (info.local && info.remote) parts.push(`${info.local} ↔ ${info.remote}`);

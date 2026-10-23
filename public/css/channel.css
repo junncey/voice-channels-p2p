@@ -306,6 +306,13 @@ body {
     color: var(--warn);
 }
 
+/* inline RTT after the P2P/relay label; tabular-nums keeps the badge width
+   steady across the 5s poll refreshes */
+.member-sub .badge.path-badge .rtt {
+    opacity: 0.72;
+    font-variant-numeric: tabular-nums;
+}
+
 /* media outage banner — shown when automatic recovery is running/failed */
 .outage-banner {
     position: fixed;
