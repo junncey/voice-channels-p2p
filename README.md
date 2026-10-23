@@ -1,8 +1,20 @@
-# 语音频道 · Voice Channels（基于 MiroTalk P2P 的语音房定制版）
+# 语音频道 · Voice Channels P2P
 
 自托管的**持久化语音频道**服务：管理员在网页后台创建频道并配置主持人，游客点开链接即可加入语音与文字聊天。语音与聊天走浏览器间 **P2P 直连**（mesh WebRTC + DataChannel），服务器只做信令与频道管理，另为文字聊天留存一份时长可配置的历史记录供新进成员查看。
 
-> 本项目基于开源项目 [MiroTalk P2P](https://github.com/miroslavpejic85/mirotalk)（AGPLv3）深度定制：移除视频/白板/文件等会议功能，重写全部前端，新增持久化频道、网页管理后台与按频道配置的主持人体系。
+> 本项目基于开源项目 [MiroTalk P2P](https://github.com/miroslavpejic85/mirotalk)（AGPL-3.0）深度定制：移除视频/白板/文件等会议功能，重写全部前端，新增持久化频道、网页管理后台与按频道配置的主持人体系。
+
+## 来源与版本
+
+| 项目 | 说明 |
+| --- | --- |
+| 本仓库 | [junncey/voice-channels-p2p](https://github.com/junncey/voice-channels-p2p) |
+| 上游仓库 | [miroslavpejic85/mirotalk](https://github.com/miroslavpejic85/mirotalk) — MiroTalk P2P，作者 Miroslav Pejic |
+| 分叉基线 | 上游 `master` @ [`0a496f8`](https://github.com/miroslavpejic85/mirotalk/commit/0a496f8313cc313f4d5443b14470adb64de811b5)（2026-09-28，`package.json` v2.0.30） |
+| 版本号 | 本仓库自 **v1.0.0** 起独立编号，与上游版本号无对应关系 |
+| 许可 | AGPL-3.0；原始版权归 Miroslav Pejic，衍生部分声明见 [NOTICE](NOTICE) |
+
+> 本仓库是 MiroTalk P2P 源码基础上的**衍生作品**（derivative work），并非上游官方分支。上游的 `mirotalk/p2p` 镜像与本项目无关，本项目镜像为 `b1at/voice-channels`。
 
 ## 功能
 
@@ -52,12 +64,12 @@ npm start                  # http://localhost:3000
 ## Docker
 
 ```bash
-docker build -t mirotalk/p2p:latest .
+docker build -t voice-channels:latest .
 docker run -d -p 3000:3000 \
   -v ./.env:/src/.env:ro \
   -v ./app/src/channels.json:/src/app/src/channels.json \
   -v ./app/src/chat_history:/src/app/src/chat_history \
-  --name mirotalk mirotalk/p2p:latest
+  --name voice-channels voice-channels:latest
 ```
 
 必须挂载 `channels.json` 与 `chat_history/`，否则容器重建后频道注册表 / 聊天记录会丢失（compose 模板见 `docker-compose.template.yml`）。
@@ -94,4 +106,8 @@ npm test        # mocha：channelStore/chatStore 单测 + validate/xss 回归
 
 ## 许可
 
-AGPL-3.0（继承自 MiroTalk P2P，作者 [Miroslav Pejic](https://github.com/miroslavpejic85)）。
+[AGPL-3.0](LICENSE)。本项目继承自 MiroTalk P2P（原始作者 [Miroslav Pejic](https://github.com/miroslavpejic85)），
+衍生部分的版权与改动声明见 [NOTICE](NOTICE)。
+
+AGPL-3.0 第 13 条要求：若通过网络对外提供服务，须向使用者提供对应源码。
+本项目的源码地址为 <https://github.com/junncey/voice-channels-p2p>。
