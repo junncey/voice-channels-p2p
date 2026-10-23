@@ -36,7 +36,7 @@ Modifications from upstream (as of v1.0.0)
     audio device settings, notification sounds, dark/light theme, and a
     build-fingerprint update notifier.
   - Replaced the upstream Docker image name (mirotalk/p2p) with
-    b1at/voice-channels.
+    b1at-public/voice-channels.
 
 License
 -------

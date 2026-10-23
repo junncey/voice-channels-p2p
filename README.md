@@ -14,7 +14,7 @@
 | 版本号 | 本仓库自 **v1.0.0** 起独立编号，与上游版本号无对应关系 |
 | 许可 | AGPL-3.0；原始版权归 Miroslav Pejic，衍生部分声明见 [NOTICE](NOTICE) |
 
-> 本仓库是 MiroTalk P2P 源码基础上的**衍生作品**（derivative work），并非上游官方分支。上游的 `mirotalk/p2p` 镜像与本项目无关，本项目镜像为 `b1at/voice-channels`。
+> 本仓库是 MiroTalk P2P 源码基础上的**衍生作品**（derivative work），并非上游官方分支。上游的 `mirotalk/p2p` 镜像与本项目无关，本项目镜像为 `b1at-public/voice-channels`（公开命名空间，匿名可拉取）。
 
 ## 功能
 

@@ -14,7 +14,7 @@
 #
 # 可选 Variables（不配置则用下方默认值）：
 #   ALIYUN_REGISTRY  : 默认 crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com
-#   ALIYUN_NAMESPACE : 默认 b1at
+#   ALIYUN_NAMESPACE : 默认 b1at-public（公开命名空间，匿名可拉取）
 #   IMAGE_NAME       : 默认 voice-channels
 # ============================================================
 name: Docker Build & Push
@@ -33,7 +33,7 @@ on:
 
 env:
   REGISTRY: ${{ vars.ALIYUN_REGISTRY || 'crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com' }}
-  NAMESPACE: ${{ vars.ALIYUN_NAMESPACE || 'b1at' }}
+  NAMESPACE: ${{ vars.ALIYUN_NAMESPACE || 'b1at-public' }}
   IMAGE_NAME: ${{ vars.IMAGE_NAME || 'voice-channels' }}
 
 concurrency:
