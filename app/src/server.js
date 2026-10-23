@@ -842,10 +842,12 @@ io.sockets.on('connect', async (socket) => {
         // Catch the newcomer up on the persisted chat history BEFORE
         // serverInfo, so it renders above the "you joined" line. Emitted on
         // every (re)join — possibly empty — so the client sees exactly one
-        // block per join and can ignore the replays after reconnects.
-        // chatStore.history() applies the message-count AND payload budgets.
-        const chatHistory = chatStore.history(channel, { persistent: !channelStore.isTemp(channel) });
-        await sendToPeer(socket.id, sockets, 'chatHistory', { messages: chatHistory });
+        // block per join and can ignore the replays after reconnects. Only
+        // the newest page rides along; the client pulls older ones via
+        // 'chatPage' when it scrolls to the top. chatStore.history() applies
+        // the page-size AND payload budgets and reports hasMore.
+        const chatPage = chatStore.history(channel, { persistent: !channelStore.isTemp(channel) });
+        await sendToPeer(socket.id, sockets, 'chatHistory', chatPage);
 
         // Send room info to the joined peer
         await sendToPeer(socket.id, sockets, 'serverInfo', {
@@ -1131,6 +1133,25 @@ io.sockets.on('connect', async (socket) => {
             return; // finish what's in flight before opening another batch
         }
         batches.set(batch, { room_id, name: peer_name, text, expected: imageCount, images: [], ts: Date.now() });
+    });
+
+    /**
+     * Scroll-up pagination for the persisted chat history: the client asks
+     * for the page strictly older than its cursor (`before` ts) and gets it
+     * back on the ack — request and response stay paired without any
+     * client-side request ids. Read-only: member-gated but not flood-gated,
+     * and the page size is server-fixed (never trusted from the client).
+     */
+    socket.on('chatPage', (cfg, ack) => {
+        if (!Validate.isValidData(cfg)) return;
+        const { room_id } = cfg;
+        if (!isPeerInRoom(room_id, socket.id)) return;
+        const before = Number.isFinite(cfg.before) && cfg.before > 0 ? cfg.before : 0;
+        const page = chatStore.history(room_id, {
+            persistent: !channelStore.isTemp(room_id),
+            before,
+        });
+        if (typeof ack === 'function') ack(page);
     });
 
     /**

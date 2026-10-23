@@ -5,7 +5,7 @@
 ## 常用命令
 
 - 启动：`npm start`（prestart 自动从 config.template.js 创建 app/src/config.js）
-- 测试：`npx mocha tests/ --exit`（当前 115 passing；改动 channelStore/chatStore/校验逻辑必须回归）
+- 测试：`npx mocha tests/ --exit`（当前 118 passing；改动 channelStore/chatStore/校验逻辑必须回归）
 - 格式化：`npm run lint`（prettier --write，提交前按需）
 - 测试实例约定：`PORT=3100 CHANNEL_ADMIN_PASSWORD=pw CHANNEL_ADMIN_JWT_SECRET=sec node app/src/server.js`
   **绝不杀 3000 端口进程——那是用户自己的实例。** 测试后删除 `app/src/channels.json` 与临时日志。
@@ -14,7 +14,7 @@
 
 - `app/src/server.js` — Express + socket.io 信令（join→addPeer→relaySDP/relayICE→removePeer mesh 协议）、REST API、`/c/:id` 路由
 - `app/src/channelStore.js` — 频道注册表（channels.json 原子写）+ 临时房间（仅内存）；ID 规则 `^[a-zA-Z0-9_-]{3,32}$`，空 ID 自动生成
-- `app/src/chatStore.js` — 聊天历史留存（`chat_history/<id>.json` 原子写，按 settings.chatRetentionHours 清理，0=不保留；临时房间仅内存、随房间销毁）。聊天实时收发仍走 DataChannel P2P，仅发送端向服务器 `chat` 事件同步一份副本存储（带图片时 1 个 head 事件 + 每图 1 个事件，服务端组装，单图上限 1.6MB 字符），join 时以 `chatHistory` 事件下发（按条数 200 + 2MB 字节预算截断）
+- `app/src/chatStore.js` — 聊天历史留存（`chat_history/<id>.json` 原子写，按 settings.chatRetentionHours 清理，0=不保留；临时房间仅内存、随房间销毁）。聊天实时收发仍走 DataChannel P2P，仅发送端向服务器 `chat` 事件同步一份副本存储（带图片时 1 个 head 事件 + 每图 1 个事件，服务端组装，单图上限 1.6MB 字符），历史分页下发：join 时 `chatHistory` 事件只带最近 `CHAT_PAGE_SIZE`(10) 条，客户端滚到顶部经 `chatPage`（socket.io ack）按 `before` ts 游标逐页回拉，每页 2MB 字节预算、页边界不切同 ts 消息组）
 - `app/src/version.js` — 前端版本信息：package.json 版本 + `public/` 内容 sha256 指纹（启动时算，memoized），经 `GET /api/version` 下发；前端 `js/core/version.js` 每 5 分钟轮询（`CHECK_MS`，切回标签页立即查），build 变了在顶部弹软提示条（`base.css .update-banner`，可关闭，同 build 折叠）
 - `app/src/config.js` — 仅 7 个存活配置块；改配置须同步 `config.template.js` 与 `.env.template`
 - `public/` — 前端全部在此：

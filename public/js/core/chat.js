@@ -23,6 +23,8 @@ const MAX_IMAGE_CHARS = 1600 * 1024;
  * @param {function(string):string} [options.avatarFor] name -> custom avatar data URL ('' = none)
  * @param {function(number, number):string} [options.imagesProgress] (got, total) -> progress label
  * @param {string}  [options.failText] note when every image of a batch failed
+ * @param {string}  [options.historyLoadingText] scroll-up pagination loading line
+ * @param {string}  [options.historyEndText] scroll-up pagination end-of-history line
  */
 export function initChat(
     container,
@@ -33,10 +35,13 @@ export function initChat(
         avatarFor = null,
         imagesProgress = (got, total) => `${got}/${total}`,
         failText = '',
+        historyLoadingText = '',
+        historyEndText = '',
     } = {}
 ) {
     let emptyNode = null;
     let lastTime = null;
+    let footerNode = null; // scroll-up pagination status line pinned to the top
     /** batchId -> { imagesEl, progressEl, textEl, expected, done } */
     const batches = new Map();
 
@@ -85,8 +90,7 @@ export function initChat(
             append(el('div', { class: 'msg system' }, el('div', { class: 'msg-system-text', text })), stick);
             return;
         }
-        const bubble = el('div', { class: 'msg-bubble' }, el('div', { class: 'msg-text', text }));
-        append(buildMessage({ name, self, bubble }), stick);
+        append(buildMessage({ name, self, bubble: textBubble(text), ts: time.getTime() }), stick);
     }
 
     /**
@@ -94,10 +98,11 @@ export function initChat(
      */
     function addImage({ name, src, self = false, alt = 'image', time = new Date() }) {
         if (!DATA_URL_RE.test(src)) return;
+        const when = new Date(time);
         const stick = nearBottom();
-        maybeTimeChip(new Date(time), stick);
+        maybeTimeChip(when, stick);
         const bubble = el('div', { class: 'msg-bubble img' }, imageNode(src, alt));
-        append(buildMessage({ name, self, bubble }), stick);
+        append(buildMessage({ name, self, bubble, ts: when.getTime() }), stick);
     }
 
     /**
@@ -116,9 +121,7 @@ export function initChat(
             if (!msg || typeof msg !== 'object') continue;
             const time = msg.time instanceof Date && !isNaN(msg.time) ? msg.time : new Date();
             const text = typeof msg.text === 'string' ? msg.text : '';
-            const images = (Array.isArray(msg.imgs) ? msg.imgs : [])
-                .filter((src) => typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src))
-                .slice(0, 9);
+            const images = validImages(msg.imgs);
             if (!text && !images.length) continue;
 
             if (images.length) {
@@ -128,13 +131,123 @@ export function initChat(
                 for (const src of images) imagesEl.append(imageNode(src, imageAlt));
                 const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
                 if (text) bubble.append(el('div', { class: 'msg-text', text }));
-                append(buildMessage({ name: msg.name, self: !!msg.self, bubble }), stick);
+                append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts: time.getTime() }), stick);
             } else {
                 add({ name: msg.name, text, self: !!msg.self, time });
             }
             shown++;
         }
         if (shown && dividerText) add({ text: dividerText, system: true });
+    }
+
+    /** Plain-text bubble. */
+    function textBubble(text) {
+        return el('div', { class: 'msg-bubble' }, el('div', { class: 'msg-text', text }));
+    }
+
+    /** Persisted image URLs, re-validated before touching the DOM. */
+    function validImages(imgs) {
+        return (Array.isArray(imgs) ? imgs : [])
+            .filter((src) => typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src))
+            .slice(0, 9);
+    }
+
+    function timeChipNode(time) {
+        return el('div', { class: 'chat-time', text: timeChipText(time) });
+    }
+
+    /**
+     * Render one OLDER page of persisted history above everything currently
+     * in the list (scroll-up pagination). Same row rules as addHistory; time
+     * chips are rebuilt for the block (its first row always carries one) and
+     * stitched to the existing top: a top chip the new rows now sit within
+     * the gap threshold of becomes redundant and is dropped, a threshold-
+     * crossing gap keeps it — or gets one when the DOM cap had removed it.
+     * The viewport stays anchored: the scroll offset grows by the inserted
+     * height, so nothing jumps. Deliberately does NOT run the DOM cap —
+     * the freshly fetched rows must not be cut away again.
+     * @param {Array<{name:string,text:string,imgs?:string[],self?:boolean,time:Date}>} messages
+     * @param {object} [options]
+     * @param {string} [options.imageAlt] alt/title for persisted images
+     */
+    function prependHistory(messages, { imageAlt = 'image' } = {}) {
+        const frag = document.createDocumentFragment();
+        let prevTs = null;
+        let shown = 0;
+        for (const msg of Array.isArray(messages) ? messages : []) {
+            if (!msg || typeof msg !== 'object') continue;
+            const time = msg.time instanceof Date && !isNaN(msg.time) ? msg.time : new Date();
+            const ts = time.getTime();
+            const text = typeof msg.text === 'string' ? msg.text : '';
+            const images = validImages(msg.imgs);
+            if (!text && !images.length) continue;
+
+            if (prevTs === null || ts - prevTs > TIME_GAP_MS) frag.append(timeChipNode(time));
+            let bubble;
+            if (images.length) {
+                const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(images.length, 6))}` });
+                for (const src of images) imagesEl.append(imageNode(src, imageAlt));
+                bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
+                if (text) bubble.append(el('div', { class: 'msg-text', text }));
+            } else {
+                bubble = textBubble(text);
+            }
+            frag.append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts }));
+            prevTs = ts;
+            shown++;
+        }
+        if (!shown) return;
+
+        // the block lands below the pagination footer (if one is up) and
+        // above everything else
+        let anchor = container.firstChild;
+        if (anchor?.classList?.contains('history-footer')) anchor = anchor.nextSibling;
+
+        // stitch the boundary to whatever is now the first row below the block
+        let topChip = null;
+        let topRow = null;
+        for (let n = anchor; n; n = n.nextSibling) {
+            if (!n.classList) continue;
+            if (!topChip && n.classList.contains('chat-time')) topChip = n;
+            else if (n.classList.contains('msg')) {
+                topRow = n;
+                break;
+            }
+        }
+        if (topRow?.dataset?.ts) {
+            const gap = Number(topRow.dataset.ts) - prevTs;
+            if (gap > TIME_GAP_MS) {
+                if (!topChip) frag.append(timeChipNode(new Date(Number(topRow.dataset.ts))));
+                // else the existing chip already separates the two blocks
+            } else if (topChip) {
+                topChip.remove();
+            }
+        }
+
+        if (emptyNode) {
+            emptyNode.remove();
+            emptyNode = null;
+        }
+        const prevTop = container.scrollTop;
+        const prevHeight = container.scrollHeight;
+        container.insertBefore(frag, anchor ?? null);
+        container.scrollTop = prevTop + (container.scrollHeight - prevHeight);
+    }
+
+    /**
+     * Pagination status line pinned to the very top of the list:
+     * 'loading' while a page is in flight, 'end' once the store ran dry,
+     * null to clear.
+     */
+    function setHistoryFooter(state) {
+        if (footerNode) {
+            footerNode.remove();
+            footerNode = null;
+        }
+        const text = state === 'loading' ? historyLoadingText : state === 'end' ? historyEndText : '';
+        if (!text) return;
+        footerNode = el('div', { class: 'msg system history-footer' }, el('div', { class: 'msg-system-text', text }));
+        container.prepend(footerNode);
     }
 
     /**
@@ -151,15 +264,16 @@ export function initChat(
      */
     function openBatch({ batch, name, text = '', count = 1, self = false, time = new Date() }) {
         if (!batch) return;
+        const when = new Date(time);
         const stick = nearBottom();
-        maybeTimeChip(new Date(time), stick);
+        maybeTimeChip(when, stick);
 
         const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(count, 6))}` });
         const progressEl = el('div', { class: 'msg-img-progress', text: imagesProgress(0, count) });
         const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
         if (text) bubble.append(el('div', { class: 'msg-text', text }));
         bubble.append(progressEl);
-        append(buildMessage({ name, self, bubble }), stick);
+        append(buildMessage({ name, self, bubble, ts: when.getTime() }), stick);
 
         batches.set(batch, { row: container.lastChild, imagesEl, progressEl, bubble, expected: count, done: 0, failed: 0 });
     }
@@ -221,9 +335,13 @@ export function initChat(
     /** One QQ-style row: avatar beside a body of [nickname] + bubble.
      *  DOM order is [avatar, body] for BOTH sides — .msg.self's
      *  flex-direction: row-reverse flips it so the avatar lands on the
-     *  right edge with the bubble to its left. */
-    function buildMessage({ name, self, bubble }) {
-        const row = el('div', { class: 'msg' + (self ? ' self' : ''), dataset: { name: name || '?' } });
+     *  right edge with the bubble to its left. `ts` tags the row so the
+     *  scroll-up pagination can stitch time chips to the existing top. */
+    function buildMessage({ name, self, bubble, ts }) {
+        const row = el('div', {
+            class: 'msg' + (self ? ' self' : ''),
+            dataset: { name: name || '?', ...(ts ? { ts: String(ts) } : {}) },
+        });
         const body = el('div', { class: 'msg-body' });
         if (!self && name) body.append(el('div', { class: 'msg-name', text: name }));
         body.append(bubble);
@@ -313,5 +431,5 @@ export function initChat(
     }
 
     showEmpty();
-    return { add, addHistory, addImage, openBatch, addBatchImage, failBatchImage, setAvatar, renamePeer };
+    return { add, addHistory, prependHistory, setHistoryFooter, addImage, openBatch, addBatchImage, failBatchImage, setAvatar, renamePeer };
 }
