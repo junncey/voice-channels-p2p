@@ -91,7 +91,7 @@ docker run -d -p 3000:3000 \
 | 部署 | 一律使用固定版本标签（如 `:1.0.0`），不用 `latest`，避免隐式升级 |
 | 查待清理 | `ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh`（只读，列出保留与待删标签） |
 
-> ACR 个人版不提供 Registry 删除接口（`DELETE` 返回 `UNAUTHORIZED … Action:"delete"`），也没有生命周期规则（`CreateArtifactLifecycleRule` 仅企业版），因此清理只能在控制台手动执行。
+> ACR 个人版在**产品层面**就封了删除：Registry 的 `DELETE` 返回 `UNAUTHORIZED … Action:"delete"`，且官方《个人版与企业版实例差异化说明》明确写「**个人版不对外提供 OpenAPI 接口**」，`DeleteRepoTag` 需要企业版实例的 `InstanceId`/`RepoId`，生命周期规则同样仅企业版可用。因此 GitHub Actions 只能推送、无法删除，清理只能在控制台手动执行。发布流水线每次会把 `scripts/acr-tags.sh` 的审计结果写进运行摘要，提示该删哪几个标签。
 
 ## 架构
 
