@@ -210,6 +210,55 @@ export class Mesh {
         }
     }
 
+    /**
+     * Inspect the live ICE path of a connection from getStats(): 'p2p' when
+     * the selected candidate pair is direct on both ends (host/srflx/prflx —
+     * hole punching succeeded), 'relay' when media flows through a TURN
+     * server (either end sits on a relay candidate).
+     * @param {string} peerId
+     * @returns {Promise<?object>} { state, type, local, remote, rtt } — null when the peer is unknown
+     */
+    async connPath(peerId) {
+        const entry = this.entries.get(peerId);
+        if (!entry) return null;
+        const pc = entry.pc;
+        const state = pc.connectionState;
+        if (state !== 'connected') {
+            return { state, type: 'unknown', local: null, remote: null, rtt: null };
+        }
+        const stats = await pc.getStats();
+        const candidates = new Map();
+        let pair = null; // explicit selected marker (standard/Firefox)…
+        let fallback = null; // …Chromium: the newest succeeded + nominated pair
+        stats.forEach((report) => {
+            if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                candidates.set(report.id, report);
+                return;
+            }
+            if (report.type !== 'candidate-pair') return;
+            if (report.selected) {
+                pair = report;
+                return;
+            }
+            if (
+                report.state === 'succeeded' &&
+                report.nominated &&
+                (!fallback || (report.lastPacketReceivedTimestamp || 0) > (fallback.lastPacketReceivedTimestamp || 0))
+            ) {
+                fallback = report;
+            }
+        });
+        if (!pair) pair = fallback;
+        if (!pair) return { state, type: 'unknown', local: null, remote: null, rtt: null };
+        const local = candidates.get(pair.localCandidateId)?.candidateType ?? null;
+        const remote = candidates.get(pair.remoteCandidateId)?.candidateType ?? null;
+        const rtt = typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null;
+        // without both candidate reports the path is unproven — never claim 'p2p'
+        if (!local || !remote) return { state, type: 'unknown', local, remote, rtt };
+        const type = local === 'relay' || remote === 'relay' ? 'relay' : 'p2p';
+        return { state, type, local, remote, rtt };
+    }
+
     removePeer(peerId) {
         const entry = this.entries.get(peerId);
         if (!entry) return;
