@@ -63,10 +63,14 @@ npm start                  # http://localhost:3000
 
 ## Docker
 
-已发布的镜像在 ACR **公开命名空间**，匿名即可拉取（无需 `docker login`）：
+镜像同时推送到两个仓库，**ACR 用于部署（国内快）、GHCR 用于归档（可自动清理）**：
 
 ```bash
+# ACR（公开命名空间，匿名可拉，部署用这个）
 docker pull crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com/b1at-public/voice-channels:1.0.0
+
+# GHCR（GitHub 归档，备份/海外用）
+docker pull ghcr.io/junncey/voice-channels:1.0.0
 ```
 
 本地自行构建：
@@ -87,11 +91,15 @@ docker run -d -p 3000:3000 \
 | 项 | 约定 |
 | --- | --- |
 | 每次发布 | 只推「版本号 + `latest`」两个标签，**不推短 SHA 标签** |
-| 版本保留 | 公开库只保留最新 **3** 个版本标签，超出部分在 ACR 控制台手动删除 |
+| 版本保留 | 两边都只保留最新 **3** 个版本标签 |
+| ACR 清理 | 个人版无删除 API，**手动**在控制台删；每次发布会把待删清单写进运行摘要 |
+| GHCR 清理 | **全自动**：`prune-ghcr` 任务在构建后调用 `scripts/ghcr-prune.py --apply` 删除超出 3 个的旧版本 |
 | 部署 | 一律使用固定版本标签（如 `:1.0.0`），不用 `latest`，避免隐式升级 |
-| 查待清理 | `ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh`（只读，列出保留与待删标签） |
+| 本地查标签 | `ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh`（只读） |
 
-> ACR 个人版在**产品层面**就封了删除：Registry 的 `DELETE` 返回 `UNAUTHORIZED … Action:"delete"`，且官方《个人版与企业版实例差异化说明》明确写「**个人版不对外提供 OpenAPI 接口**」，`DeleteRepoTag` 需要企业版实例的 `InstanceId`/`RepoId`，生命周期规则同样仅企业版可用。因此 GitHub Actions 只能推送、无法删除，清理只能在控制台手动执行。发布流水线每次会把 `scripts/acr-tags.sh` 的审计结果写进运行摘要，提示该删哪几个标签。
+> ACR 个人版在**产品层面**就封了删除：Registry 的 `DELETE` 返回 `UNAUTHORIZED … Action:"delete"`，且官方《个人版与企业版实例差异化说明》明确写「**个人版不对外提供 OpenAPI 接口**」，`DeleteRepoTag` 需要企业版实例的 `InstanceId`/`RepoId`，生命周期规则同样仅企业版可用。因此 GitHub Actions 只能推送、无法删除，清理只能在控制台手动执行；发布流水线每次会把 `scripts/acr-tags.sh` 的审计结果写进运行摘要，提示该删哪几个标签。
+>
+> GHCR 不受此限制——GitHub Packages 提供完整的删除 API，`prune-ghcr` 任务因此可以真正做自动清理。⚠️ GHCR 包**首次推送后默认是私有**，若要匿名拉取，需在包的设置页把可见性改为 public。
 
 ## 架构
 
