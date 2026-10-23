@@ -219,5 +219,8 @@
     "index.themeDark": "深色模式",
     "index.themeLight": "浅色模式",
     "channel.tempBadge": "临时房间",
-    "chat.imageTooMany": "一次最多发送 6 张图片"
+    "chat.imageTooMany": "一次最多发送 6 张图片",
+    "update.availableDesc": "检测到新版本，为了更好的体验，请",
+    "update.refreshNow": "立即刷新",
+    "update.dismiss": "关闭"
 }

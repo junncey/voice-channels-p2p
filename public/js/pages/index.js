@@ -5,6 +5,7 @@
 import { api } from '/js/core/api.js';
 import { initI18n, t } from '/js/core/i18n.js';
 import { getTheme, toggleTheme } from '/js/core/theme.js';
+import { initVersionCheck } from '/js/core/version.js';
 import { $, el } from '/js/core/utils.js';
 
 const POLL_MS = 15000;
@@ -24,6 +25,7 @@ boot();
 
 async function boot() {
     await initI18n();
+    initVersionCheck();
     bindThemeToggle();
     bindClearData();
     bindCreateTemp();

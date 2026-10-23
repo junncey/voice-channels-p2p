@@ -265,6 +265,76 @@ select {
     margin-bottom: 16px;
 }
 
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 6px;
+}
+
+/* ---------- update banner (soft prompt, non-blocking) ---------- */
+
+.update-banner {
+    position: fixed;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    max-width: min(92vw, 560px);
+    padding: 10px 12px 10px 14px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow-1);
+    font-size: 13.5px;
+    animation: toast-in 0.2s var(--ease);
+}
+
+.update-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--warn);
+}
+
+.update-text {
+    color: var(--text-1);
+}
+
+.update-link {
+    border: none;
+    background: none;
+    padding: 0;
+    margin-left: 2px;
+    cursor: pointer;
+    color: var(--accent);
+    font-size: inherit;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.update-link:hover {
+    text-decoration: underline;
+}
+
+.update-close {
+    display: inline-flex;
+    flex-shrink: 0;
+    border: none;
+    background: none;
+    padding: 3px;
+    margin-left: 4px;
+    cursor: pointer;
+    color: var(--text-2);
+    border-radius: var(--radius-s);
+}
+
+.update-close:hover {
+    color: var(--text-1);
+}
+
 /* ---------- toasts ---------- */
 
 .toasts {

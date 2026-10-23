@@ -219,5 +219,8 @@
     "index.themeDark": "Dark",
     "index.themeLight": "Light",
     "channel.tempBadge": "Temporary room",
-    "chat.imageTooMany": "Up to 6 images per message"
+    "chat.imageTooMany": "Up to 6 images per message",
+    "update.availableDesc": "New version detected. For a better experience, please",
+    "update.refreshNow": "Refresh now",
+    "update.dismiss": "Dismiss"
 }

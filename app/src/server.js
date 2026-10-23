@@ -34,6 +34,7 @@ const Validate = require('./validate');
 const Logs = require('./logs');
 const ChannelStore = require('./channelStore');
 const ChatStore = require('./chatStore');
+const Version = require('./version');
 const { applyEmbedHeaders } = require('./middleware/embedHeaders');
 
 const log = new Logs('server');
@@ -373,6 +374,13 @@ app.get('/api/channels/:channelId', (req, res) => {
         });
     }
     return res.status(404).json({ error: 'Channel not found' });
+});
+
+// Frontend version + public/ fingerprint: open pages poll this and prompt a
+// reload when the build they were loaded with is no longer current
+app.get('/api/version', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json(Version.getVersionInfo(dir.public));
 });
 
 // Host login -> JWT used as peer_token when joining the channel socket room

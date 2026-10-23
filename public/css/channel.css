@@ -1096,13 +1096,6 @@ body {
     margin: 0 0 12px;
 }
 
-.modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 6px;
-}
-
 /* ---------- responsive ---------- */
 
 @media (max-width: 860px) {

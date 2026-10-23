@@ -16,6 +16,7 @@ import { fileToImageMessage, sendImageData, createImageReceiver } from '/js/core
 import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t } from '/js/core/i18n.js';
 import { initSoundSettings, playSound } from '/js/core/sound.js';
+import { initVersionCheck } from '/js/core/version.js';
 import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
@@ -206,6 +207,7 @@ async function boot() {
     }
 
     await initI18n();
+    initVersionCheck();
     chat = initChat($('#chatMessages'), {
         emptyText: t('chat.empty'),
         downloadText: t('chat.saveImage'),

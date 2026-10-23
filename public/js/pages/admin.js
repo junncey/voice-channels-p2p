@@ -4,6 +4,7 @@
 
 import { api, getAdminToken, setAdminToken } from '/js/core/api.js';
 import { initI18n, t } from '/js/core/i18n.js';
+import { initVersionCheck } from '/js/core/version.js';
 import { $, el, formatDate } from '/js/core/utils.js';
 
 const POLL_MS = 10000;
@@ -18,6 +19,7 @@ boot();
 
 async function boot() {
     await initI18n();
+    initVersionCheck();
     bindUi();
 
     if (getAdminToken()) {
