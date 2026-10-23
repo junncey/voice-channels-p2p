@@ -100,6 +100,8 @@ let chatHistorySeen = false;
 let historyCursor = null;
 let historyHasMore = false;
 let historyLoading = false;
+// mirror of chat.js nearBottom(): fetch one page before hitting the top
+const CHAT_LOAD_THRESHOLD = 80;
 
 // ----- media self-healing (see the recovery engine section below) -----
 const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated }
@@ -405,6 +407,62 @@ function localLevelCb({ level }) {
     $('#settingsMicBar').style.width = pct;
 }
 
+// ----- scroll-up pagination for the persisted chat history -----
+// Lives at module scope (not inside registerSocketHandlers): boot() binds the
+// scroll listener before the socket handlers are wired.
+
+/** Server history rows -> renderable rows (shared by join + paging). */
+function parseHistoryRows(messages) {
+    const rows = [];
+    for (const msg of messages) {
+        if (!msg || typeof msg !== 'object') continue;
+        const name = String(msg.name || '?').slice(0, 24);
+        let text = typeof msg.text === 'string' ? msg.text : '';
+        const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // prependHistory re-validates each URL
+        // legacy rows (≤ voice.21) kept only the image count — show it as a placeholder
+        const legacyCount = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
+        if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
+        if (!text && !imgs.length) continue;
+        const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
+        rows.push({ name, text, imgs, self: name === selfName, time: ts ? new Date(ts) : new Date() });
+    }
+    return rows;
+}
+
+function bindHistoryPaging(box) {
+    box.addEventListener('scroll', maybeLoadOlder, { passive: true });
+}
+
+/** Fire a page fetch whenever the list is scrolled near its top. */
+function maybeLoadOlder() {
+    if (!socket || !historyHasMore || historyLoading) return;
+    const box = $('#chatMessages');
+    if (!box || box.scrollTop > CHAT_LOAD_THRESHOLD) return;
+    loadOlderPage();
+}
+
+function loadOlderPage() {
+    if (historyLoading || !historyHasMore) return;
+    historyLoading = true;
+    chat.setHistoryFooter('loading');
+    // ack keeps request and response paired; the timeout un-sticks the
+    // flag when the answer never comes so a later scroll can retry
+    socket.timeout(8000).emit('chatPage', { room_id: channelId, before: historyCursor ?? 0 }, (err, res) => {
+        historyLoading = false;
+        chat.setHistoryFooter(null);
+        if (err) return;
+        const messages = Array.isArray(res?.messages) ? res.messages : [];
+        historyHasMore = res?.hasMore === true;
+        if (messages.length) {
+            const first = messages[0]; // oldest of the page, again
+            if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
+            chat.prependHistory(parseHistoryRows(messages), { imageAlt: t('chat.image') });
+        }
+        if (historyHasMore) maybeLoadOlder(); // viewport may still not be full
+        else chat.setHistoryFooter('end');
+    });
+}
+
 function registerSocketHandlers() {
     socket.on('connect', emitJoin);
 
@@ -452,64 +510,6 @@ function registerSocketHandlers() {
         maybeLoadOlder(); // keep going while the viewport isn't filled yet
     });
 
-    // ----- scroll-up pagination for the persisted chat history -----
-
-    // mirror of chat.js nearBottom(): trigger one page before the top
-    const CHAT_LOAD_THRESHOLD = 80;
-
-    /** Server history rows -> renderable rows (shared by join + paging). */
-    function parseHistoryRows(messages) {
-        const rows = [];
-        for (const msg of messages) {
-            if (!msg || typeof msg !== 'object') continue;
-            const name = String(msg.name || '?').slice(0, 24);
-            let text = typeof msg.text === 'string' ? msg.text : '';
-            const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // prependHistory re-validates each URL
-            // legacy rows (≤ voice.21) kept only the image count — show it as a placeholder
-            const legacyCount = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
-            if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
-            if (!text && !imgs.length) continue;
-            const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
-            rows.push({ name, text, imgs, self: name === selfName, time: ts ? new Date(ts) : new Date() });
-        }
-        return rows;
-    }
-
-    function bindHistoryPaging(box) {
-        box.addEventListener('scroll', maybeLoadOlder, { passive: true });
-    }
-
-    /** Fire a page fetch whenever the list is scrolled near its top. */
-    function maybeLoadOlder() {
-        if (!socket || !historyHasMore || historyLoading) return;
-        const box = $('#chatMessages');
-        if (!box || box.scrollTop > CHAT_LOAD_THRESHOLD) return;
-        loadOlderPage();
-    }
-
-    function loadOlderPage() {
-        if (historyLoading || !historyHasMore) return;
-        historyLoading = true;
-        chat.setHistoryFooter('loading');
-        // ack keeps request and response paired; the timeout un-sticks the
-        // flag when the answer never comes so a later scroll can retry
-        socket
-            .timeout(8000)
-            .emit('chatPage', { room_id: channelId, before: historyCursor ?? 0 }, (err, res) => {
-                historyLoading = false;
-                chat.setHistoryFooter(null);
-                if (err) return;
-                const messages = Array.isArray(res?.messages) ? res.messages : [];
-                historyHasMore = res?.hasMore === true;
-                if (messages.length) {
-                    const first = messages[0]; // oldest of the page, again
-                    if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
-                    chat.prependHistory(parseHistoryRows(messages), { imageAlt: t('chat.image') });
-                }
-                if (historyHasMore) maybeLoadOlder(); // viewport may still not be full
-                else chat.setHistoryFooter('end');
-            });
-    }
 
     socket.on('addPeer', (cfg) => {
         mesh.addPeer(cfg.peer_id, cfg.should_create_offer, cfg.iceServers || []);
