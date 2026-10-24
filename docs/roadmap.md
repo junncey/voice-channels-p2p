@@ -28,7 +28,7 @@
 
 ### 1. Opus 编码调优 + 音乐模式 ✅ 2026-10-24 已完成
 
-**实现**：`webrtc.js` 新增 `mungeOpusFmtp`（对每个本地 offer/answer 的 `opus/48000/2` fmtp 行幂等合并参数）+ `_applySendBitrate`（`setParameters().encodings[0].maxBitrate` 免重协商生效）；`channel.js` 设置面板新增「高保真（音乐）模式」开关（强制关闭降噪/AGC/回声消除并置灰三个开关，随 `vc_audio_settings` 持久化）。语音档 64kbps + DTX，音乐档 192kbps + stereo；切档即时调码率，stereo 随下一次 SDP 轮（ICE restart/反向 offer）生效。回归测试：`tests/test-opusFmtp.js`。
+**实现**：`webrtc.js` 新增 `mungeOpusFmtp`（对每个本地 offer/answer 的 `opus/48000/2` fmtp 行幂等合并参数）+ `_applySendBitrate`（`setParameters().encodings[0].maxBitrate` 免重协商生效）；`channel.js` 设置面板新增「高保真（音乐）模式」开关（强制关闭降噪/AGC/回声消除并置灰三个开关，随 `vc_audio_settings` 持久化）。码率上限后续改为面板滑块（24–256kbps，步进 8；语音/音乐档默认 64/192，切档按档位重置，越界值钳制，手调值跨会话保留）；切档即时调码率，stereo 随下一次 SDP 轮（ICE restart/反向 offer）生效。回归测试：`tests/test-opusFmtp.js`。
 
 **现状**：`public/js/core/webrtc.js` 未设置任何 Opus 参数（无 `maxaveragebitrate`/`stereo`/`usedtx`），全部走浏览器默认（Opus 默认约 32–40kbps 单声道）。
 

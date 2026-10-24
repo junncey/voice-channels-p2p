@@ -120,6 +120,8 @@
     "settings.pushToTalkHint": "Mic stays muted until you hold V",
     "settings.musicMode": "High-fidelity (music) mode",
     "settings.musicModeHint": "Turns off the three processing toggles below and sends higher-bitrate stereo — best for sharing music",
+    "settings.bitrate": "Bitrate cap",
+    "settings.bitrateHint": "Ceiling for the Opus encoder — actual usage adapts lower; 64 kbps is plenty for speech, use 128 kbps+ for music",
     "settings.testMic": "Test microphone",
     "settings.micTestHint": "Hear yourself live (≈0.5s delay); click again to stop",
     "settings.stopMicTest": "Stop test",

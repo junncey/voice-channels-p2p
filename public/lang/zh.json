@@ -120,6 +120,8 @@
     "settings.pushToTalkHint": "开启后默认闭麦，按住 V 键说话",
     "settings.musicMode": "高保真（音乐）模式",
     "settings.musicModeHint": "自动关闭下方三个处理开关，以更高码率发送立体声，适合分享音乐",
+    "settings.bitrate": "码率上限",
+    "settings.bitrateHint": "发送编码的码率上限，Opus 按需取用、实际流量通常更低；语音 64kbps 已足够，分享音乐建议 128kbps 以上",
     "settings.testMic": "测试麦克风",
     "settings.micTestHint": "开启后实时听到自己的声音（约延迟半秒），再次点击停止",
     "settings.stopMicTest": "停止测试",

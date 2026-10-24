@@ -208,6 +208,12 @@
                             <input type="checkbox" id="musicToggle" class="switch" />
                         </label>
                         <p class="settings-hint" data-i18n="settings.musicModeHint">自动关闭下方三个处理开关，以更高码率发送立体声，适合分享音乐</p>
+                        <div class="volume-row">
+                            <label for="bitrateSlider" data-i18n="settings.bitrate">码率上限</label>
+                            <input type="range" id="bitrateSlider" min="24" max="256" step="8" />
+                            <span id="bitrateVal" class="volume-val">64 kbps</span>
+                        </div>
+                        <p class="settings-hint" data-i18n="settings.bitrateHint">发送编码的码率上限，Opus 按需取用、实际流量通常更低；语音 64kbps 已足够，分享音乐建议 128kbps 以上</p>
                         <label class="switch-row">
                             <span data-i18n="settings.noiseSuppression">噪声抑制</span>
                             <input type="checkbox" id="nsToggle" class="switch" />

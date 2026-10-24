@@ -64,19 +64,27 @@ const defaultAudioSettings = {
     autoGainControl: true,
     ptt: false,
     musicMode: false,
+    opusBitrate: 64, // encoder cap in kbps (BITRATE_MIN..BITRATE_MAX)
 };
 
 // Opus send caps stamped onto every local offer/answer and live senders:
 // voice favors bandwidth discipline (usedtx stops sending during silence),
-// music favors fidelity (stereo + a generous bitrate ceiling). null deletes
-// the key — each dict states the FULL desired state so switching modes on a
-// live connection can't leave the other mode's params behind in re-offers.
-const OPUS_VOICE_FMTP = { maxaveragebitrate: 64000, usedtx: 1, stereo: null };
-const OPUS_MUSIC_FMTP = { maxaveragebitrate: 192000, stereo: 1, usedtx: null };
+// music favors fidelity (stereo). null deletes the key — each dict states the
+// FULL desired state so switching modes on a live connection can't leave the
+// other mode's params behind in re-offers. The bitrate ceiling is the user's
+// slider (settings.opusBitrate, kbps); toggling music mode re-seeds it with
+// the mode's default (192 / 64), after which it stays hand-tunable.
+const BITRATE_MIN = 24;
+const BITRATE_MAX = 256;
 
 /** Opus caps for the mesh (passed as getOpusFmtp — read at every SDP round). */
 function opusFmtp() {
-    return settings.musicMode ? OPUS_MUSIC_FMTP : OPUS_VOICE_FMTP;
+    const raw = Math.round(Number(settings.opusBitrate));
+    const kbps = Math.min(BITRATE_MAX, Math.max(BITRATE_MIN, raw || 64));
+    const maxaveragebitrate = kbps * 1000;
+    return settings.musicMode
+        ? { maxaveragebitrate, stereo: 1, usedtx: null }
+        : { maxaveragebitrate, usedtx: 1, stereo: null };
 }
 
 let settings = loadAudioSettings();
@@ -2035,8 +2043,12 @@ function bindSettingsUi() {
 
     $('#musicToggle').addEventListener('change', (event) => {
         settings.musicMode = event.target.checked;
+        // re-seed the bitrate slider with the mode's default (hand-tuning
+        // survives across sessions, but a mode switch is an explicit preset)
+        settings.opusBitrate = settings.musicMode ? 192 : 64;
         saveAudioSettings();
         reflectMusicMode();
+        reflectBitrate();
         // re-capture under the overridden processing constraints (hot-swaps the
         // outgoing track) and push the new bitrate onto live senders at once;
         // the fmtp side (stereo) lands with the next SDP round
@@ -2056,6 +2068,15 @@ function bindSettingsUi() {
         $('#micVolumeVal').textContent = `${event.target.value}%`;
         hub?.setMicGain(settings.micVolume); // takes effect immediately, no renegotiation
         saveAudioSettings();
+    });
+
+    $('#bitrateSlider').addEventListener('input', (event) => {
+        settings.opusBitrate = Number(event.target.value);
+        $('#bitrateVal').textContent = `${event.target.value} kbps`;
+        saveAudioSettings();
+        // pushes onto live senders via setParameters, no renegotiation; the
+        // fmtp cap rides along on the next SDP round
+        mesh?.setSendBitrate();
     });
 
     $('#volumeSlider').addEventListener('input', (event) => {
@@ -2086,6 +2107,7 @@ function openSettings() {
     const micPct = Math.round(settings.micVolume * 100);
     $('#micVolumeSlider').value = String(micPct);
     $('#micVolumeVal').textContent = `${micPct}%`;
+    reflectBitrate();
     refreshDeviceSelects();
     $('#settingsModal').classList.remove('hidden');
 }
@@ -2107,6 +2129,14 @@ function reflectMusicMode() {
         $('#ecToggle').checked = settings.echoCancellation;
         $('#agcToggle').checked = settings.autoGainControl;
     }
+}
+
+/** Sync the bitrate slider/readout from settings (NOT inside
+ *  reflectMusicMode — opening the modal must not clobber a hand-tuned value). */
+function reflectBitrate() {
+    const kbps = opusFmtp().maxaveragebitrate / 1000;
+    $('#bitrateSlider').value = String(kbps);
+    $('#bitrateVal').textContent = `${kbps} kbps`;
 }
 
 function closeSettings() {
@@ -2225,7 +2255,11 @@ function resetTestMicBtn() {
 function loadAudioSettings() {
     try {
         const stored = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY) || '{}');
-        return { ...defaultAudioSettings, ...stored };
+        const merged = { ...defaultAudioSettings, ...stored };
+        // pre-slider music-mode users never stored a bitrate — keep their 192k
+        // ceiling instead of silently dropping them to the voice default
+        if (stored.opusBitrate === undefined && merged.musicMode) merged.opusBitrate = 192;
+        return merged;
     } catch {
         return { ...defaultAudioSettings };
     }
