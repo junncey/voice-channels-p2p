@@ -192,26 +192,47 @@ const views = {
 // ---------------------------------------------------------------------------
 // In-memory room state (online peers per channel)
 // ---------------------------------------------------------------------------
+// peers/presenters are keyed by the SESSION uuid (peer_uuid from join), not
+// socket.id: a page reconnecting after a network flap re-joins with the same
+// uuid and RESUMES its session — the other members never saw a removePeer, so
+// their peer connections stay alive and heal with an ICE restart instead of a
+// full renegotiation. Each entry carries the socket_id it is bound to.
 
-const channels = {}; // channelId -> { socketId: socket }
+const channels = {}; // channelId -> { socketId: socket } (live signaling sockets)
 const sockets = {}; // socketId -> socket
-const peers = {}; // channelId -> { socketId: peerInfo, 'lock', 'password', 'joinLock' }
-const presenters = {}; // channelId -> { socketId: {peer_ip, peer_name, peer_uuid, is_presenter} }
+const peers = {}; // channelId -> { sessionUuid: peerInfo(+socket_id, ghost), 'lock', 'password', 'joinLock' }
+const presenters = {}; // channelId -> { sessionUuid: {peer_ip, peer_name, is_presenter} }
 
 const roomMetaKeys = new Set(['lock', 'password', 'joinLock']);
+
+// Abnormal disconnects (VPN/accelerator switch, Wi-Fi flap, sleep) park the
+// session as a GHOST: the peers entry (and presenter role) survive a grace
+// window so the same uuid can rejoin and resume. Only when the grace expires
+// do the remaining members get the removePeer broadcast. Ping-timeout deaths
+// were already unreachable for ~pingInterval+pingTimeout, so their window is
+// shorter (the recovery ladder on the other members' side escalates into its
+// own signaling reconnect long before detection+15s).
+const GHOST_GRACE_MS = 15000;
+const GHOST_GRACE_LATE_MS = 5000;
+const ghosts = new Map(); // ghostKey(channel, uuid) -> expiry timer
+
+const ghostKey = (channel, uuid) => channel + '|' + uuid;
 
 function getPeerCount(roomId) {
     if (!peers[roomId]) return 0;
     return Object.keys(peers[roomId]).filter((k) => !roomMetaKeys.has(k)).length;
 }
 
-/** Public peer list for a room (drops the room meta keys). */
+/** Public peer list for a room, keyed by session uuid (drops the room meta
+ *  keys). Ghosts stay listed: they are still members until their grace
+ *  expires, and dropping them here would make every live client's member
+ *  reconciliation tear down the very peer connection a resume would heal. */
 function getRoomPeers(roomId) {
     const room = peers[roomId] || {};
     const list = {};
-    for (const [socketId, info] of Object.entries(room)) {
-        if (roomMetaKeys.has(socketId)) continue;
-        list[socketId] = {
+    for (const [uuid, info] of Object.entries(room)) {
+        if (roomMetaKeys.has(uuid)) continue;
+        list[uuid] = {
             peer_name: info.peer_name,
             peer_presenter: !!info.peer_presenter,
             peer_audio: !!info.peer_audio,
@@ -509,7 +530,9 @@ app.post('/api/admin/channels', requireAdmin, (req, res) => {
 app.put('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
     const result = channelStore.update(req.params.channelId, checkXSS(req.body) || {});
     if (!result.ok) {
-        return result.errors[0].includes('not found') ? res.status(404).json({ error: result.errors[0] }) : res.status(400).json({ error: result.errors.join('; ') });
+        return result.errors[0].includes('not found')
+            ? res.status(404).json({ error: result.errors[0] })
+            : res.status(400).json({ error: result.errors.join('; ') });
     }
     res.json({ channel: result.channel });
 });
@@ -575,9 +598,7 @@ app.use((err, req, res, next) => {
 // ---------------------------------------------------------------------------
 
 server.listen(port, null, () => {
-    log.info(
-        `Voice channel server started → http${host.includes('localhost') ? '' : 's'}://${host} (port ${port})`
-    );
+    log.info(`Voice channel server started → http${host.includes('localhost') ? '' : 's'}://${host} (port ${port})`);
     log.info('Server config', {
         environment: config.server.environment,
         app_version: require('../../package.json').version,
@@ -611,8 +632,15 @@ io.sockets.on('connect', async (socket) => {
      * On peer disconnected
      */
     socket.on('disconnect', async (reason) => {
+        // Intentional leaves (leave(), kickOut, admin evict, our own B1
+        // rebuild) tear the session down at once. Everything else
+        // (VPN/accelerator switch, network flap, sleep) becomes a ghost: the
+        // session entry survives its grace window so the same uuid can
+        // resume seamlessly.
+        const intentional = reason === 'client namespace disconnect' || reason === 'server namespace disconnect';
         for (const channel of Object.keys(socket.channels)) {
-            await removePeerFrom(channel, socket, reason);
+            if (intentional) await removePeerFrom(channel, socket, reason);
+            else await detachAsGhost(channel, socket, reason);
         }
         log.debug('[' + socket.id + '] disconnected', { reason });
         delete sockets[socket.id];
@@ -645,6 +673,15 @@ io.sockets.on('connect', async (socket) => {
 
         if (!Validate.isValidRoomName(channel) || !channelStore.isValidId(channel)) {
             log.warn('[' + socket.id + '] invalid channel id', { channel });
+            recordJoinFailure(socket.id);
+            return socket.emit('unauthorized');
+        }
+
+        // peer_uuid becomes the room-state key for this session (resume
+        // matching, relay targets) — a strict uuid shape keeps it from ever
+        // colliding with the room meta keys or polluting object prototypes
+        if (!Validate.isValidSessionUuid(peer_uuid)) {
+            log.warn('[' + socket.id + '] invalid peer_uuid', { channel });
             recordJoinFailure(socket.id);
             return socket.emit('unauthorized');
         }
@@ -711,59 +748,82 @@ io.sockets.on('connect', async (socket) => {
         // Persistent channel password (set in the admin console). Hosts
         // authenticate with their own credentials and always pass. A pending
         // temp room (channelDef still null) has no password yet.
-        if (!is_presenter && channelDef?.passwordHash && !channelStore.verifyChannelPassword(channel, channel_password)) {
+        if (
+            !is_presenter &&
+            channelDef?.passwordHash &&
+            !channelStore.verifyChannelPassword(channel, channel_password)
+        ) {
             log.debug('[' + socket.id + '] [Warning] channel password required/invalid', { channel });
             recordJoinFailure(socket.id);
             return socket.emit('channelPasswordRequired');
         }
 
-        // A rejoin carrying the SAME peer_uuid + peer_name is this page's live
-        // session reconnecting (each join() mints a fresh uuid): reap the
-        // dead-but-unreaped socket so capacity / join-lock can't reject the
-        // recovery rejoin. Never matches a second tab (it would have its own uuid).
+        // Session resume: a rejoin carrying the SAME peer_uuid is this page's
+        // session reconnecting (each join() mints a fresh uuid). While the
+        // previous socket's entry is still in its ghost grace window, REBIND
+        // it to the new socket and keep the session — the other members never
+        // saw a removePeer, their peer connections stay up and heal via ICE
+        // restart instead of a full renegotiation. A name change or a still
+        // LIVE old socket is not a resume: evict the old session and rebuild.
+        // (Never matches a second tab — it would have its own uuid.)
         let is_rejoin = false;
-        for (const [existingId, existing] of Object.entries(peers[channel] || {})) {
-            if (!existing.peer_uuid || existing.peer_uuid !== peer_uuid || existing.peer_name !== peer_name) continue;
-            is_rejoin = true;
-            const oldSocket = sockets[existingId];
-            if (oldSocket) {
-                await removePeerFrom(channel, oldSocket, 'reconnected');
+        let resumed = false;
+        let keepJoinedAt = Date.now();
+        const existingEntry = Object.hasOwn(peers, channel) ? peers[channel][peer_uuid] : null;
+        if (existingEntry && !roomMetaKeys.has(peer_uuid)) {
+            const nameMatches = existingEntry.peer_name === peer_name;
+            const oldSocket = sockets[existingEntry.socket_id];
+            if (existingEntry.ghost && nameMatches) {
+                is_rejoin = true;
+                resumed = true;
+                keepJoinedAt = existingEntry.joined_at;
+                clearTimeout(ghosts.get(ghostKey(channel, peer_uuid)));
+                ghosts.delete(ghostKey(channel, peer_uuid));
+                delete channels[channel]?.[existingEntry.socket_id];
+                if (oldSocket) delete oldSocket.channels[channel]; // dead socket bookkeeping
+                existingEntry.ghost = false;
+                existingEntry.socket_id = socket.id;
+                log.debug('[' + socket.id + '] session resumed in grace window', { channel });
             } else {
-                delete peers[channel][existingId];
-                delete channels[channel]?.[existingId];
-                delete presenters[channel]?.[existingId];
+                is_rejoin = nameMatches; // same session returning under a live socket: capacity/lock bypass parity
+                if (oldSocket && oldSocket.connected) {
+                    await removePeerFrom(channel, oldSocket, 'reconnected');
+                } else {
+                    clearTimeout(ghosts.get(ghostKey(channel, peer_uuid)));
+                    ghosts.delete(ghostKey(channel, peer_uuid));
+                    releaseRoomEntry(channel, peer_uuid);
+                    broadcastRemovePeer(channel, peer_uuid, existingEntry.socket_id);
+                }
+                log.debug('[' + socket.id + '] reaped stale session on rejoin', { channel, resumed: false });
             }
-            log.debug('[' + socket.id + '] reaped stale session on rejoin', { channel });
         }
 
         // Capacity hard check (hosts may always join to manage their channel)
         const maxParticipants = channelDef?.maxParticipants || 8;
         if (!is_presenter && !is_rejoin && getPeerCount(channel) >= maxParticipants) {
-            log.debug('[' + socket.id + '] channel is full', { channel, count: getPeerCount(channel), maxParticipants });
+            log.debug('[' + socket.id + '] channel is full', {
+                channel,
+                count: getPeerCount(channel),
+                maxParticipants,
+            });
             return socket.emit('roomIsBusy', { maxParticipants });
         }
 
         // Room-level locks (read before any room structure is created so a
         // rejected join never leaves an empty room behind)
-        const roomLocked = peers[channel]?.['lock'] === true && !safeEqualStrings(peers[channel]?.['password'], channel_password);
+        const roomLocked =
+            peers[channel]?.['lock'] === true && !safeEqualStrings(peers[channel]?.['password'], channel_password);
         if (roomLocked) {
             log.debug('[' + socket.id + '] [Warning] room is locked', { channel });
             recordJoinFailure(socket.id);
             return socket.emit('roomIsLocked');
         }
 
-        const isPeerPresenterNow = (id, name, uuid) =>
-            is_presenter ||
-            !!(presenters[channel] &&
-               presenters[channel][id] &&
-               presenters[channel][id].is_presenter === true &&
-               presenters[channel][id].peer_name === name &&
-               presenters[channel][id].peer_uuid === uuid);
+        const isPresenterNow = is_presenter || presenters[channel]?.[peer_uuid]?.is_presenter === true;
 
         // Room-level join lock blocks NEW joiners only — a reconnecting
-        // member (same uuid, reaped above) was already inside.
-        const joinLocked =
-            peers[channel]?.['joinLock'] === true && !is_rejoin && !isPeerPresenterNow(socket.id, peer_name, peer_uuid);
+        // member (same uuid, resumed or reaped above) was already inside.
+        const joinLocked = peers[channel]?.['joinLock'] === true && !is_rejoin && !isPresenterNow;
         if (joinLocked) {
             log.debug('[' + socket.id + '] [Warning] room is join-locked', { channel });
             return socket.emit('roomIsJoinLocked');
@@ -800,40 +860,32 @@ io.sockets.on('connect', async (socket) => {
         if (!Object.hasOwn(presenters, channel)) presenters[channel] = {};
 
         if (is_presenter) {
-            const presenter = { peer_ip, peer_name, peer_uuid, is_presenter: true };
-            // Recover presenter status only from a disconnected socket. A live
-            // presenter must never lose the role to another connection.
-            for (const [existingPeerID, existing] of Object.entries(presenters[channel])) {
-                if (
-                    existingPeerID !== socket.id &&
-                    !sockets[existingPeerID]?.connected &&
-                    existing &&
-                    existing.is_presenter === true &&
-                    existing.peer_name === peer_name &&
-                    existing.peer_uuid === peer_uuid
-                ) {
-                    delete presenters[channel][existingPeerID];
-                    log.debug('[' + socket.id + '] presenter recovered on reconnect', { peer_name });
-                    break;
-                }
-            }
-            presenters[channel][socket.id] = presenter;
+            // keyed by session uuid: the presenter role survives reconnects
+            // (the ghost grace keeps the entry) and can only ever be held by
+            // a session that presented valid host credentials at join time
+            presenters[channel][peer_uuid] = { peer_ip, peer_name, is_presenter: true };
+            log.debug('[' + socket.id + '] joining as host', {
+                channel,
+                username: peer_name,
+            });
         }
 
-        const isPresenter = isPeerPresenterNow(socket.id, peer_name, peer_uuid);
+        const isPresenter = isPresenterNow;
 
-        peers[channel][socket.id] = {
+        peers[channel][peer_uuid] = {
             peer_name: peer_name,
             peer_presenter: isPresenter,
             peer_audio: config.peer_audio === true,
             peer_audio_status: config.peer_audio === true,
-            joined_at: Date.now(),
+            joined_at: keepJoinedAt,
+            socket_id: socket.id,
+            ghost: false,
         };
 
-        await addPeerTo(channel);
+        await addPeerTo(channel, socket, peer_uuid, { rejoin: resumed });
 
         channels[channel][socket.id] = socket;
-        socket.channels[channel] = channel;
+        socket.channels[channel] = { uuid: peer_uuid, name: peer_name };
 
         log.debug('[join] channel peers', { channel, peers: getRoomPeers(channel) });
 
@@ -861,30 +913,34 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
-     * Relay ICE to peers
+     * Relay ICE to peers (peer_id = target session uuid)
      */
     socket.on('relayICE', async (config) => {
         if (!Validate.isValidData(config)) return;
         const { peer_id, ice_candidate } = config;
-        if (!isRelayAllowed(socket, peer_id)) return;
-        await sendToPeer(peer_id, sockets, 'iceCandidate', {
-            peer_id: socket.id,
+        const channel = sharedRoom(socket, peer_id);
+        const target = channel && liveSessionSocket(channel, peer_id);
+        if (!target) return;
+        await target.emit('iceCandidate', {
+            peer_id: socket.channels[channel].uuid,
             ice_candidate: ice_candidate,
         });
     });
 
     /**
-     * Relay SDP to peers
+     * Relay SDP to peers (peer_id = target session uuid)
      */
     socket.on('relaySDP', async (config) => {
         if (!Validate.isValidData(config)) return;
         const { peer_id, session_description } = config;
-        if (!isRelayAllowed(socket, peer_id)) return;
+        const channel = sharedRoom(socket, peer_id);
+        const target = channel && liveSessionSocket(channel, peer_id);
+        if (!target) return;
         log.debug('[' + socket.id + '] relay SessionDescription to [' + peer_id + ']', {
             type: session_description.type,
         });
-        await sendToPeer(peer_id, sockets, 'sessionDescription', {
-            peer_id: socket.id,
+        await target.emit('sessionDescription', {
+            peer_id: socket.channels[channel].uuid,
             session_description: session_description,
         });
     });
@@ -898,13 +954,15 @@ io.sockets.on('connect', async (socket) => {
         const config = checkXSS(cfg);
         if (!Validate.isValidData(config)) return;
 
-        const { room_id, peer_name, peer_uuid, password, action } = config;
+        const { room_id, password, action } = config;
 
         // the sender must be a joined member of the room (also blocks probes
         // against arbitrary or inherited map keys)
-        if (!isPeerInRoom(room_id, socket.id)) return;
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) return;
 
-        const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
+        const isPresenter = presenters[room_id]?.[senderUuid]?.is_presenter === true;
+        const peer_name = peers[room_id][senderUuid].peer_name;
 
         try {
             switch (action) {
@@ -947,25 +1005,20 @@ io.sockets.on('connect', async (socket) => {
 
         const { room_id, peer_name_old, peer_name_new } = config;
 
-        let peer_id_to_update = null;
-        for (const [peer_id, peer] of Object.entries(peers[room_id] || {})) {
-            if (peer_id == socket.id) {
-                peer['peer_name'] = peer_name_new;
-                if (presenters[room_id] && presenters[room_id][peer_id]) {
-                    presenters[room_id][peer_id]['peer_name'] = peer_name_new;
-                }
-                peer_id_to_update = peer_id;
-                log.debug('[' + socket.id + '] peer profile changed', { peer_name_old, peer_name_new });
-                break;
-            }
-        }
+        const senderUuid = roomSessionUuid(socket, room_id);
+        const entry = senderUuid && Object.hasOwn(peers, room_id) ? peers[room_id][senderUuid] : null;
+        if (!entry) return;
 
-        if (peer_id_to_update) {
-            await sendToRoom(room_id, socket.id, 'peerName', {
-                peer_id: peer_id_to_update,
-                peer_name: peer_name_new,
-            });
+        entry['peer_name'] = peer_name_new;
+        if (presenters[room_id] && presenters[room_id][senderUuid]) {
+            presenters[room_id][senderUuid]['peer_name'] = peer_name_new;
         }
+        log.debug('[' + socket.id + '] peer profile changed', { peer_name_old, peer_name_new });
+
+        await sendToRoom(room_id, socket.id, 'peerName', {
+            peer_id: senderUuid,
+            peer_name: peer_name_new,
+        });
     });
 
     /**
@@ -976,13 +1029,14 @@ io.sockets.on('connect', async (socket) => {
         const config = checkXSS(cfg);
         if (!Validate.isValidData(config)) return;
 
-        const { room_id, peer_id, peer_name, peer_uuid, peer_name_new } = config;
+        const { room_id, peer_id, peer_name_new } = config;
 
-        if (!isPeerInRoom(room_id, socket.id)) {
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) {
             log.debug('peerRename blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
             return;
         }
-        if (!isPeerPresenter(room_id, socket.id, peer_name, peer_uuid)) {
+        if (presenters[room_id]?.[senderUuid]?.is_presenter !== true) {
             log.debug('peerRename blocked: sender is not the presenter', { room_id, socket_id: socket.id });
             return;
         }
@@ -1015,7 +1069,8 @@ io.sockets.on('connect', async (socket) => {
         if (!Validate.isValidData(cfg)) return;
 
         const { room_id, avatar } = cfg;
-        if (!isPeerInRoom(room_id, socket.id)) return;
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) return;
 
         const valid =
             typeof avatar === 'string' &&
@@ -1023,19 +1078,19 @@ io.sockets.on('connect', async (socket) => {
             avatar.length <= 96 * 1024 &&
             /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(avatar);
         if (valid) {
-            peers[room_id][socket.id]['peer_avatar'] = avatar;
+            peers[room_id][senderUuid]['peer_avatar'] = avatar;
         } else {
-            delete peers[room_id][socket.id]['peer_avatar'];
+            delete peers[room_id][senderUuid]['peer_avatar'];
         }
 
-        const peer_name = peers[room_id][socket.id]['peer_name'];
+        const peer_name = peers[room_id][senderUuid]['peer_name'];
         log.debug('[' + socket.id + '] peer avatar ' + (valid ? 'set' : 'cleared'), { room_id });
 
         // everyone INCLUDING the sender — the sender's own DOM is already
         // up to date, the echo just keeps the room in lockstep
         for (const sock of Object.values(channels[room_id] || {})) {
             await sock.emit('peerAvatar', {
-                peer_id: socket.id,
+                peer_id: senderUuid,
                 peer_name,
                 avatar: valid ? avatar : null,
             });
@@ -1049,24 +1104,24 @@ io.sockets.on('connect', async (socket) => {
         const config = checkXSS(cfg);
         if (!Validate.isValidData(config)) return;
 
-        const { room_id, peer_name, peer_id, element, status } = config;
+        const { room_id, element, status } = config;
 
-        if (!isPeerInRoom(room_id, socket.id)) {
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) {
             log.debug('peerStatus blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
             return;
         }
 
         if (element !== 'audio') return;
 
-        const data = { peer_id, peer_name, element, status: status === true };
-        for (const [id, peer] of Object.entries(peers[room_id] || {})) {
-            if (peer['peer_name'] == peer_name && id == socket.id) {
-                peer['peer_audio_status'] = status === true;
-                break;
-            }
-        }
+        peers[room_id][senderUuid]['peer_audio_status'] = status === true;
 
-        await sendToRoom(room_id, socket.id, 'peerStatus', data);
+        await sendToRoom(room_id, socket.id, 'peerStatus', {
+            peer_id: senderUuid,
+            peer_name: peers[room_id][senderUuid]['peer_name'],
+            element,
+            status: status === true,
+        });
     });
 
     /**
@@ -1082,7 +1137,7 @@ io.sockets.on('connect', async (socket) => {
     socket.on('chat', async (cfg) => {
         if (!Validate.isValidData(cfg)) return;
         const { room_id } = cfg;
-        if (!isPeerInRoom(room_id, socket.id)) return;
+        if (!roomSessionUuid(socket, room_id)) return;
 
         if (isChatFlooded(socket.id)) {
             log.debug('[' + socket.id + '] chat dropped: flood guard', { room_id });
@@ -1118,7 +1173,11 @@ io.sockets.on('connect', async (socket) => {
         if (!peer_name) return;
 
         if (!imageCount) {
-            chatStore.append(room_id, { name: peer_name, text, imgs: [] }, { persistent: !channelStore.isTemp(room_id) });
+            chatStore.append(
+                room_id,
+                { name: peer_name, text, imgs: [] },
+                { persistent: !channelStore.isTemp(room_id) }
+            );
             return;
         }
 
@@ -1145,7 +1204,7 @@ io.sockets.on('connect', async (socket) => {
     socket.on('chatPage', (cfg, ack) => {
         if (!Validate.isValidData(cfg)) return;
         const { room_id } = cfg;
-        if (!isPeerInRoom(room_id, socket.id)) return;
+        if (!roomSessionUuid(socket, room_id)) return;
         const before = Number.isFinite(cfg.before) && cfg.before > 0 ? cfg.before : 0;
         const page = chatStore.history(room_id, {
             persistent: !channelStore.isTemp(room_id),
@@ -1155,15 +1214,17 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
-     * Relay actions to peers (presenter gated for moderation actions)
+     * Relay actions to peers (presenter gated for moderation actions).
+     * peer_id (when targeted) is the target's session uuid.
      */
     socket.on('peerAction', async (cfg) => {
         const config = checkXSS(cfg);
         if (!Validate.isValidData(config)) return;
 
-        const { room_id, peer_id, peer_uuid, peer_name, peer_action, send_to_all } = config;
+        const { room_id, peer_id, peer_action, send_to_all } = config;
 
-        if (!isPeerInRoom(room_id, socket.id)) {
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) {
             log.debug('peerAction blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
             return;
         }
@@ -1171,111 +1232,81 @@ io.sockets.on('connect', async (socket) => {
         // Only the presenter may run moderation actions
         const presenterActions = ['muteAudio', 'ejectAll'];
         if (presenterActions.includes(peer_action)) {
-            const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
-            if (!isPresenter) return;
+            if (presenters[room_id]?.[senderUuid]?.is_presenter !== true) return;
         }
 
-        const data = { peer_id, peer_name, peer_action };
+        const targetName = isPeerInRoom(room_id, peer_id) ? peers[room_id][peer_id].peer_name : config.peer_name;
+        const data = { peer_id, peer_name: targetName, peer_action };
 
         if (send_to_all) {
             await sendToRoom(room_id, socket.id, 'peerAction', data);
         } else {
             // targeted action: the target must share a room with the sender
             // (same membership gate as the SDP/ICE relay)
-            if (!isRelayAllowed(socket, peer_id)) return;
-            await sendToPeer(peer_id, sockets, 'peerAction', data);
+            const channel = sharedRoom(socket, peer_id);
+            const target = channel && liveSessionSocket(channel, peer_id);
+            if (!target) return;
+            await target.emit('peerAction', data);
         }
     });
 
     /**
-     * Kick out peer from room (presenter only)
+     * Kick out peer from room (presenter only). peer_id is the TARGET's
+     * session uuid; the caller's identity is the server-bound session, not
+     * anything the client supplies.
      */
     socket.on('kickOut', async (cfg) => {
         const config = checkXSS(cfg);
         if (!Validate.isValidData(config)) return;
 
-        // peer_id here is the TARGET to kick; the caller's identity is the
-        // server-controlled socket.id, not anything the client supplies.
-        const { room_id, peer_id, peer_uuid, peer_name, peer_kicked_reason } = config;
+        const { room_id, peer_id, peer_kicked_reason } = config;
 
-        // the sender and the kick target must both be members of the same room
-        if (!isPeerInRoom(room_id, socket.id) || !isPeerInRoom(room_id, peer_id)) return;
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid || !isPeerInRoom(room_id, peer_id)) return;
 
-        const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
-        if (isPresenter) {
-            log.debug('[' + socket.id + '] kick out peer [' + peer_id + '] from room [' + room_id + ']');
-            await sendToPeer(peer_id, sockets, 'kickOut', {
-                peer_name: peer_name,
-                peer_kicked_reason: peer_kicked_reason,
-            });
-        }
+        if (presenters[room_id]?.[senderUuid]?.is_presenter !== true) return;
+
+        const target = liveSessionSocket(room_id, peer_id);
+        if (!target) return;
+        log.debug('[' + socket.id + '] kick out peer [' + peer_id + '] from room [' + room_id + ']');
+        await target.emit('kickOut', {
+            peer_name: peers[room_id][senderUuid].peer_name,
+            peer_kicked_reason: peer_kicked_reason,
+        });
     });
 
     /**
-     * Add peers to channel (mesh: notify every existing peer + the newcomer)
+     * Add peers to channel (mesh: notify every existing peer + the newcomer).
+     * Peer ids are SESSION uuids — on a resume both sides already carry the
+     * peer connection (the client's mesh.addPeer no-ops for known ids), so
+     * this costs a sync event, not a renegotiation.
      * @param {string} channel channel id
+     * @param {object} joiner the joining socket
+     * @param {string} joinerUuid its session uuid
+     * @param {object} [opts] { rejoin } — true suppresses the client-side join announcement
      */
-    async function addPeerTo(channel) {
+    async function addPeerTo(channel, joiner, joinerUuid, { rejoin = false } = {}) {
         const roomPeers = getRoomPeers(channel);
         for (const [id, sock] of Object.entries(channels[channel] || {})) {
+            if (id === joiner.id) continue; // joiner is told about everyone below
+            const memberUuid = sock.channels?.[channel]?.uuid;
+            if (!memberUuid || memberUuid === joinerUuid) continue;
             await sock.emit('addPeer', {
-                peer_id: socket.id,
+                peer_id: joinerUuid,
                 peers: roomPeers,
                 should_create_offer: false,
+                rejoin,
                 iceServers: iceServers,
             });
-            socket.emit('addPeer', {
-                peer_id: id,
+            joiner.emit('addPeer', {
+                peer_id: memberUuid,
                 peers: roomPeers,
                 should_create_offer: true,
+                rejoin,
                 iceServers: iceServers,
             });
-            log.debug('[' + socket.id + '] emit addPeer [' + id + ']');
+            log.debug('[' + joiner.id + '] emit addPeer [' + memberUuid + ']');
         }
-    }
-
-    /**
-     * Remove peers from channel
-     * @param {string} channel channel id
-     */
-    async function removePeerFrom(channel, socket, reason = 'unknown') {
-        if (!Object.hasOwn(socket.channels, channel)) {
-            return log.debug('[' + socket.id + '] [Warning] not in ', channel);
-        }
-        try {
-            delete socket.channels[channel];
-            delete channels[channel][socket.id];
-            delete peers[channel][socket.id];
-            delete presenters[channel]?.[socket.id];
-
-            if (getPeerCount(channel) === 0) {
-                delete peers[channel];
-                delete presenters[channel];
-                delete channels[channel]; // clean up to prevent memory leaks
-                // an empty temporary room is gone for good — its (memory-only)
-                // chat history goes with it
-                if (channelStore.removeTempIfEmpty(channel, 0)) {
-                    chatStore.removeChannel(channel);
-                }
-            }
-        } catch (err) {
-            log.error('Remove Peer', toJson(err));
-        }
-
-        log.debug('[removePeerFrom]', { channel, reason, peers_left: getPeerCount(channel) });
-
-        for (const [id, sock] of Object.entries(channels[channel] || {})) {
-            await sock.emit('removePeer', { peer_id: socket.id });
-            socket.emit('removePeer', { peer_id: id });
-            log.debug('[' + socket.id + '] emit removePeer [' + id + ']');
-        }
-    }
-
-    /**
-     * Object to Json
-     */
-    function toJson(data) {
-        return JSON.stringify(data, null, 4);
     }
 
     /**
@@ -1359,10 +1390,7 @@ const CHAT_IMAGE_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/
 const CHAT_IMAGE_MAX_CHARS = 1600 * 1024;
 
 function sanitizeChatImage(url) {
-    return typeof url === 'string' &&
-        url.length > 0 &&
-        url.length <= CHAT_IMAGE_MAX_CHARS &&
-        CHAT_IMAGE_RE.test(url)
+    return typeof url === 'string' && url.length > 0 && url.length <= CHAT_IMAGE_MAX_CHARS && CHAT_IMAGE_RE.test(url)
         ? url
         : '';
 }
@@ -1402,26 +1430,142 @@ function chatBatchSweep(now = Date.now()) {
 }
 
 /**
- * Check if a socket is a joined peer of the given room.
+ * Check if a session uuid is a joined member of the given room. Ghosts count
+ * as members — they are still inside their grace window.
  */
-function isPeerInRoom(room_id, socket_id) {
-    if (!room_id || !socket_id || !Object.hasOwn(peers, room_id)) return false;
+function isPeerInRoom(room_id, peer_uuid) {
+    if (!room_id || !peer_uuid || !Object.hasOwn(peers, room_id)) return false;
     // room meta keys ('lock'/'password'/'joinLock') are never members
-    return Object.hasOwn(peers[room_id], socket_id) && !roomMetaKeys.has(socket_id);
+    return Object.hasOwn(peers[room_id], peer_uuid) && !roomMetaKeys.has(peer_uuid);
 }
 
 /**
- * Relay gate (relaySDP / relayICE): sender and target must both be members of
- * the same channel, so a socket can never push signaling at peers it never
- * joined with.
+ * The sender's session uuid in a room, when the sender has actually joined
+ * it (server-side state — clients cannot claim another session's identity).
  */
-function isRelayAllowed(socket, peer_id) {
-    if (!peer_id || typeof peer_id !== 'string') return false;
+function roomSessionUuid(socket, roomId) {
+    const uuid = socket.channels?.[roomId]?.uuid;
+    return uuid && isPeerInRoom(roomId, uuid) ? uuid : null;
+}
+
+/**
+ * First room shared by the sender and the target session uuid (relay gate:
+ * a socket can only signal peers it joined with). Null when unrelated.
+ */
+function sharedRoom(socket, peerUuid) {
+    if (!peerUuid || typeof peerUuid !== 'string') return null;
     for (const channel of Object.keys(socket.channels || {})) {
-        // Object.hasOwn keeps inherited keys ('constructor' etc.) out of the lookup
-        if (Object.hasOwn(channels, channel) && Object.hasOwn(channels[channel], peer_id)) return true;
+        if (isPeerInRoom(channel, peerUuid)) return channel;
     }
-    return false;
+    return null;
+}
+
+/** Live socket of a session uuid in a room — null for ghosts / dead sockets. */
+function liveSessionSocket(channel, peerUuid) {
+    if (!isPeerInRoom(channel, peerUuid)) return null;
+    const sock = sockets[peers[channel][peerUuid].socket_id];
+    return sock && sock.connected ? sock : null;
+}
+
+/**
+ * Park an abnormally-disconnected session as a ghost: the peers entry (and
+ * presenter role) survive the grace window while the dead socket leaves the
+ * delivery maps. Members keep their peer connections — a resume inside the
+ * window heals them with an ICE restart instead of a full renegotiation.
+ */
+function detachAsGhost(channel, socket, reason) {
+    const session = socket.channels[channel];
+    const entry = session && isPeerInRoom(channel, session.uuid) ? peers[channel][session.uuid] : null;
+    if (!entry) {
+        // join never completed for this channel — plain removal
+        return removePeerFrom(channel, socket, reason);
+    }
+    entry.ghost = true;
+    delete channels[channel]?.[socket.id];
+    const delay = reason === 'ping timeout' ? GHOST_GRACE_LATE_MS : GHOST_GRACE_MS;
+    const key = ghostKey(channel, session.uuid);
+    clearTimeout(ghosts.get(key));
+    ghosts.set(
+        key,
+        setTimeout(() => expireGhost(channel, session.uuid), delay)
+    );
+    log.debug('[' + socket.id + '] session ghosted', { channel, reason, resume_window_ms: delay });
+}
+
+/** Grace expired with no resume — the session is really gone. */
+function expireGhost(channel, uuid) {
+    ghosts.delete(ghostKey(channel, uuid));
+    const entry = Object.hasOwn(peers, channel) ? peers[channel][uuid] : null;
+    if (!entry || !entry.ghost) return;
+    const socketId = entry.socket_id;
+    const name = entry.peer_name;
+    releaseRoomEntry(channel, uuid);
+    broadcastRemovePeer(channel, uuid, socketId);
+    log.debug('[ghost] grace expired, session removed', { channel, uuid, name });
+}
+
+/**
+ * Drop a session's room registration (peers/presenters) and clean up an
+ * emptied room. No signaling — callers decide whether to broadcast.
+ */
+function releaseRoomEntry(channel, uuid) {
+    if (!Object.hasOwn(peers, channel)) return;
+    try {
+        delete peers[channel][uuid];
+        delete presenters[channel]?.[uuid];
+
+        if (getPeerCount(channel) === 0) {
+            delete peers[channel];
+            delete presenters[channel];
+            delete channels[channel]; // clean up to prevent memory leaks
+            // an empty temporary room is gone for good — its (memory-only)
+            // chat history goes with it
+            if (channelStore.removeTempIfEmpty(channel, 0)) {
+                chatStore.removeChannel(channel);
+            }
+        }
+    } catch (err) {
+        log.error('Release room entry', toJson(err));
+    }
+}
+
+/** Broadcast removePeer for a session to everyone left in the room. */
+function broadcastRemovePeer(channel, uuid, socketId) {
+    for (const [id, sock] of Object.entries(channels[channel] || {})) {
+        sock.emit('removePeer', { peer_id: uuid });
+        log.debug('emit removePeer [' + uuid + '] -> [' + id + ']');
+    }
+    if (socketId && Object.hasOwn(sockets, socketId)) {
+        sockets[socketId].emit('removePeer', { peer_id: uuid });
+    }
+}
+
+/**
+ * Remove a socket's session from a channel: release the room entry and
+ * broadcast removePeer to the room.
+ * @param {string} channel channel id
+ * @param {object} socket the (possibly already dead) member socket
+ * @param {string} reason disconnect reason (logging only)
+ */
+function removePeerFrom(channel, socket, reason = 'unknown') {
+    const session = socket.channels[channel];
+    if (!session) {
+        return log.debug('[' + socket.id + '] [Warning] not in ', channel);
+    }
+    delete socket.channels[channel];
+    delete channels[channel]?.[socket.id];
+    clearTimeout(ghosts.get(ghostKey(channel, session.uuid)));
+    ghosts.delete(ghostKey(channel, session.uuid));
+    releaseRoomEntry(channel, session.uuid);
+    broadcastRemovePeer(channel, session.uuid, socket.id);
+    log.debug('[removePeerFrom]', { channel, reason, uuid: session.uuid, peers_left: getPeerCount(channel) });
+}
+
+/**
+ * Object to Json
+ */
+function toJson(data) {
+    return JSON.stringify(data, null, 4);
 }
 
 /**
@@ -1435,26 +1579,6 @@ function safeEqualStrings(a, b) {
         return false;
     }
     return crypto.timingSafeEqual(bufA, bufB);
-}
-
-/**
- * Check if peer is Presenter (server-controlled socket.id + stored identity).
- */
-function isPeerPresenter(room_id, peer_id, peer_name, peer_uuid) {
-    try {
-        const roomPresentersMap = presenters[room_id];
-        const stored = roomPresentersMap && roomPresentersMap[peer_id];
-        if (!stored) return false;
-        return (
-            typeof stored === 'object' &&
-            stored.is_presenter === true &&
-            stored.peer_name === peer_name &&
-            stored.peer_uuid === peer_uuid
-        );
-    } catch (err) {
-        log.error('isPeerPresenter', err);
-        return false;
-    }
 }
 
 /**

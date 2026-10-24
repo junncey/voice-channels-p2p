@@ -12,7 +12,7 @@
 
 ## 目录与架构边界
 
-- `app/src/server.js` — Express + socket.io 信令（join→addPeer→relaySDP/relayICE→removePeer mesh 协议）、REST API、`/c/:id` 路由
+- `app/src/server.js` — Express + socket.io 信令（join→addPeer→relaySDP/relayICE→removePeer mesh 协议）、REST API、`/c/:id` 路由。**房间成员身份 = 会话 `peer_uuid`（join 时严格校验 uuid 形状，防碰撞 lock/password 等元键）**：异常断线（VPN/加速器切换、网络抖动）先挂起为幽灵会话（15s 宽限，ping-timeout 检出者 5s），期间不广播 removePeer；同 uuid 重连即原地 resume（addPeer 带 `rejoin:true`，双方复用既有 PC，靠 ICE-restart 恢复阶梯治愈，不重协商），宽限过期才真正移除。主动断开（leave/kick/evict/客户端 B1）仍立即广播。
 - `app/src/channelStore.js` — 频道注册表（channels.json 原子写）+ 临时房间（仅内存）；ID 规则 `^[a-zA-Z0-9_-]{3,32}$`，空 ID 自动生成
 - `app/src/chatStore.js` — 聊天历史留存（`chat_history/<id>.json` 原子写，按 settings.chatRetentionHours 清理，0=不保留；临时房间仅内存、随房间销毁）。聊天实时收发仍走 DataChannel P2P，仅发送端向服务器 `chat` 事件同步一份副本存储（带图片时 1 个 head 事件 + 每图 1 个事件，服务端组装，单图上限 1.6MB 字符），历史分页下发：join 时 `chatHistory` 事件只带最近 `CHAT_PAGE_SIZE`(10) 条，客户端滚到顶部经 `chatPage`（socket.io ack）按 `before` ts 游标逐页回拉，每页 2MB 字节预算、页边界不切同 ts 消息组）
 - `app/src/version.js` — 前端版本信息：package.json 版本 + `public/` 内容 sha256 指纹（启动时算，memoized），经 `GET /api/version` 下发；前端 `js/core/version.js` 每 5 分钟轮询（`CHECK_MS`，切回标签页立即查），build 变了在顶部弹软提示条（`base.css .update-banner`，可关闭，同 build 折叠）
