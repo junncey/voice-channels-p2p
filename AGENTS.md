@@ -5,7 +5,7 @@
 ## 常用命令
 
 - 启动：`npm start`（prestart 自动从 config.template.js 创建 app/src/config.js）
-- 测试：`npx mocha tests/ --exit`（当前 118 passing；改动 channelStore/chatStore/校验逻辑必须回归）
+- 测试：`npx mocha tests/ --exit`（当前 123 passing；改动 channelStore/chatStore/校验逻辑必须回归）
 - 格式化：`npm run lint`（prettier --write，提交前按需）
 - 测试实例约定：`PORT=3100 CHANNEL_ADMIN_PASSWORD=pw CHANNEL_ADMIN_JWT_SECRET=sec node app/src/server.js`
   **绝不杀 3000 端口进程——那是用户自己的实例。** 测试后删除 `app/src/channels.json` 与临时日志。

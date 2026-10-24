@@ -63,7 +63,21 @@ const defaultAudioSettings = {
     echoCancellation: true,
     autoGainControl: true,
     ptt: false,
+    musicMode: false,
 };
+
+// Opus send caps stamped onto every local offer/answer and live senders:
+// voice favors bandwidth discipline (usedtx stops sending during silence),
+// music favors fidelity (stereo + a generous bitrate ceiling). null deletes
+// the key — each dict states the FULL desired state so switching modes on a
+// live connection can't leave the other mode's params behind in re-offers.
+const OPUS_VOICE_FMTP = { maxaveragebitrate: 64000, usedtx: 1, stereo: null };
+const OPUS_MUSIC_FMTP = { maxaveragebitrate: 192000, stereo: 1, usedtx: null };
+
+/** Opus caps for the mesh (passed as getOpusFmtp — read at every SDP round). */
+function opusFmtp() {
+    return settings.musicMode ? OPUS_MUSIC_FMTP : OPUS_VOICE_FMTP;
+}
 
 let settings = loadAudioSettings();
 let channelMeta = null;
@@ -118,6 +132,53 @@ let selfReconnecting = false; // suppress the "disconnected" toast on our own B1
 // couple of seconds — hold the "disconnected" toast until it sticks
 const DISCONNECT_TOAST_MS = 3000;
 let disconnectToastTimer = null;
+
+// ----- screen wake lock (mobile: a locked screen kills the voice session) -----
+
+let wakeLock = null; // active Sentinel; null = not held / unsupported
+let wakeLockBusy = false; // a request() round-trip in flight
+
+function wakeLockWanted() {
+    // request() rejects while hidden — the visibilitychange handler re-arms
+    return joined && !textOnly && document.visibilityState === 'visible';
+}
+
+async function syncWakeLock() {
+    if (!('wakeLock' in navigator)) return; // unsupported: degrade silently
+    if (!wakeLockWanted()) {
+        releaseWakeLock();
+        return;
+    }
+    if (wakeLock || wakeLockBusy) return;
+    wakeLockBusy = true;
+    try {
+        const sentinel = await navigator.wakeLock.request('screen');
+        if (wakeLockWanted()) {
+            wakeLock = sentinel;
+            // system revoked it (screen off, battery saver): drop the handle so
+            // the visibilitychange handler can request a fresh one
+            sentinel.addEventListener('release', () => {
+                if (wakeLock === sentinel) wakeLock = null;
+            });
+        } else {
+            sentinel.release().catch(() => {});
+        }
+    } catch {
+        /* denied — the session just loses the keep-awake nicety */
+    } finally {
+        wakeLockBusy = false;
+    }
+}
+
+function releaseWakeLock() {
+    const sentinel = wakeLock;
+    wakeLock = null;
+    try {
+        sentinel?.release?.().catch?.(() => {});
+    } catch {
+        /* already released */
+    }
+}
 
 // ----- host login persistence -----
 // The host token lives in localStorage so the login survives browser restarts
@@ -361,6 +422,9 @@ function bindUi() {
         intentionalUnload = true;
         location.reload();
     });
+    // back from the background: the screen lock auto-released the sentinel —
+    // re-request it while the voice session is still live
+    document.addEventListener('visibilitychange', syncWakeLock);
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +452,7 @@ async function join({ textOnly: asTextOnly }) {
 
     if (!textOnly) {
         try {
-            rawMicStream = await navigator.mediaDevices.getUserMedia({ audio: buildAudioConstraints() });
+            rawMicStream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
         } catch {
             textOnly = true;
             toast(t('channel.errors.micDenied'), 'warn');
@@ -429,7 +493,7 @@ async function join({ textOnly: asTextOnly }) {
         randomizationFactor: 0.3,
         timeout: 8000,
     });
-    mesh = new Mesh({ signaling: socket, handlers: meshHandlers() });
+    mesh = new Mesh({ signaling: socket, handlers: meshHandlers(), getOpusFmtp: opusFmtp });
     if (localStream) mesh.setLocalStream(localStream);
 
     registerSocketHandlers();
@@ -520,6 +584,7 @@ function registerSocketHandlers() {
             joined = true;
             startRecoveryScan();
             startPathMonitor();
+            syncWakeLock();
             isPresenter = !!cfg.is_presenter;
             joinLockOn = !!cfg.join_locked;
             $('#joinOverlay').classList.add('hidden');
@@ -1055,6 +1120,7 @@ function stopPathMonitor() {
     for (const timer of pathEarlyTimers.values()) clearTimeout(timer);
     pathEarlyTimers.clear();
     connPaths.clear();
+    lossStreaks.clear();
     for (const peerId of [...relayUpgrades.keys()]) cancelRelayUpgrade(peerId);
 }
 
@@ -1077,6 +1143,7 @@ function checkPeerPath(peerId, delay = 0) {
         .then((info) => {
             if (!info || !mesh?.entries.has(peerId)) return; // peer left meanwhile
             connPaths.set(peerId, info);
+            notePeerLoss(peerId, info);
             updatePeerPathBadge(peerId);
             noteRelayUpgrade(peerId, info);
         })
@@ -1113,12 +1180,79 @@ function fillPathBadge(node, peerId) {
     // report didn't expose currentRoundTripTime — badge stays label-only.
     // the lone space text node is swallowed by the flex layout (gap: 4px
     // already separates) but keeps "P2P 45ms" as the badge's text content
+    const quality = lossStreaks.get(peerId);
     if (info.rtt !== null) node.append(' ', el('span', { class: 'rtt', text: `${info.rtt}ms` }));
+    // current loss marker: noticeable at a glance without hovering
+    if (quality && quality.loss !== null && quality.loss >= 5)
+        node.append(' ', el('span', { class: 'loss', text: t('channel.pathLoss', { n: Math.round(quality.loss) }) }));
     // hover detail: candidate types on both ends (host/srflx/prflx/relay) + RTT
+    // + inbound quality (loss / jitter / bitrate, diffed between polls)
     const parts = [t(info.type === 'p2p' ? 'channel.pathP2pTitle' : 'channel.pathRelayTitle')];
     if (info.local && info.remote) parts.push(`${info.local} ↔ ${info.remote}`);
     if (info.rtt !== null) parts.push(t('channel.pathRtt', { n: info.rtt }));
+    if (quality) {
+        if (quality.loss !== null) parts.push(t('channel.pathLoss', { n: quality.loss }));
+        if (quality.jitter !== null) parts.push(t('channel.pathJitter', { n: quality.jitter }));
+        if (quality.kbps !== null) parts.push(t('channel.pathBitrate', { n: quality.kbps }));
+    }
     node.title = parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------
+// inbound link quality — cumulative RTP counters say nothing about a RATE, so
+// every path poll diffs packetsLost/packetsReceived since the previous one.
+// Sustained high loss flips an "unstable" badge on the member card (with
+// hysteresis so a single bad poll doesn't flicker it); the per-poll values
+// feed the path-badge hover detail. Only an ALIVE link is judged — a broken
+// one already shows the recovery badge.
+// ---------------------------------------------------------------------------
+
+const LOSS_BAD_PCT = 10; // a poll at/above this counts as bad
+const LOSS_OK_PCT = 5; // at/below this counts as good (in between: neither)
+const UNSTABLE_BAD_POLLS = 3; // ~15s at the 5s poll cadence → badge on
+const UNSTABLE_GOOD_POLLS = 2; // clean polls before the badge clears
+// peerId -> { last, loss, jitter, kbps, bad, good, unstable }
+const lossStreaks = new Map();
+
+function notePeerLoss(peerId, info) {
+    const rec =
+        lossStreaks.get(peerId) || { last: null, loss: null, jitter: null, kbps: null, bad: 0, good: 0, unstable: false };
+    const inbound = info?.inbound;
+    if (inbound) {
+        const prev = rec.last;
+        rec.jitter = inbound.jitter !== null ? Math.round(inbound.jitter * 1000) : null;
+        if (prev && inbound.timestamp > prev.timestamp) {
+            const dLost = inbound.packetsLost - prev.packetsLost;
+            const dRecv = inbound.packetsReceived - prev.packetsReceived;
+            const dSec = (inbound.timestamp - prev.timestamp) / 1000;
+            // negative deltas = counter reset (SSRC switch): skip the rate, rebase
+            if (dLost >= 0 && dRecv >= 0) {
+                const total = dLost + dRecv;
+                const loss = total > 0 ? (dLost / total) * 100 : 0;
+                rec.loss = Math.round(loss * 10) / 10;
+                rec.kbps =
+                    dSec > 0 ? Math.round(((inbound.bytesReceived - prev.bytesReceived) * 8) / dSec / 1000) : null;
+                if (loss >= LOSS_BAD_PCT) {
+                    rec.bad += 1;
+                    rec.good = 0;
+                } else if (loss <= LOSS_OK_PCT) {
+                    rec.good += 1;
+                    rec.bad = 0;
+                }
+            }
+        }
+        rec.last = inbound;
+    }
+    const was = rec.unstable;
+    if (!rec.unstable && rec.bad >= UNSTABLE_BAD_POLLS) rec.unstable = true;
+    else if (rec.unstable && rec.good >= UNSTABLE_GOOD_POLLS) rec.unstable = false;
+    lossStreaks.set(peerId, rec);
+    if (was !== rec.unstable) updatePeerUnstable(peerId);
+}
+
+function updatePeerUnstable(peerId) {
+    const node = $(`#memberList .member[data-id="${peerId}"]`);
+    if (node) node.classList.toggle('unstable', !!lossStreaks.get(peerId)?.unstable);
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,6 +1467,7 @@ function dropPeer(peerId, { silent = false } = {}) {
     clearTimeout(pathEarlyTimers.get(peerId));
     pathEarlyTimers.delete(peerId);
     connPaths.delete(peerId);
+    lossStreaks.delete(peerId);
     members.delete(peerId);
     pruneAvatars();
     mesh?.removePeer(peerId);
@@ -1428,7 +1563,8 @@ function renderMembers() {
                     'member' +
                     (info.self ? ' self-member' : '') +
                     (peerRecovery.has(peerId) ? ' lost' : '') +
-                    (stuckConnecting.has(peerId) ? ' connecting' : ''),
+                    (stuckConnecting.has(peerId) ? ' connecting' : '') +
+                    (lossStreaks.get(peerId)?.unstable ? ' unstable' : ''),
                 dataset: { id: peerId },
             });
             node.append(
@@ -1452,6 +1588,9 @@ function renderMembers() {
                             : null,
                         !info.self
                             ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') })
+                            : null,
+                        !info.self
+                            ? el('span', { class: 'badge unstable-badge', text: t('channel.peerUnstable') })
                             : null,
                         !info.self ? pathBadgeNode(peerId) : null,
                         micIconNode(info.peer_audio_status)
@@ -1665,9 +1804,10 @@ function bindPttKeys() {
 
 function buildAudioConstraints() {
     const audio = {
-        echoCancellation: settings.echoCancellation,
-        noiseSuppression: settings.noiseSuppression,
-        autoGainControl: settings.autoGainControl,
+        // music mode overrides the processing toggles — browsers mangle music
+        echoCancellation: settings.musicMode ? false : settings.echoCancellation,
+        noiseSuppression: settings.musicMode ? false : settings.noiseSuppression,
+        autoGainControl: settings.musicMode ? false : settings.autoGainControl,
     };
     if (settings.micDeviceId) audio.deviceId = { exact: settings.micDeviceId };
     return { audio };
@@ -1711,6 +1851,7 @@ async function reacquireMic() {
     // a device/processing change keeps the current mute state; enabling voice turns the mic on
     micOn = hadStream ? micOn : true;
     textOnly = false;
+    syncWakeLock(); // voice enabled from text-only: hold the screen awake now
     track.enabled = onAir();
     if (hub) await hub.ensureContext().catch(() => {});
 
@@ -1892,6 +2033,17 @@ function bindSettingsUi() {
         });
     }
 
+    $('#musicToggle').addEventListener('change', (event) => {
+        settings.musicMode = event.target.checked;
+        saveAudioSettings();
+        reflectMusicMode();
+        // re-capture under the overridden processing constraints (hot-swaps the
+        // outgoing track) and push the new bitrate onto live senders at once;
+        // the fmtp side (stereo) lands with the next SDP round
+        if (localStream) reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
+        mesh?.setSendBitrate();
+    });
+
     $('#pttToggle').addEventListener('change', (event) => {
         settings.ptt = event.target.checked;
         pttActive = false;
@@ -1924,9 +2076,7 @@ function bindSettingsUi() {
 
 function openSettings() {
     updateAvatarPreview();
-    $('#nsToggle').checked = settings.noiseSuppression;
-    $('#ecToggle').checked = settings.echoCancellation;
-    $('#agcToggle').checked = settings.autoGainControl;
+    reflectMusicMode();
     $('#pttToggle').checked = settings.ptt;
     spkDropdown.setDisabled(!sinkSupported);
     $('#sinkUnsupported').classList.toggle('hidden', sinkSupported);
@@ -1938,6 +2088,25 @@ function openSettings() {
     $('#micVolumeVal').textContent = `${micPct}%`;
     refreshDeviceSelects();
     $('#settingsModal').classList.remove('hidden');
+}
+
+/** Music mode owns the three processing toggles — grays them out and reflects
+ *  the forced-off capture state (the stored preferences survive underneath). */
+function reflectMusicMode() {
+    const on = settings.musicMode;
+    $('#musicToggle').checked = on;
+    $('#nsToggle').disabled = on;
+    $('#ecToggle').disabled = on;
+    $('#agcToggle').disabled = on;
+    if (on) {
+        $('#nsToggle').checked = false;
+        $('#ecToggle').checked = false;
+        $('#agcToggle').checked = false;
+    } else {
+        $('#nsToggle').checked = settings.noiseSuppression;
+        $('#ecToggle').checked = settings.echoCancellation;
+        $('#agcToggle').checked = settings.autoGainControl;
+    }
 }
 
 function closeSettings() {
@@ -2471,6 +2640,7 @@ function teardownMedia() {
     stopRecoveryScan();
     clearPeerRecovery();
     stopPathMonitor();
+    releaseWakeLock();
     // the connecting-badge state is per-peer too — drop it with the rest
     for (const timer of connectingTimers.values()) clearTimeout(timer);
     connectingTimers.clear();
@@ -2591,6 +2761,7 @@ if (location.hash === '#debug') {
                 gain: hub?.players.get(peerId)?.gain.gain.value ?? null,
                 elVolume: audioEls.get(peerId)?.volume ?? null,
                 path: connPaths.get(peerId) ?? null,
+                loss: lossStreaks.get(peerId) ?? null,
             })),
         recovery: {
             peers: Object.fromEntries(

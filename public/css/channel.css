@@ -313,6 +313,23 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
+/* current inbound loss right after the RTT — visible without hovering */
+.member-sub .badge.path-badge .loss {
+    color: var(--warn);
+    font-variant-numeric: tabular-nums;
+}
+
+/* unstable badge: sustained high packet loss on an otherwise alive link */
+.member-sub .badge.unstable-badge {
+    display: none;
+    background: var(--warn-dim);
+    color: var(--warn);
+}
+
+.member.unstable .unstable-badge {
+    display: inline-flex;
+}
+
 /* media outage banner — shown when automatic recovery is running/failed */
 .outage-banner {
     position: fixed;
@@ -912,6 +929,13 @@ body.has-update-bar .outage-banner {
 .switch:checked::after {
     transform: translateX(18px);
     background: #08281b;
+}
+
+/* disabled by music mode — the mode owns the underlying capture constraint */
+.switch:disabled,
+.switch-row:has(.switch:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .settings-hint {

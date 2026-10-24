@@ -18,15 +18,56 @@
 
 const CHAT_DC_LABEL = 'mirotalk_chat_channel';
 
+/**
+ * Merge Opus fmtp parameters into every opus/48000/2 fmtp line of an SDP.
+ * Idempotent (same-key values are replaced, not duplicated) — safe to run on
+ * each re-offer of the ICE-restart ladder. A param explicitly set to null is
+ * REMOVED, so a mode dict can state its full desired state and a mid-call
+ * mode switch cannot leave the other mode's params in later re-offers.
+ * Only OUR local descriptions are munged: send-side caps
+ * (maxaveragebitrate/usedtx) configure the local encoder, and stereo travels
+ * end-to-end once both peers munge their own offer/answer (Chrome reads its
+ * local fmtp for encoder config).
+ * Exported for tests (tests/test-opusFmtp.js).
+ * @param {string} sdp
+ * @param {object} params e.g. { maxaveragebitrate: 64000, usedtx: 1, stereo: null }
+ */
+export function mungeOpusFmtp(sdp, params) {
+    const payloadTypes = new Set();
+    for (const match of sdp.matchAll(/a=rtpmap:(\d+) opus\/48000\/2(?=\s|$)/g)) payloadTypes.add(match[1]);
+    if (!payloadTypes.size) return sdp;
+    return sdp.replace(/a=fmtp:(\d+) ([^\r\n]*)/g, (line, pt, existing) => {
+        if (!payloadTypes.has(pt)) return line;
+        const merged = {};
+        for (const pair of existing.split(';')) {
+            const eq = pair.indexOf('=');
+            if (eq === -1) {
+                if (pair.trim()) merged[pair.trim()] = '';
+            } else merged[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+        }
+        for (const [key, value] of Object.entries(params)) {
+            if (value === null) delete merged[key];
+            else merged[key] = value;
+        }
+        const text = Object.entries(merged)
+            .map(([key, value]) => (value === '' ? key : `${key}=${value}`))
+            .join(';');
+        return text ? `a=fmtp:${pt} ${text}` : `a=fmtp:${pt}`;
+    });
+}
+
 export class Mesh {
     /**
      * @param {object}   options
      * @param {object}   options.signaling     socket.io client (needs .emit)
      * @param {object}   options.handlers      { onRemoteStream, onChat, onPeerState }
+     * @param {function} [options.getOpusFmtp] () => Opus fmtp params for OUR local
+     *                                            offer/answer (null = leave defaults)
      */
-    constructor({ signaling, handlers = {} }) {
+    constructor({ signaling, handlers = {}, getOpusFmtp = null }) {
         this.signaling = signaling;
         this.handlers = handlers;
+        this.getOpusFmtp = getOpusFmtp;
         this.localStream = null;
         /** peerId -> { pc, dc, pendingIce, queue, tracksAdded, offering } */
         this.entries = new Map();
@@ -97,6 +138,7 @@ export class Mesh {
             entry.offering = true;
             try {
                 const offer = await pc.createOffer();
+                this._mungeLocalSdp(offer);
                 await pc.setLocalDescription(offer);
                 this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
             } catch (err) {
@@ -161,6 +203,7 @@ export class Mesh {
         }
         if (session_description.type === 'offer') {
             const answer = await pc.createAnswer();
+            this._mungeLocalSdp(answer);
             await pc.setLocalDescription(answer);
             this.signaling.emit('relaySDP', { peer_id, session_description: pc.localDescription });
         }
@@ -184,6 +227,7 @@ export class Mesh {
         entry.offering = true;
         try {
             const offer = await pc.createOffer({ iceRestart: true });
+            this._mungeLocalSdp(offer);
             await pc.setLocalDescription(offer);
             this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
             console.log('[mesh] ice restart offer sent', peerId);
@@ -214,9 +258,11 @@ export class Mesh {
      * Inspect the live ICE path of a connection from getStats(): 'p2p' when
      * the selected candidate pair is direct on both ends (host/srflx/prflx —
      * hole punching succeeded), 'relay' when media flows through a TURN
-     * server (either end sits on a relay candidate).
+     * server (either end sits on a relay candidate). The inbound audio RTP
+     * report rides along (cumulative counters — the caller diffs between
+     * polls for loss % and bitrate).
      * @param {string} peerId
-     * @returns {Promise<?object>} { state, type, local, remote, rtt } — null when the peer is unknown
+     * @returns {Promise<?object>} { state, type, local, remote, rtt, inbound } — null when the peer is unknown
      */
     async connPath(peerId) {
         const entry = this.entries.get(peerId);
@@ -224,15 +270,26 @@ export class Mesh {
         const pc = entry.pc;
         const state = pc.connectionState;
         if (state !== 'connected') {
-            return { state, type: 'unknown', local: null, remote: null, rtt: null };
+            return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: null };
         }
         const stats = await pc.getStats();
         const candidates = new Map();
         let pair = null; // explicit selected marker (standard/Firefox)…
         let fallback = null; // …Chromium: the newest succeeded + nominated pair
+        let inbound = null; // inbound audio RTP (one audio track per connection)
         stats.forEach((report) => {
             if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
                 candidates.set(report.id, report);
+                return;
+            }
+            if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                inbound = {
+                    packetsLost: report.packetsLost ?? 0,
+                    packetsReceived: report.packetsReceived ?? 0,
+                    jitter: typeof report.jitter === 'number' ? report.jitter : null,
+                    bytesReceived: report.bytesReceived ?? 0,
+                    timestamp: report.timestamp ?? Date.now(),
+                };
                 return;
             }
             if (report.type !== 'candidate-pair') return;
@@ -248,15 +305,16 @@ export class Mesh {
                 fallback = report;
             }
         });
+        const inboundOut = inbound ?? null;
         if (!pair) pair = fallback;
-        if (!pair) return { state, type: 'unknown', local: null, remote: null, rtt: null };
+        if (!pair) return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: inboundOut };
         const local = candidates.get(pair.localCandidateId)?.candidateType ?? null;
         const remote = candidates.get(pair.remoteCandidateId)?.candidateType ?? null;
         const rtt = typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null;
         // without both candidate reports the path is unproven — never claim 'p2p'
-        if (!local || !remote) return { state, type: 'unknown', local, remote, rtt };
+        if (!local || !remote) return { state, type: 'unknown', local, remote, rtt, inbound: inboundOut };
         const type = local === 'relay' || remote === 'relay' ? 'relay' : 'p2p';
-        return { state, type, local, remote, rtt };
+        return { state, type, local, remote, rtt, inbound: inboundOut };
     }
 
     removePeer(peerId) {
@@ -296,6 +354,41 @@ export class Mesh {
         for (const track of this.localStream.getTracks()) {
             entry.pc.addTrack(track, this.localStream);
         }
+        this._applySendBitrate(entry);
+    }
+
+    /** Stamp the configured Opus fmtp caps onto a description we are about to
+     *  set as LOCAL (offer or answer) — see mungeOpusFmtp for the semantics. */
+    _mungeLocalSdp(desc) {
+        const fmtp = this.getOpusFmtp?.();
+        if (fmtp && desc?.sdp) desc.sdp = mungeOpusFmtp(desc.sdp, fmtp);
+    }
+
+    /**
+     * Push maxaveragebitrate onto a connection's audio sender via
+     * setParameters — takes effect WITHOUT a renegotiation (music-mode toggle
+     * mid-call); the SDP fmtp cap covers new senders at negotiation time.
+     */
+    _applySendBitrate(entry) {
+        const maxBitrate = this.getOpusFmtp?.()?.maxaveragebitrate;
+        if (!maxBitrate) return;
+        const sender = entry.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+        if (!sender) return;
+        try {
+            const params = sender.getParameters();
+            if (!params.encodings?.length) params.encodings = [{}];
+            params.encodings[0].maxBitrate = maxBitrate;
+            sender.setParameters(params).catch(() => {
+                /* browser refuses audio setParameters — the fmtp cap still applies */
+            });
+        } catch {
+            /* get/setParameters unsupported for audio — nothing to do */
+        }
+    }
+
+    /** Re-apply the configured send bitrate on every live connection. */
+    setSendBitrate() {
+        for (const entry of this.entries.values()) this._applySendBitrate(entry);
     }
 
     _attachChat(peerId, entry, dc) {
