@@ -114,6 +114,10 @@ let b1InFlight = false;
 let b1Timer = null;
 let b1ResetTimer = null;
 let selfReconnecting = false; // suppress the "disconnected" toast on our own B1 reconnect
+// transport-level drops (VPN switch, network flap) usually reconnect within a
+// couple of seconds — hold the "disconnected" toast until it sticks
+const DISCONNECT_TOAST_MS = 3000;
+let disconnectToastTimer = null;
 
 // ----- host login persistence -----
 // The host token lives in localStorage so the login survives browser restarts
@@ -412,7 +416,19 @@ async function join({ textOnly: asTextOnly }) {
     if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);
     applySpeaker(); // route Web Audio playback to the chosen output from the start
 
-    socket = io({ transports: ['websocket'] });
+    // Faster reconnect cadence than the socket.io defaults (1000..5000ms with
+    // 0.5 jitter): a VPN/accelerator switch kills the websocket for a few
+    // seconds and the default backoff can sit idle for up to 5s after the
+    // network is already back. Sub-second first retry, 2s cap, and a bounded
+    // per-attempt handshake timeout so a half-open tunnel can't stall one
+    // retry for the engine's 20s default.
+    socket = io({
+        transports: ['websocket'],
+        reconnectionDelay: 400,
+        reconnectionDelayMax: 2000,
+        randomizationFactor: 0.3,
+        timeout: 8000,
+    });
     mesh = new Mesh({ signaling: socket, handlers: meshHandlers() });
     if (localStream) mesh.setLocalStream(localStream);
 
@@ -481,13 +497,19 @@ function loadOlderPage() {
             if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
             chat.prependHistory(parseHistoryRows(messages), { imageAlt: t('chat.image') });
         }
-        if (historyHasMore) maybeLoadOlder(); // viewport may still not be full
+        if (historyHasMore)
+            maybeLoadOlder(); // viewport may still not be full
         else chat.setHistoryFooter('end');
     });
 }
 
 function registerSocketHandlers() {
-    socket.on('connect', emitJoin);
+    socket.on('connect', () => {
+        // back within the flap window — the "disconnected" toast never fired
+        clearTimeout(disconnectToastTimer);
+        disconnectToastTimer = null;
+        emitJoin();
+    });
 
     socket.on('serverInfo', (cfg) => {
         // a successful (re)join resolves any pending self-reconnect
@@ -534,17 +556,26 @@ function registerSocketHandlers() {
         maybeLoadOlder(); // keep going while the viewport isn't filled yet
     });
 
-
     socket.on('addPeer', (cfg) => {
+        const known = mesh.entries.has(cfg.peer_id);
         mesh.addPeer(cfg.peer_id, cfg.should_create_offer, cfg.iceServers || []);
         syncMembers(cfg.peers || {});
         // should_create_offer=false means: WE are the old member and someone
         // else just joined — announce them (the joiner gets one event per
-        // existing member and must not re-announce everyone).
-        if (joined && cfg.should_create_offer === false) {
+        // existing member and must not re-announce everyone). rejoin=true is
+        // a resumed session coming back from a network flap: its card never
+        // left, no announcement, no sound.
+        if (joined && cfg.should_create_offer === false && !cfg.rejoin) {
             const name = members.get(cfg.peer_id)?.peer_name || '';
             if (name) chat.add({ text: t('chat.joined', { name }), system: true });
             playSound('peerJoin');
+        }
+        // resumed session with an existing (possibly broken) link: the mesh
+        // entry was reused so NO offer went out — put the recovery ladder on
+        // it now instead of waiting for the next 10s scan
+        if (known && cfg.should_create_offer === true) {
+            const state = mesh.entries.get(cfg.peer_id)?.pc.connectionState;
+            if (state && state !== 'connected' && state !== 'closed') notePeerState(cfg.peer_id, state);
         }
         updateOnlineCount();
     });
@@ -595,7 +626,7 @@ function registerSocketHandlers() {
         } else if (member) {
             member.peer_name = peer_name;
         }
-        if (peer_id === socket.id) {
+        if (peer_id === selfUuid) {
             // the host renamed ME — accept it and persist for the next visit
             selfName = peer_name;
             localStorage.setItem(NICK_KEY, peer_name);
@@ -630,7 +661,7 @@ function registerSocketHandlers() {
     });
 
     socket.on('peerAction', ({ peer_id, peer_action }) => {
-        if (peer_id === socket.id && peer_action === 'muteAudio') {
+        if (peer_id === selfUuid && peer_action === 'muteAudio') {
             setMic(false);
             toast(t('channel.mutedByHost'), 'warn');
         }
@@ -661,8 +692,8 @@ function registerSocketHandlers() {
         showJoinError(
             cfg?.reason === 'rate-limit'
                 ? t('channel.errors.tempRateLimit')
-                : t('channel.errors.tempIpLimit', { n: cfg?.max || 0 }),
-        ),
+                : t('channel.errors.tempIpLimit', { n: cfg?.max || 0 })
+        )
     );
     socket.on('channelLimitReached', (cfg) => showJoinError(t('channel.errors.channelLimit', { n: cfg?.max || 0 })));
     socket.on('channelPasswordRequired', () => {
@@ -683,7 +714,8 @@ function registerSocketHandlers() {
         hostToken = '';
         $('#hostReadyHint').classList.add('hidden');
         toast(t('channel.hostTokenExpired'), 'warn');
-        if (joined) emitJoin(); // reconnect of an established session: rejoin without the token
+        if (joined)
+            emitJoin(); // reconnect of an established session: rejoin without the token
         else {
             socket.disconnect();
             join({ textOnly: false });
@@ -692,18 +724,20 @@ function registerSocketHandlers() {
 
     socket.on('disconnect', (reason) => {
         if (!joined) return;
-        // full reset: socket.io reconnects with a NEW socket id, the server
-        // treats us as a fresh join and re-sends addPeer for everyone —
-        // attemptSignalingReconnect() counts on this even for the disconnect
-        // IT triggers, so the reset must run before the intentional-exit skip
-        mesh?.clear();
-        for (const peerId of [...members.keys()]) {
-            if (peerId !== socket.id) dropPeer(peerId, { silent: true });
-        }
-        // a disconnect WE asked for (leave(), the unload handlers, our own B1
-        // reconnect) is not an outage — skip the alarm, keep the reset above
+        // The mesh and member list SURVIVE the disconnect: the server parks
+        // our session as a ghost, this socket re-joins with the same
+        // peer_uuid and the existing peer connections resume — they heal via
+        // the ICE-restart recovery ladder instead of a full renegotiation.
+        // Intentional exits (leave, kick, our own B1 rebuild, join errors)
+        // tear the state down themselves before disconnecting.
         if (reason === 'io client disconnect' || selfReconnecting) return;
-        toast(t('channel.errors.disconnected'), 'warn');
+        // brief transport flaps (VPN/accelerator switch) usually reconnect
+        // within a couple of seconds — don't cry "disconnected" until it sticks
+        clearTimeout(disconnectToastTimer);
+        disconnectToastTimer = setTimeout(() => {
+            disconnectToastTimer = null;
+            if (!socket?.connected && joined) toast(t('channel.errors.disconnected'), 'warn');
+        }, DISCONNECT_TOAST_MS);
     });
 }
 
@@ -772,11 +806,15 @@ function meshHandlers() {
 // per peer (a mesh can be half-broken):
 //   disconnected → 5s grace (ICE often self-heals; acting sooner breaks it)
 //   failed       → act at once
-//   → up to 3 ICE-restart rounds (3/6/12s backoff, lower socket.id initiates
+//   → up to 3 ICE-restart rounds (3/6/12s backoff, lower session id initiates
 //     so both sides never re-offer at once) → signaling reconnect (rebuilds
 //     every link) → after 2 silent reconnects: visible "reload" prompt.
 // A 10s scan re-checks every connectionState in case a webview swallows the
 // connectionstatechange event.
+// The same ladder heals links after a SIGNALING drop (VPN/accelerator switch):
+// the server parks the session as a ghost, this side keeps its peer
+// connections, the resume addPeer reuses them, and ICE restarts re-punch the
+// new network path — no renegotiation, the DataChannel survives.
 // ---------------------------------------------------------------------------
 
 const RECOVERY_GRACE_MS = 5000;
@@ -852,8 +890,8 @@ function recoveryTick(peerId) {
         if (rec.attempts < RECOVERY_ROUND_DELAYS.length) {
             rec.attempts += 1;
             // glare arbitration: with both sides broken, only the lower
-            // socket.id re-offers; the other just answers
-            if (socket?.id && socket.id < peerId) {
+            // session id re-offers; the other just answers
+            if (selfUuid < peerId) {
                 mesh.restartIce(peerId).catch(() => {});
             } else {
                 console.log('[mesh] recovery: waiting for peer re-offer', peerId);
@@ -879,6 +917,16 @@ function escalatePeerRecovery(peerId) {
     attemptSignalingReconnect();
 }
 
+/** Drop every remote peer + mesh entry locally (before intentional
+ *  disconnects: the B1 full rebuild and join-error resets — the transport
+ *  'disconnect' handler deliberately KEEPS state so a resume can heal it). */
+function resetLocalMesh() {
+    mesh?.clear();
+    for (const peerId of [...members.keys()]) {
+        if (peerId !== selfUuid) dropPeer(peerId, { silent: true });
+    }
+}
+
 /** Last-resort fallback: rebuild the whole session over fresh signaling. */
 function attemptSignalingReconnect({ manual = false } = {}) {
     if (!socket || !joined) return;
@@ -891,8 +939,11 @@ function attemptSignalingReconnect({ manual = false } = {}) {
     b1InFlight = true;
     selfReconnecting = true;
     console.warn('[mesh] recovery: signaling reconnect', { manual, attempt: b1Attempts });
-    // the 'disconnect' handler resets the mesh and members; 'connect' rejoins
-    // and the server re-adds every peer with fresh ICE
+    // B1 is a FULL rebuild: drop the mesh BEFORE disconnecting (the server
+    // treats the intentional disconnect as a real leave, everyone tears their
+    // links down) — then re-join as a fresh session and let the addPeer storm
+    // rebuild every link with fresh ICE
+    resetLocalMesh();
     socket.disconnect();
     socket.connect();
     clearTimeout(b1Timer);
@@ -1077,7 +1128,7 @@ function fillPathBadge(node, peerId) {
 // a connected-but-relayed path stays relayed forever. Fed by the path poll:
 // once a link sits on relay past RELAY_UPGRADE_GRACE_MS, re-punch with an
 // iceRestart (chat DataChannel preserved). Glare arbitration mirrors the
-// recovery ladder — only the lower socket.id side initiates, and the restart
+// recovery ladder — only the lower session-id side initiates, and the restart
 // re-runs checks on BOTH ends, so the peer needs no watchdog of its own.
 // Attempts are capped: when direct is impossible (symmetric NAT, blocked UDP)
 // another restart is pointless churn that only blips the audio.
@@ -1101,7 +1152,7 @@ const RELAY_UPGRADE_TOTAL_MS = 45000; // hard window, also bounds restartIce def
 const relayUpgrades = new Map();
 
 function noteRelayUpgrade(peerId, info) {
-    if (!info || peerRecovery.has(peerId) || !socket?.id || socket.id >= peerId) {
+    if (!info || peerRecovery.has(peerId) || !selfUuid || selfUuid >= peerId) {
         // link gone, or this side isn't the one allowed to re-punch
         cancelRelayUpgrade(peerId);
         return;
@@ -1136,7 +1187,7 @@ function relayUpgradeTick(peerId) {
         return;
     }
     // Peer gone, broken link, or not our turn to initiate: nothing left to judge.
-    if (!mesh?.entries.has(peerId) || peerRecovery.has(peerId) || !socket?.id || socket.id >= peerId) {
+    if (!mesh?.entries.has(peerId) || peerRecovery.has(peerId) || !selfUuid || selfUuid >= peerId) {
         cancelRelayUpgrade(peerId);
         return;
     }
@@ -1176,7 +1227,11 @@ function relayUpgradeTick(peerId) {
                 return;
             }
             rec.attempts += 1;
-            console.log('[mesh] relay upgrade: ice restart sent', peerId, `${rec.attempts}/${RELAY_UPGRADE_MAX_ATTEMPTS}`);
+            console.log(
+                '[mesh] relay upgrade: ice restart sent',
+                peerId,
+                `${rec.attempts}/${RELAY_UPGRADE_MAX_ATTEMPTS}`
+            );
             scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
         },
         () => {
@@ -1217,7 +1272,9 @@ function hideOutageBanner() {
 // ---------------------------------------------------------------------------
 
 function syncMembers(peersMap) {
-    const selfId = socket.id;
+    // peer ids are SESSION uuids (stable across our own reconnects) — our own
+    // id is selfUuid, never the ephemeral socket.id
+    const selfId = selfUuid;
     for (const [peerId, info] of Object.entries(peersMap)) {
         if (roomMetaKey(peerId)) continue;
         if (peerId === selfId) continue;
@@ -1240,7 +1297,7 @@ function syncMembers(peersMap) {
             joined_at: info.joined_at || existing?.joined_at || Date.now(),
             avatar,
             // remembered per-user volume; an in-session adjustment wins over the stored one
-            volume: existing?.volume ?? (name !== '?' ? peerVolumes[name] ?? 1 : 1),
+            volume: existing?.volume ?? (name !== '?' ? (peerVolumes[name] ?? 1) : 1),
         });
         if (!existing) armConnectingBadge(peerId);
     }
@@ -1258,7 +1315,7 @@ function roomMetaKey(key) {
 }
 
 function ensureSelfMember() {
-    members.set(socket.id, {
+    members.set(selfUuid, {
         peer_name: selfName,
         peer_presenter: isPresenter,
         peer_audio_status: onAir(),
@@ -1390,8 +1447,12 @@ function renderMembers() {
                         { class: 'member-sub' },
                         info.peer_presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
                         info.self && textOnly ? el('span', { class: 'badge', text: t('channel.textOnlyBadge') }) : null,
-                        !info.self ? el('span', { class: 'badge connect-badge', text: t('channel.peerConnecting') }) : null,
-                        !info.self ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') }) : null,
+                        !info.self
+                            ? el('span', { class: 'badge connect-badge', text: t('channel.peerConnecting') })
+                            : null,
+                        !info.self
+                            ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') })
+                            : null,
                         !info.self ? pathBadgeNode(peerId) : null,
                         micIconNode(info.peer_audio_status)
                     )
@@ -1523,7 +1584,11 @@ function updateHeaderActions() {
     const lockBtn = $('#lockBtn');
     lockBtn.classList.toggle('hidden', !isPresenter);
     if (isPresenter) {
-        setIconBtn(lockBtn, joinLockOn ? LOCK_SVG : UNLOCK_SVG, joinLockOn ? t('channel.unlockBtn') : t('channel.lockBtn'));
+        setIconBtn(
+            lockBtn,
+            joinLockOn ? LOCK_SVG : UNLOCK_SVG,
+            joinLockOn ? t('channel.unlockBtn') : t('channel.lockBtn')
+        );
     }
 }
 
@@ -1563,15 +1628,15 @@ function applyMicState() {
         socket.emit('peerStatus', {
             room_id: channelId,
             peer_name: selfName,
-            peer_id: socket.id,
+            peer_id: selfUuid,
             element: 'audio',
             status: live,
         });
     }
-    const self = members.get(socket?.id);
+    const self = members.get(selfUuid);
     if (self) self.peer_audio_status = live;
     updateVoiceControls();
-    updateMicIconNode(socket?.id, live); // in-place: full re-renders kill a mid-drag volume slider
+    updateMicIconNode(selfUuid, live); // in-place: full re-renders kill a mid-drag volume slider
 }
 
 function bindPttKeys() {
@@ -1579,7 +1644,14 @@ function bindPttKeys() {
         if (event.code !== PTT_KEY_CODE || event.repeat) return;
         if (!settings.ptt || !joined || !localStream || !micOn) return;
         const target = event.target;
-        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+        if (
+            target &&
+            (target.tagName === 'INPUT' ||
+                target.tagName === 'TEXTAREA' ||
+                target.tagName === 'SELECT' ||
+                target.isContentEditable)
+        )
+            return;
         event.preventDefault();
         pttActive = true;
         applyMicState();
@@ -1880,7 +1952,10 @@ function deviceItems(kind) {
     const generic = t(kind === 'mic' ? 'settings.deviceMic' : 'settings.deviceSpk');
     const items = [{ value: '', label: t('settings.defaultDevice') }];
     list.forEach((device, index) => {
-        items.push({ value: device.deviceId, label: ((device.label || '').trim() || `${generic} ${index + 1}`).slice(0, 60) });
+        items.push({
+            value: device.deviceId,
+            label: ((device.label || '').trim() || `${generic} ${index + 1}`).slice(0, 60),
+        });
     });
     return items;
 }
@@ -2155,7 +2230,10 @@ async function onChatSubmit(event) {
     const batch = crypto.randomUUID();
     mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length });
     chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true });
-    emitChatForHistory(text, payloads.map((payload) => payload.dataUrl));
+    emitChatForHistory(
+        text,
+        payloads.map((payload) => payload.dataUrl)
+    );
     for (const payload of payloads) {
         sendImageData({
             send: (frame) => mesh.sendChat(frame),
@@ -2173,9 +2251,7 @@ async function onChatSubmit(event) {
 // ---------------------------------------------------------------------------
 
 function safeAvatarUrl(value) {
-    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && AVATAR_DATA_URL_RE.test(value)
-        ? value
-        : '';
+    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && AVATAR_DATA_URL_RE.test(value) ? value : '';
 }
 
 function bindAvatarUi() {
@@ -2204,7 +2280,7 @@ function applySelfAvatar(dataUrl) {
     if (selfAvatar) avatars.set(selfName, selfAvatar);
     else avatars.delete(selfName);
     chat.setAvatar(selfName, selfAvatar);
-    const me = members.get(socket.id);
+    const me = members.get(selfUuid);
     if (me) {
         me.avatar = selfAvatar || undefined;
         renderMembers();
@@ -2241,17 +2317,7 @@ async function processAvatarFile(file) {
         canvas.height = size;
         const ctx = canvas.getContext('2d');
         const side = Math.min(img.naturalWidth, img.naturalHeight);
-        ctx.drawImage(
-            img,
-            (img.naturalWidth - side) / 2,
-            (img.naturalHeight - side) / 2,
-            side,
-            side,
-            0,
-            0,
-            size,
-            size
-        );
+        ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
         return canvas;
     };
 
@@ -2415,6 +2481,8 @@ function teardownMedia() {
     selfReconnecting = false;
     clearTimeout(b1Timer);
     clearTimeout(b1ResetTimer);
+    clearTimeout(disconnectToastTimer);
+    disconnectToastTimer = null;
     stopMicTest();
     mesh?.close();
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
@@ -2446,6 +2514,9 @@ function showJoinError(message) {
     $('#joinOverlay').classList.remove('hidden');
     $('#joinError').textContent = message;
     teardownMedia();
+    // the disconnect handler keeps mesh/members for a resume — this path is a
+    // dead end, drop them here so no stale member cards linger behind the overlay
+    resetLocalMesh();
     socket?.disconnect();
     socket = null;
     mesh = null;
@@ -2480,7 +2551,11 @@ if (location.hash === '#debug') {
         mode: webAudioPlayback() ? 'webaudio' : 'element',
         ctxState: hub?.ctx?.state ?? null,
         ctxTime: hub?.ctx?.currentTime ?? null,
-        micRaw: hub?.mic?.raw.getAudioTracks().map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`).join(',') ?? null,
+        micRaw:
+            hub?.mic?.raw
+                .getAudioTracks()
+                .map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`)
+                .join(',') ?? null,
         micProcessed,
         micTest: micTest ? { delay: micTest.delay.delayTime.value, gain: micTest.gain.gain.value } : null,
         micVolume: settings.micVolume,
@@ -2493,7 +2568,7 @@ if (location.hash === '#debug') {
                       let sum = 0;
                       for (let i = 0; i < w.data.length; i++) sum += w.data[i] * w.data[i];
                       return [k, Math.sqrt(sum / w.data.length) / 255];
-                  }),
+                  })
               )
             : null,
         tracks: hub
@@ -2521,8 +2596,13 @@ if (location.hash === '#debug') {
             peers: Object.fromEntries(
                 [...peerRecovery.entries()].map(([peerId, r]) => [
                     peerId,
-                    { attempts: r.attempts, state: r.lastState, escalated: r.escalated, brokenForMs: Date.now() - r.brokenAt },
-                ]),
+                    {
+                        attempts: r.attempts,
+                        state: r.lastState,
+                        escalated: r.escalated,
+                        brokenForMs: Date.now() - r.brokenAt,
+                    },
+                ])
             ),
             b1Attempts,
             b1InFlight,

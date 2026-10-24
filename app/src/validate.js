@@ -53,9 +53,20 @@ function isValidData(data) {
     return Object.keys(data).length > 0;
 }
 
+// Standard 8-4-4-4-12 hex uuid (any version) — the session key a room's peer
+// map is keyed by. Strict shape on purpose: the value becomes an object key,
+// so it must never be able to collide with the room meta keys
+// ('lock'/'password'/'joinLock') or with '__proto__'.
+const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidSessionUuid(input) {
+    return typeof input === 'string' && SESSION_UUID_RE.test(input);
+}
+
 module.exports = {
     isValidPassword,
     isValidRoomName,
     hasPathTraversal,
     isValidData,
+    isValidSessionUuid,
 };
