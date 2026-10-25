@@ -7,7 +7,7 @@
         "prestart": "test -f app/src/config.js || cp app/src/config.template.js app/src/config.js",
         "start": "node app/src/server.js",
         "dev": "node --watch app/src/server.js",
-        "test": "mocha tests/*.js",
+        "test": "mocha tests/*.js --exit",
         "lint": "npx prettier --write .",
         "docker:build": "docker build --tag voice-channels:latest .",
         "docker:rmi": "docker images |grep '<none>' |awk '{print $3}' |xargs docker rmi",
