@@ -1,6 +1,6 @@
 {
     "name": "voice-channels-p2p",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "description": "Self-hosted persistent voice channels over P2P WebRTC (based on MiroTalk P2P)",
     "main": "server.js",
     "scripts": {

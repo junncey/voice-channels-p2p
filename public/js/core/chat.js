@@ -108,7 +108,6 @@ export function initChat(
         jumpText = '↓',
     } = {}
 ) {
-    console.log('[vc-build] chat-ackfix4');
     let emptyNode = null;
     let lastTime = null;
     let lastDay = null; // toDateString() of the last rendered message's day
