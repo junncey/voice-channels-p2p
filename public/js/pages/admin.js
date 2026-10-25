@@ -14,6 +14,7 @@ let temps = [];
 let editingId = null; // null = creating
 let pendingDelete = null;
 let settingsSaving = false; // don't clobber the toggle from a poll mid-save
+const expandedRooms = new Set(); // channel ids whose member list row is open
 
 boot();
 
@@ -55,6 +56,15 @@ function bindUi() {
     $('#tempSettingsBtn').addEventListener('click', openSettings);
     $('#settingsCancel').addEventListener('click', () => $('#settingsModal').classList.add('hidden'));
     $('#settingsForm').addEventListener('submit', onSettingsSubmit);
+
+    $('#backupBtn').addEventListener('click', async () => {
+        try {
+            await api.adminBackup();
+            toast(t('admin.backupDone'), 'ok');
+        } catch {
+            toast(t('common.error'), 'error');
+        }
+    });
 
     $('#confirmCancel').addEventListener('click', () => {
         pendingDelete = null;
@@ -149,11 +159,15 @@ function renderTable() {
     const rows = $('#channelRows');
     $('#adminEmpty').classList.toggle('hidden', channels.length + temps.length > 0);
 
+    const out = [];
+    const pushWithMembers = (channel, isTemp) => {
+        out.push(channelRow(channel, isTemp));
+        if (expandedRooms.has(channel.id)) out.push(membersRow(channel, isTemp));
+    };
     // registered channels first, then live temporary rooms (deletable only)
-    rows.replaceChildren(
-        ...channels.map((channel) => channelRow(channel, false)),
-        ...temps.map((channel) => channelRow(channel, true))
-    );
+    channels.forEach((channel) => pushWithMembers(channel, false));
+    temps.forEach((channel) => pushWithMembers(channel, true));
+    rows.replaceChildren(...out);
 }
 
 function channelRow(channel, isTemp) {
@@ -179,8 +193,20 @@ function channelRow(channel, isTemp) {
         ),
         el(
             'td',
-            { class: 'count-cell' + (channel.online ? '' : ' zero') },
-            String(channel.online ?? 0)
+            { class: 'count-cell' },
+            el(
+                'button',
+                {
+                    class: 'count-toggle' + ((channel.online ?? 0) > 0 ? ' has-members' : ''),
+                    title: t('admin.members'),
+                    onclick: () => {
+                        if (expandedRooms.has(channel.id)) expandedRooms.delete(channel.id);
+                        else expandedRooms.add(channel.id);
+                        renderTable();
+                    },
+                },
+                String(channel.online ?? 0)
+            )
         ),
         el(
             'td',
@@ -210,6 +236,49 @@ function channelRow(channel, isTemp) {
     );
 }
 
+/** Expandable sub-row: live member list with per-member kick. */
+function membersRow(channel) {
+    const members = channel.members || [];
+    const cell = el('td', { colspan: '7', class: 'members-cell' });
+    const content = [];
+    if (!members.length) {
+        content.push(el('span', { class: 'members-empty', text: t('admin.membersEmpty') }));
+    } else {
+        content.push(
+            ...members.map((member) =>
+                el(
+                    'div',
+                    { class: 'member-pill' + (member.ghost ? ' ghost' : '') },
+                    el('span', { class: 'member-pill-name', text: member.name || '?' }),
+                    member.presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
+                    member.ghost ? el('span', { class: 'badge ghost-badge', text: t('admin.memberGhost') }) : null,
+                    el(
+                        'button',
+                        {
+                            class: 'btn danger sm',
+                            text: t('admin.kick'),
+                            onclick: () => kickMember(channel.id, member),
+                        }
+                    )
+                )
+            )
+        );
+    }
+    // flex lives on the wrapper, never on the td (that would kill colspan)
+    cell.append(el('div', { class: 'members-wrap' }, ...content));
+    return el('tr', { class: 'members-row' }, cell);
+}
+
+async function kickMember(channelId, member) {
+    try {
+        await api.adminKick(channelId, member.uuid);
+        toast(t('admin.kicked', { name: member.name || '?' }), 'ok');
+        load();
+    } catch (err) {
+        toast(err.message || t('common.error'), 'error');
+    }
+}
+
 // ---------------------------------------------------------------------------
 // editor
 // ---------------------------------------------------------------------------
@@ -228,6 +297,8 @@ function openEditor(channel) {
     $('#fName').value = channel ? channel.name : '';
     $('#fDesc').value = channel ? channel.description || '' : '';
     $('#fMax').value = channel ? channel.maxParticipants || 8 : 8;
+    // per-channel retention override: '' = inherit the global setting
+    $('#fRetention').value = channel?.chatRetentionHours != null ? String(channel.chatRetentionHours) : '';
     $('#fPublic').checked = channel ? channel.public !== false : true;
 
     // channel password: never echoed back — blank keeps the stored one, an
@@ -304,6 +375,11 @@ async function onEditorSubmit(event) {
         hosts: collectHosts(),
     };
     if (!editingId) body.id = $('#fId').value.trim();
+
+    // retention override: '' = inherit (null), otherwise an hour count
+    const retention = $('#fRetention').value.trim();
+    if (retention !== '') body.chatRetentionHours = Number(retention);
+    else if (editingId) body.chatRetentionHours = null; // editing: blank clears the override
 
     // channel password tri-state: filled = set/replace, '' = clear (checkbox),
     // omitted = leave unchanged

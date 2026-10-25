@@ -17,6 +17,8 @@ import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t } from '/js/core/i18n.js';
 import { initSoundSettings, playSound } from '/js/core/sound.js';
 import { initVersionCheck } from '/js/core/version.js';
+import { createWakeLock } from '/js/pages/channel/wakeLock.js';
+import { installDebugHooks } from '/js/pages/channel/debug.js';
 import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
@@ -142,51 +144,12 @@ const DISCONNECT_TOAST_MS = 3000;
 let disconnectToastTimer = null;
 
 // ----- screen wake lock (mobile: a locked screen kills the voice session) -----
+// Holder lives in ./channel/wakeLock.js; it re-arms itself on visibility
+// changes. request() rejects while hidden, so "wanted" includes visible.
 
-let wakeLock = null; // active Sentinel; null = not held / unsupported
-let wakeLockBusy = false; // a request() round-trip in flight
-
-function wakeLockWanted() {
-    // request() rejects while hidden — the visibilitychange handler re-arms
-    return joined && !textOnly && document.visibilityState === 'visible';
-}
-
-async function syncWakeLock() {
-    if (!('wakeLock' in navigator)) return; // unsupported: degrade silently
-    if (!wakeLockWanted()) {
-        releaseWakeLock();
-        return;
-    }
-    if (wakeLock || wakeLockBusy) return;
-    wakeLockBusy = true;
-    try {
-        const sentinel = await navigator.wakeLock.request('screen');
-        if (wakeLockWanted()) {
-            wakeLock = sentinel;
-            // system revoked it (screen off, battery saver): drop the handle so
-            // the visibilitychange handler can request a fresh one
-            sentinel.addEventListener('release', () => {
-                if (wakeLock === sentinel) wakeLock = null;
-            });
-        } else {
-            sentinel.release().catch(() => {});
-        }
-    } catch {
-        /* denied — the session just loses the keep-awake nicety */
-    } finally {
-        wakeLockBusy = false;
-    }
-}
-
-function releaseWakeLock() {
-    const sentinel = wakeLock;
-    wakeLock = null;
-    try {
-        sentinel?.release?.().catch?.(() => {});
-    } catch {
-        /* already released */
-    }
-}
+const screenLock = createWakeLock({
+    wanted: () => joined && !textOnly && document.visibilityState === 'visible',
+});
 
 // ----- host login persistence -----
 // The host token lives in localStorage so the login survives browser restarts
@@ -270,6 +233,7 @@ const imageReceiver = createImageReceiver({
             const name = members.get(peerId)?.peer_name || from || '?';
             chat.addImage({ name, src: dataUrl, alt: t('chat.image') });
             playSound('message');
+            noteIncomingMessage(name, '');
         }
     },
     onFail: (reason, batch) => {
@@ -277,6 +241,155 @@ const imageReceiver = createImageReceiver({
         else chat.add({ text: t('chat.imageBroken'), system: true });
     },
 });
+
+// ---------------------------------------------------------------------------
+// unread badge + desktop notifications + reply composer + @mention autocomplete
+// ---------------------------------------------------------------------------
+
+let baseTitle = '';
+let unreadCount = 0;
+const NOTIFY_KEY = 'vc_notify';
+const notifySupported = typeof window !== 'undefined' && 'Notification' in window;
+let notifyEnabled =
+    notifySupported && localStorage.getItem(NOTIFY_KEY) === '1' && Notification.permission === 'granted';
+
+/** true when the text contains an @mention of the local user's name */
+function mentionsMe(text) {
+    if (!selfName || !text.includes('@')) return false;
+    const re = new RegExp(`@${selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u');
+    return re.test(text);
+}
+
+/** A message from someone else arrived: bump the background-tab counter and,
+ *  when it mentions us, fire a desktop notification (if enabled). */
+function noteIncomingMessage(name, text) {
+    if (name === selfName || !document.hidden) return;
+    unreadCount += 1;
+    document.title = `(${unreadCount}) ${baseTitle}`;
+    if (notifyEnabled && mentionsMe(text)) {
+        try {
+            const n = new Notification(`@${name} · ${channelMeta?.name || channelId}`, {
+                body: (text || t('chat.image')).slice(0, 80),
+                tag: 'vc-mention',
+                silent: true, // the message chime already played
+            });
+            n.onclick = () => {
+                window.focus();
+                n.close();
+            };
+        } catch {
+            /* some platforms throw on construction — the title badge still works */
+        }
+    }
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && unreadCount) {
+        unreadCount = 0;
+        document.title = baseTitle;
+    }
+});
+
+// ----- reply composer -----
+
+let replyTo = null; // {name, text, ts} of the row being answered
+
+function startReply({ name, text, ts }) {
+    replyTo = { name: name || '?', text: (text || t('chat.image')).slice(0, 80), ts: ts || 0 };
+    $('#replyBar').classList.remove('hidden');
+    $('#replyPreview').replaceChildren(
+        el('span', { class: 'reply-label', text: t('chat.replyTo', { name: replyTo.name }) }),
+        el('span', { class: 'reply-text', text: replyTo.text })
+    );
+    $('#chatInput').focus();
+}
+
+function cancelReply() {
+    replyTo = null;
+    $('#replyBar').classList.add('hidden');
+}
+
+/** Payload for the outgoing message/history event; null when not replying. */
+function replyPayload() {
+    if (!replyTo) return null;
+    return { name: replyTo.name, text: replyTo.text.slice(0, 80), ts: replyTo.ts };
+}
+
+// ----- @mention autocomplete (menu above the composer) -----
+
+let mention = null; // { items, index, at } — at = index of the '@' in the input
+
+function memberNamesForMention() {
+    return [...new Set([...members.values()].filter((m) => !m.self).map((m) => m.peer_name).filter(Boolean))];
+}
+
+function updateMentionMenu() {
+    const input = $('#chatInput');
+    if (!joined || document.activeElement !== input) return closeMentionMenu();
+    const caret = input.selectionStart ?? input.value.length;
+    const before = input.value.slice(0, caret);
+    const m = before.match(/(?:^|\s)@([^\s@]{0,24})$/);
+    if (!m) return closeMentionMenu();
+    const at = caret - m[1].length - 1; // position of the '@'
+    const frag = m[1].toLowerCase();
+    const items = memberNamesForMention().filter((name) => name.toLowerCase().startsWith(frag)).slice(0, 6);
+    if (!items.length) return closeMentionMenu();
+    mention = { items, index: 0, at };
+
+    const menu = $('#mentionMenu');
+    menu.replaceChildren(
+        ...items.map((name, i) =>
+            el(
+                'button',
+                {
+                    type: 'button',
+                    class: 'mention-item' + (i === 0 ? ' active' : ''),
+                    onclick: () => completeMention(name),
+                },
+                el('span', { class: 'mention-at', text: '@' }),
+                name
+            )
+        )
+    );
+    menu.classList.remove('hidden');
+}
+
+function closeMentionMenu() {
+    mention = null;
+    $('#mentionMenu').classList.add('hidden');
+}
+
+function completeMention(name) {
+    const input = $('#chatInput');
+    if (!mention) return;
+    input.setRangeText(`@${name} `, mention.at, input.selectionStart ?? mention.at, 'end');
+    closeMentionMenu();
+    input.focus();
+    autoGrowChatInput();
+}
+
+/** Key handling while the mention menu is open; returns true when consumed. */
+function mentionMenuKeydown(event) {
+    if (!mention) return false;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        mention.index =
+            (mention.index + (event.key === 'ArrowDown' ? 1 : mention.items.length - 1)) % mention.items.length;
+        [...$('#mentionMenu').children].forEach((child, i) => child.classList.toggle('active', i === mention.index));
+        return true;
+    }
+    if (event.key === 'Tab' || (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.shiftKey)) {
+        event.preventDefault();
+        completeMention(mention.items[mention.index]);
+        return true;
+    }
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeMentionMenu();
+        return true;
+    }
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // boot
@@ -302,6 +415,11 @@ async function boot() {
         failText: t('chat.imageBroken'),
         historyLoadingText: t('chat.historyLoading'),
         historyEndText: t('chat.historyEnd'),
+        // include OUR OWN name: seeing yourself highlighted is the whole point,
+        // and .mention.self is keyed off it (chat.js compares with selfName)
+        mentionNames: () => [...members.values()].map((m) => m.peer_name),
+        selfName: () => selfName,
+        onReply: startReply,
     });
     bindHistoryPaging($('#chatMessages'));
     bindUi();
@@ -318,7 +436,8 @@ async function boot() {
     $('#channelDesc').textContent = channelMeta.description || '';
     $('#tempBadge').classList.toggle('hidden', !channelMeta.temporary);
     $('#joinChannelName').textContent = `# ${channelMeta.name || channelId}`;
-    document.title = `${channelMeta.name || channelId} · ${t('app.name')}`;
+    baseTitle = `${channelMeta.name || channelId} · ${t('app.name')}`;
+    document.title = baseTitle;
 
     const presetName = new URLSearchParams(location.search).get('name');
     const savedNick = presetName || localStorage.getItem(NICK_KEY) || '';
@@ -371,6 +490,16 @@ function bindUi() {
     $('#copyLinkBtn').addEventListener('click', async () => {
         const ok = await copyText(`${location.origin}/c/${channelId}`);
         if (ok) toast(t('channel.copied'), 'ok');
+    });
+
+    $('#exportChatBtn').addEventListener('click', async () => {
+        if (!isPresenter || !hostToken) return;
+        try {
+            await api.hostExport(channelId, hostToken);
+            toast(t('channel.exportDone'), 'ok');
+        } catch (err) {
+            toast(err?.status === 404 ? t('channel.errors.channelNotFound') : t('common.error'), 'warn');
+        }
     });
 
     $('#leaveBtn').addEventListener('click', leave);
@@ -430,9 +559,7 @@ function bindUi() {
         intentionalUnload = true;
         location.reload();
     });
-    // back from the background: the screen lock auto-released the sentinel —
-    // re-request it while the voice session is still live
-    document.addEventListener('visibilitychange', syncWakeLock);
+    // (wake lock re-arming on visibilitychange is owned by channel/wakeLock.js)
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +662,22 @@ function parseHistoryRows(messages) {
         if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
         if (!text && !imgs.length) continue;
         const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
-        rows.push({ name, text, imgs, self: name === selfName, time: ts ? new Date(ts) : new Date() });
+        const reply =
+            msg.reply && typeof msg.reply === 'object' && typeof msg.reply.name === 'string'
+                ? {
+                      name: msg.reply.name.slice(0, 24),
+                      text: String(msg.reply.text || '').slice(0, 80),
+                      ts: Number(msg.reply.ts) || 0,
+                  }
+                : null;
+        rows.push({
+            name,
+            text,
+            imgs,
+            reply,
+            self: name === selfName,
+            time: ts ? new Date(ts) : new Date(),
+        });
     }
     return rows;
 }
@@ -592,7 +734,7 @@ function registerSocketHandlers() {
             joined = true;
             startRecoveryScan();
             startPathMonitor();
-            syncWakeLock();
+            screenLock.sync();
             isPresenter = !!cfg.is_presenter;
             joinLockOn = !!cfg.join_locked;
             $('#joinOverlay').classList.add('hidden');
@@ -850,13 +992,23 @@ function meshHandlers() {
                 const name = members.get(peerId)?.peer_name || String(data.from || '').slice(0, 24) || '?';
                 const batch = typeof data.batch === 'string' && data.batch.length <= 64 ? data.batch : '';
                 const imgs = Number(data.imgs);
+                const text = String(data.msg || '').slice(0, 500);
+                const reply =
+                    data.reply && typeof data.reply === 'object' && typeof data.reply.name === 'string'
+                        ? {
+                              name: data.reply.name.slice(0, 24),
+                              text: String(data.reply.text || '').slice(0, 80),
+                              ts: Number(data.reply.ts) || 0,
+                          }
+                        : null;
                 if (batch && Number.isInteger(imgs) && imgs > 0 && imgs <= 9) {
                     // one send of text + N images renders as ONE merged bubble
-                    chat.openBatch({ batch, name, text: String(data.msg || '').slice(0, 500), count: imgs });
+                    chat.openBatch({ batch, name, text, count: imgs, reply });
                 } else {
-                    chat.add({ name, text: String(data.msg || '').slice(0, 500) });
+                    chat.add({ name, text, reply });
                 }
                 playSound('message');
+                noteIncomingMessage(name, text);
                 return;
             }
             if (data.type === 'img-start' || data.type === 'img-chunk' || data.type === 'img-end') {
@@ -1726,6 +1878,8 @@ function setIconBtn(btn, icon, label) {
 
 function updateHeaderActions() {
     $('#hostBadge').classList.toggle('hidden', !isPresenter);
+    // host chat export (Markdown) — presenters only, served with the host JWT
+    $('#exportChatBtn').classList.toggle('hidden', !isPresenter);
     // host login stays reachable after the auto-join (no pre-join overlay)
     $('#hostLoginEntryBtn').classList.toggle('hidden', !(joined && !isPresenter));
     const lockBtn = $('#lockBtn');
@@ -1859,7 +2013,7 @@ async function reacquireMic() {
     // a device/processing change keeps the current mute state; enabling voice turns the mic on
     micOn = hadStream ? micOn : true;
     textOnly = false;
-    syncWakeLock(); // voice enabled from text-only: hold the screen awake now
+    screenLock.sync(); // voice enabled from text-only: hold the screen awake now
     track.enabled = onAir();
     if (hub) await hub.ensureContext().catch(() => {});
 
@@ -2092,13 +2246,45 @@ function bindSettingsUi() {
     // operation sound effects: master switch, volume, per-event sound pickers
     initSoundSettings({ applySink, toast });
 
+    // desktop notifications on mention (hidden where unsupported)
+    $('#notifySection').classList.toggle('hidden', !notifySupported);
+    $('#notifyToggle').addEventListener('change', onNotifyToggle);
+
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceSelects);
+}
+
+async function onNotifyToggle(event) {
+    const on = event.target.checked;
+    if (!on) {
+        notifyEnabled = false;
+        localStorage.setItem(NOTIFY_KEY, '0');
+        return;
+    }
+    if (Notification.permission === 'granted') {
+        notifyEnabled = true;
+        localStorage.setItem(NOTIFY_KEY, '1');
+        return;
+    }
+    if (Notification.permission === 'denied') {
+        event.target.checked = false;
+        toast(t('channel.notifyBlocked'), 'warn');
+        return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission === 'granted') {
+        notifyEnabled = true;
+        localStorage.setItem(NOTIFY_KEY, '1');
+    } else {
+        event.target.checked = false;
+        if (permission === 'denied') toast(t('channel.notifyBlocked'), 'warn');
+    }
 }
 
 function openSettings() {
     updateAvatarPreview();
     reflectMusicMode();
     $('#pttToggle').checked = settings.ptt;
+    $('#notifyToggle').checked = notifyEnabled;
     spkDropdown.setDisabled(!sinkSupported);
     $('#sinkUnsupported').classList.toggle('hidden', sinkSupported);
     const pct = Math.round(settings.volume * 100);
@@ -2307,8 +2493,12 @@ const CHAT_INPUT_MAX_HEIGHT = 120;
 
 function bindChatInput() {
     const input = $('#chatInput');
-    input.addEventListener('input', autoGrowChatInput);
+    input.addEventListener('input', () => {
+        autoGrowChatInput();
+        updateMentionMenu();
+    });
     input.addEventListener('keydown', onChatInputKeydown);
+    $('#replyCancelBtn').addEventListener('click', cancelReply);
 
     // QQ-style send-key menu behind the caret next to the send button
     const menu = $('#sendKeyMenu');
@@ -2325,6 +2515,12 @@ function bindChatInput() {
     document.addEventListener('click', (event) => {
         if (!menu.classList.contains('hidden') && !menu.contains(event.target) && !caret.contains(event.target)) {
             toggleSendKeyMenu(false);
+        }
+        // the mention menu only closes on outside clicks — its own buttons
+        // complete the mention instead
+        const mMenu = $('#mentionMenu');
+        if (!mMenu.classList.contains('hidden') && !mMenu.contains(event.target) && event.target !== input) {
+            closeMentionMenu();
         }
     });
     document.addEventListener('keydown', (event) => {
@@ -2344,6 +2540,8 @@ function autoGrowChatInput() {
 }
 
 function onChatInputKeydown(event) {
+    // mention menu navigation wins over everything else while it is open
+    if (mentionMenuKeydown(event)) return;
     // IME composition: Enter confirms the candidate text, it must never send
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key !== 'Enter') return;
@@ -2382,14 +2580,15 @@ function insertChatNewline() {
  * each image rides alone because a whole batch can exceed the socket.io
  * packet cap; the server assembles the batch into one history row.
  */
-function emitChatForHistory(text, images = []) {
+function emitChatForHistory(text, images = [], reply = null) {
     if (!socket) return;
+    const replyField = reply ? { reply } : {};
     if (!images.length) {
-        socket.emit('chat', { room_id: channelId, msg: text });
+        socket.emit('chat', { room_id: channelId, msg: text, ...replyField });
         return;
     }
     const batch = crypto.randomUUID();
-    socket.emit('chat', { room_id: channelId, msg: text, batch, imgs: images.length });
+    socket.emit('chat', { room_id: channelId, msg: text, batch, imgs: images.length, ...replyField });
     for (const img of images) socket.emit('chat', { room_id: channelId, batch, img });
 }
 
@@ -2402,12 +2601,16 @@ async function onChatSubmit(event) {
     if (!text && !images.length) return;
     input.value = '';
     autoGrowChatInput();
+    closeMentionMenu();
     clearPendingImages(); // the tray is emptied up-front; failures toast per image
 
+    const reply = replyPayload();
+    cancelReply();
+
     if (!images.length) {
-        mesh.sendChat({ type: 'chat', from: selfName, msg: text });
-        chat.add({ name: selfName, text, self: true });
-        emitChatForHistory(text);
+        mesh.sendChat({ type: 'chat', from: selfName, msg: text, reply });
+        chat.add({ name: selfName, text, self: true, reply });
+        emitChatForHistory(text, [], reply);
         return;
     }
 
@@ -2423,19 +2626,20 @@ async function onChatSubmit(event) {
     }
     if (!payloads.length) {
         if (text) {
-            mesh.sendChat({ type: 'chat', from: selfName, msg: text });
-            chat.add({ name: selfName, text, self: true });
-            emitChatForHistory(text);
+            mesh.sendChat({ type: 'chat', from: selfName, msg: text, reply });
+            chat.add({ name: selfName, text, self: true, reply });
+            emitChatForHistory(text, [], reply);
         }
         return;
     }
 
     const batch = crypto.randomUUID();
-    mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length });
-    chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true });
+    mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length, reply });
+    chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true, reply });
     emitChatForHistory(
         text,
-        payloads.map((payload) => payload.dataUrl)
+        payloads.map((payload) => payload.dataUrl),
+        reply
     );
     for (const payload of payloads) {
         sendImageData({
@@ -2674,7 +2878,7 @@ function teardownMedia() {
     stopRecoveryScan();
     clearPeerRecovery();
     stopPathMonitor();
-    releaseWakeLock();
+    screenLock.release();
     // the connecting-badge state is per-peer too — drop it with the rest
     for (const timer of connectingTimers.values()) clearTimeout(timer);
     connectingTimers.clear();
@@ -2747,192 +2951,23 @@ function toast(message, kind = '') {
 }
 
 // ---------------------------------------------------------------------------
-// e2e inspection hook (only with #debug in the URL — never in normal use)
-// ---------------------------------------------------------------------------
-
+// The #debug probes live in ./channel/debug.js — installed with a live
+// snapshot getter so every probe reads the controller state at call time.
 if (location.hash === '#debug') {
-    window.__vcDebug = () => ({
-        mode: webAudioPlayback() ? 'webaudio' : 'element',
-        ctxState: hub?.ctx?.state ?? null,
-        ctxTime: hub?.ctx?.currentTime ?? null,
-        micRaw:
-            hub?.mic?.raw
-                .getAudioTracks()
-                .map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`)
-                .join(',') ?? null,
+    installDebugHooks(() => ({
+        hub,
+        mesh,
+        members,
+        audioEls,
+        connPaths,
+        lossStreaks,
+        peerRecovery,
         micProcessed,
-        micTest: micTest ? { delay: micTest.delay.delayTime.value, gain: micTest.gain.gain.value } : null,
-        micVolume: settings.micVolume,
-        micGain: hub?.mic?.gain.gain.value ?? null,
-        // live sampling (not the throttled _tick values) — readable in background tabs
-        levels: hub
-            ? Object.fromEntries(
-                  [...hub.watchers.entries()].map(([k, w]) => {
-                      w.analyser.getByteFrequencyData(w.data);
-                      let sum = 0;
-                      for (let i = 0; i < w.data.length; i++) sum += w.data[i] * w.data[i];
-                      return [k, Math.sqrt(sum / w.data.length) / 255];
-                  })
-              )
-            : null,
-        tracks: hub
-            ? [...hub.players.entries()].map(([k, p]) => ({
-                  peer: k,
-                  state: p.src.mediaStream
-                      .getAudioTracks()
-                      .map((t) => `${t.readyState}:${t.muted ? 'muted' : 'on'}`)
-                      .join(','),
-              }))
-            : [],
-        ctxSink: hub?.ctx?.sinkId ?? null,
-        master: settings.volume,
-        errs: window.__errs || [],
-        peers: [...members.entries()]
-            .filter(([, info]) => !info.self)
-            .map(([peerId, info]) => ({
-                name: info.peer_name,
-                volume: info.volume ?? 1,
-                gain: hub?.players.get(peerId)?.gain.gain.value ?? null,
-                elVolume: audioEls.get(peerId)?.volume ?? null,
-                path: connPaths.get(peerId) ?? null,
-                loss: lossStreaks.get(peerId) ?? null,
-            })),
-        recovery: {
-            peers: Object.fromEntries(
-                [...peerRecovery.entries()].map(([peerId, r]) => [
-                    peerId,
-                    {
-                        attempts: r.attempts,
-                        state: r.lastState,
-                        escalated: r.escalated,
-                        brokenForMs: Date.now() - r.brokenAt,
-                    },
-                ])
-            ),
-            b1Attempts,
-            b1InFlight,
-        },
-    });
-    // e2e aid: swap the outgoing mic track for a synthetic sine — verifies the
-    // WebRTC chain without depending on acoustic mic/speaker hardware
-    window.__vcTone = async (ms = 3000) => {
-        if (!mesh || !hub?.ctx || !localStream) return 'not-ready';
-        const osc = hub.ctx.createOscillator();
-        osc.frequency.value = 880;
-        const g = hub.ctx.createGain();
-        g.gain.value = 0.7;
-        const an = hub.ctx.createAnalyser();
-        an.fftSize = 512;
-        osc.connect(g);
-        g.connect(an);
-        let restore = null;
-        if (micProcessed && hub.mic) {
-            g.connect(hub.mic.gain); // rides the input-gain pipeline
-        } else {
-            const dest = hub.ctx.createMediaStreamDestination();
-            g.connect(dest);
-            mesh.replaceAudioTrack(dest.stream.getAudioTracks()[0], dest.stream);
-            restore = () => mesh.replaceAudioTrack(localStream.getAudioTracks()[0], localStream);
-        }
-        const data = new Uint8Array(an.frequencyBinCount);
-        window.__vcToneLevel = 0;
-        osc.start();
-        osc.stop(hub.ctx.currentTime + ms / 1000); // audio-clock schedule: background-tab timer throttling can't stall it
-        const t0 = Date.now();
-        while (Date.now() - t0 < ms) {
-            await new Promise((r) => setTimeout(r, 300));
-            an.getByteFrequencyData(data);
-            let sum = 0;
-            for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-            window.__vcToneLevel = Math.sqrt(sum / data.length) / 255;
-        }
-        g.disconnect();
-        if (restore) restore();
-        return 'done';
-    };
-    window.__vcStats = async () => {
-        if (!mesh) return null;
-        const out = [];
-        for (const [peerId, entry] of mesh.entries) {
-            const stats = await entry.pc.getStats();
-            const rows = [];
-            stats.forEach((r) => {
-                if (r.type === 'inbound-rtp' && r.kind === 'audio')
-                    rows.push({ dir: 'in', bytes: r.bytesReceived, packets: r.packetsReceived, lost: r.packetsLost });
-                if (r.type === 'outbound-rtp' && r.kind === 'audio')
-                    rows.push({ dir: 'out', bytes: r.bytesSent, packets: r.packetsSent });
-            });
-            const path = await mesh.connPath(peerId).catch(() => null);
-            out.push({ peerId, state: entry.pc.connectionState, path, rows });
-        }
-        return out;
-    };
-    // probe: is a FRESH Web Audio tap on the (now flowing) remote stream live,
-    // and does a muted <audio> element prime the pipeline?
-    window.__vcRetap = async (ms = 1200) => {
-        if (!hub?.ctx) return 'no-ctx';
-        const out = {};
-        for (const [peerId, player] of hub.players) {
-            const stream = player.src.mediaStream;
-            const measure = () =>
-                new Promise((resolve) => {
-                    const an = hub.ctx.createAnalyser();
-                    an.fftSize = 512;
-                    hub.ctx.createMediaStreamSource(stream).connect(an);
-                    const data = new Uint8Array(an.frequencyBinCount);
-                    setTimeout(() => {
-                        an.getByteFrequencyData(data);
-                        let sum = 0;
-                        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-                        resolve(Math.sqrt(sum / data.length) / 255);
-                    }, ms);
-                });
-            out[peerId] = { fresh: await measure() };
-            const el = document.createElement('audio');
-            el.srcObject = stream;
-            el.muted = true;
-            await el.play().catch(() => {});
-            out[peerId].withMutedEl = await measure();
-            el.srcObject = null;
-            el.remove();
-        }
-        return out;
-    };
-    // probe: force the AudioContext suspended/running to test the fallback migration
-    window.__vcCtx = (op) => (op === 'suspend' ? hub?.ctx?.suspend() : hub?.ctx?.resume());
-    // probe: direct access to the mesh (pc states, restartIce) for recovery tests
-    window.__vcMesh = () => mesh;
-    // probe: persistent tap on the outgoing (post-gain) mic stream; sync read, external pacing
-    window.__vcOutTap = () => {
-        if (!hub?.ctx || !hub.mic) return null;
-        if (!window.__outTap || window.__outTapKey !== hub.mic) {
-            try {
-                window.__outTap?.src.disconnect();
-            } catch {
-                /* stale tap */
-            }
-            const src = hub.ctx.createMediaStreamSource(hub.mic.stream);
-            const an = hub.ctx.createAnalyser();
-            an.fftSize = 2048;
-            src.connect(an);
-            window.__outTap = { src, an, data: new Float32Array(an.fftSize) };
-            window.__outTapKey = hub.mic;
-        }
-        const { an, data } = window.__outTap;
-        an.getFloatTimeDomainData(data); // linear scale — the dB-mapped byte readout hides gain changes
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-        return Number(Math.sqrt(sum / data.length).toFixed(4));
-    };
-    // probe: linear RMS of the first remote peer stream (receive side)
-    window.__vcPeerRms = () => {
-        const w = hub?.watchers && [...hub.watchers.entries()].find(([k]) => k !== 'self');
-        if (!w) return null;
-        const an = w[1].analyser;
-        const data = new Float32Array(an.fftSize);
-        an.getFloatTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-        return Number(Math.sqrt(sum / data.length).toFixed(4));
-    };
+        micTest,
+        settings,
+        localStream,
+        b1Attempts,
+        b1InFlight,
+        webAudioPlayback,
+    }));
 }

@@ -48,6 +48,9 @@
                     <button id="tempSettingsBtn" class="btn ghost sm" data-i18n="admin.serverSettings" data-i18n-title="admin.serverSettingsHint">
                         服务器设置
                     </button>
+                    <button id="backupBtn" class="btn ghost sm" data-i18n="admin.backup" data-i18n-title="admin.backupHint">
+                        下载备份
+                    </button>
                     <span id="loadError" class="admin-error"></span>
                 </div>
 
@@ -95,6 +98,10 @@
                         <div class="field">
                             <label for="fMax" data-i18n="admin.field.maxParticipants">人数上限（语音 mesh 建议 ≤ 8）</label>
                             <input id="fMax" class="input" type="number" min="2" max="16" value="8" />
+                        </div>
+                        <div class="field">
+                            <label for="fRetention" data-i18n="admin.field.retention">聊天保留（小时，留空继承全局）</label>
+                            <input id="fRetention" class="input" type="number" min="0" max="2160" step="1" placeholder="—" />
                         </div>
                         <div class="field check-field">
                             <label>

@@ -1,6 +1,6 @@
 # 优化与新功能方向（Roadmap）
 
-> 整理日期：2026-10-24。基于当时代码库（`main` @ `e0c30dcd`）逐项核实，所有「现状」描述均已确认当前代码中**不存在**对应实现。完成后请勾掉并在提交信息中引用编号。
+> 整理日期：2026-10-24（最后同步 2026-10-25）。各项「现状」在整理时均已核实当时代码中**不存在**对应实现；已完成项的「现状」段落保留原始核实记录，实现摘录附于标题下方。
 
 ## 总览
 
@@ -9,18 +9,18 @@
 | 1 | Opus 编码调优 + 音乐模式 | 语音质量 | 高 | 小 | ✅ 2026-10-24 |
 | 2 | 成员卡片丢包率/抖动 | 语音质量 | 中 | 小 | ✅ 2026-10-24 |
 | 3 | 移动端 Wake Lock | 语音质量 | 高 | 小 | ✅ 2026-10-24 |
-| 4 | 表情回应（reactions） | 聊天体验 | 高 | 中 |
-| 5 | @提及 + 回复引用 + 未读通知 | 聊天体验 | 高 | 中 |
-| 6 | 消息撤回 | 聊天体验 | 中 | 中 |
-| 7 | 缺省头像（昵称哈希生成） | 聊天体验 | 中 | 小 |
-| 8 | admin 实时成员名单 | 运维管理 | 高 | 中 |
-| 9 | TURN 临时凭证（HMAC） | 运维管理 | 高 | 中 |
-| 10 | 一键备份 / 聊天记录导出 | 运维管理 | 中 | 小 |
-| 11 | 每频道聊天保留时长 | 运维管理 | 中 | 小 |
-| 12 | 信令层集成测试 | 工程质量 | 高 | 中 |
-| 13 | `channel.js` 模块拆分 | 工程质量 | 中 | 中 |
+| 4 | 表情回应（reactions） | 聊天体验 | 高 | 中 | — |
+| 5 | @提及 + 回复引用 + 未读通知 | 聊天体验 | 高 | 中 | ✅ 2026-10-25 |
+| 6 | 消息撤回 | 聊天体验 | 中 | 中 | — |
+| 7 | 缺省头像（昵称哈希生成） | 聊天体验 | 中 | 小 | — |
+| 8 | admin 实时成员名单 | 运维管理 | 高 | 中 | ✅ 2026-10-25 |
+| 9 | TURN 临时凭证（HMAC） | 运维管理 | 高 | 中 | ✅ 2026-10-25 |
+| 10 | 一键备份 / 聊天记录导出 | 运维管理 | 中 | 小 | ✅ 2026-10-25 |
+| 11 | 每频道聊天保留时长 | 运维管理 | 中 | 小 | ✅ 2026-10-25 |
+| 12 | 信令层集成测试 | 工程质量 | 高 | 中 | ✅ 2026-10-25 |
+| 13 | `channel.js` 模块拆分 | 工程质量 | 中 | 中 | ✅ 2026-10-25（部分） |
 
-建议实施顺序：**12（保护现状）→ 1/2（核心体验）→ 4/5（日常感知最强）**，其余按需穿插。
+剩余未做：**4（reactions）、6（消息撤回）、7（缺省头像）**，建议按 7 → 4 → 6（工作量小→大）推进；12/1/2/3/5/8–11 已完成，13 部分完成。
 
 ---
 
@@ -79,7 +79,9 @@
 
 **涉及**：`public/js/core/chat.js`、`public/js/pages/channel.js`、`public/css/channel.css`、词典。
 
-### 5. @提及 + 回复引用 + 未读通知
+### 5. @提及 + 回复引用 + 未读通知 ✅ 2026-10-25 已完成
+
+**实现**：chat.js 富文本渲染（mentionSegments 按在线成员名高亮、自身名字加强样式）+ 回复引用块（气泡内摘要、点击滚动定位并闪烁）+ 行内回复按钮；channel.js 新增 @补全菜单（输入 @ 触发、方向键/Tab/Enter 选择）、回复条状态机（reply:{name,text≤80,ts} 随 DataChannel 与历史事件携带，服务端校验并持久化）、document.title 未读计数（后台时累加、回前台清零）、Notification 桌面通知（被 @ 且后台时弹出，设置开关 vc_notify，权限请求在开关时发起）。
 
 **现状**：无提及、无回复引用；标签页在后台时无任何未读提示（无 `document.title` 计数、无 `Notification` 引用）。
 
@@ -116,7 +118,9 @@
 
 ## 三、运维与管理
 
-### 8. admin 实时成员名单
+### 8. admin 实时成员名单 ✅ 2026-10-25 已完成
+
+**实现**：GET /api/admin/channels 每个频道附 members[]（uuid/昵称/主持人/麦况/ghost 宽限标记/加入时间）；POST /api/admin/kick 按会话 uuid 移出（在线成员 emit kickOut + 延迟 100ms 断开保证包冲刷；幽灵/死连接立即过期并广播 removePeer）。admin.js 在线数字可点开成员子行，逐个移出。
 
 **现状**：管理后台「频道」列表只有每频道在线人数（`server.js` 约 508 行 `onlineOf`），看不到**谁**在哪个频道，也不能从后台直接移出成员。
 
@@ -127,7 +131,9 @@
 
 **涉及**：`app/src/server.js`、`public/js/pages/admin.js`、`public/css/admin.css`、词典。
 
-### 9. TURN 临时凭证（HMAC / REST API）
+### 9. TURN 临时凭证（HMAC / REST API）✅ 2026-10-25 已完成
+
+**实现**：新增 TURN_SERVER_SECRET / TURN_CREDENTIAL_TTL_SEC 配置（默认 12h）；设置 secret 后服务端为每个进程铸造 coturn REST 凭证（username=unix 过期时间，password=base64(hmac-sha1(secret,username))），半衰期自动重铸，随 addPeer 下发；静态账号模式完全兼容保留。配置说明见 .env.template 与 docs/coturn.md。
 
 **现状**：TURN 使用静态账号密码（`.env.template` 的 `TURN_SERVER_USERNAME/CREDENTIAL`），凭据长期有效，泄露即被白嫖中转流量。
 
@@ -137,7 +143,9 @@
 
 **涉及**：`app/src/config.js`、`app/src/server.js`（签发接口）、`public/js/pages/channel.js`/`webrtc.js`（iceServers 获取）。
 
-### 10. 一键备份 / 聊天记录导出
+### 10. 一键备份 / 聊天记录导出 ✅ 2026-10-25 已完成
+
+**实现**：GET /api/admin/backup（admin JWT）下发 tar.gz（channels.json + chat_history/*.json，tar 由 app/src/backup.js 零依赖实现）；GET /api/host/:id/export（host JWT，与 join 同样的主持人资格复核）导出 Markdown。前端：admin 工具栏「下载备份」；频道页主持人可见「导出聊天」。tests/test-backup.js 验证 tar 结构 + 系统 tar 读取。
 
 **现状**：换服务器/重建容器需手工拷贝 `channels.json` 与 `chat_history/`（README 明确提醒挂载卷），无导出功能；频道聊天记录无法导出留存。
 
@@ -147,7 +155,9 @@
 
 **涉及**：`app/src/server.js`、`public/js/pages/admin.js`、词典。
 
-### 11. 每频道聊天保留时长
+### 11. 每频道聊天保留时长 ✅ 2026-10-25 已完成
+
+**实现**：channelStore 频道字段 chatRetentionHours（0..2160，空/null=继承全局；validateDefinition 校验、sanitize 透出、admin 编辑器留空继承）；chatStore.retentionMs(id) 按频道解析（append/history/prune/sweep 全链路传入频道 id）；服务端构造 chatStore 时以 channelStore.get(id)?.chatRetentionHours ?? 全局设置 作为解析器。测试覆盖创建/清除/非法值/重载存活。
 
 **现状**：保留时长是全局服务器设置（`settings.chatRetentionHours`），无法按频道差异化管理。
 
@@ -161,7 +171,9 @@
 
 ## 四、工程质量
 
-### 12. 信令层集成测试
+### 12. 信令层集成测试 ✅ 2026-10-25 已完成
+
+**实现**：tests/test-server.js（18 用例）——真实 server + socket.io-client：join/addPeer 握手、relaySDP 门控、聊天历史落盘与回放（含 reply）、chatPage 分页、幽灵宽限（异常断线不广播 / 同 uuid resume / 过期移除）、主动离开、uuid/密码/人数上限/临时房间、admin 成员名单与在线/幽灵踢出、备份魔数、host 导出鉴权。宽限常量经 GHOST_GRACE_MS 环境变量注入；套件自动备份/还原 channels.json 与 chat_history。**过程中发现并修复真 bug：chat 事件处理器用 socket.id 索引 peers（应按会话 uuid），导致文字聊天历史从未落盘。**
 
 **现状**：现有测试（channelStore/chatStore/validate/xss/version）全部不覆盖 `server.js` 的信令协议——join→addPeer、幽灵宽限、同 uuid resume、主动断开立即广播、中转升级仲裁等逻辑零测试；而最近的提交全部集中在这个热区，回归风险最高。
 
@@ -177,7 +189,9 @@
 
 **涉及**：`tests/test-server.js`（新）、`app/src/server.js`（可能需要把宽限时常量提为可注入）。
 
-### 13. `channel.js` 模块拆分
+### 13. `channel.js` 模块拆分 ✅ 2026-10-25 部分完成
+
+**实现**：新建 public/js/pages/channel/ 子目录，wake lock（createWakeLock，含 visibilitychange 自管理）与 #debug 检查钩子（installDebugHooks + 活快照 getter）各成独立 ES Module；channel.js 从 3140 行降至约 2970 行。信令恢复/成员 UI/音频管线仍在主文件——继续拆分随功能开发逐步推进。
 
 **现状**：`public/js/pages/channel.js` 已达约 2700 行，信令恢复、UI 渲染、音频管线、聊天逻辑、调试钩子全部在一个文件里，每次加功能都在加剧。
 

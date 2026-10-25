@@ -57,4 +57,38 @@ export const api = {
         request(`/api/admin/channels/${encodeURIComponent(id)}`, { method: 'PUT', body, admin: true }),
     adminDeleteChannel: (id) =>
         request(`/api/admin/channels/${encodeURIComponent(id)}`, { method: 'DELETE', admin: true }),
+    adminKick: (channel, uuid) =>
+        request('/api/admin/kick', { method: 'POST', body: { channel, uuid }, admin: true }),
+
+    /** Download the server backup (channels.json + chat history) as tar.gz. */
+    adminBackup() {
+        return fetch('/api/admin/backup', { headers: { Authorization: `Bearer ${getAdminToken()}` } }).then(
+            async (res) => {
+                if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
+                const url = URL.createObjectURL(await res.blob());
+                const link = document.createElement('a');
+                const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1];
+                link.href = url;
+                link.download = name || 'voice-channels-backup.tar.gz';
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+            }
+        );
+    },
+
+    /** Download the channel chat history as Markdown (host token required). */
+    hostExport(channelId, hostToken) {
+        return fetch(`/api/host/${encodeURIComponent(channelId)}/export`, {
+            headers: { Authorization: `Bearer ${hostToken}` },
+        }).then(async (res) => {
+            if (res.status === 404) throw new ApiError('not found', 404);
+            if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
+            const url = URL.createObjectURL(await res.blob());
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `chat-${channelId}.md`;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+        });
+    },
 };

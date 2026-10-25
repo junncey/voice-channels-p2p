@@ -146,6 +146,70 @@
     white-space: nowrap;
 }
 
+/* online count doubles as the member-list expander */
+.admin-table .count-toggle {
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-3);
+    font-weight: 500;
+    cursor: default;
+}
+
+.admin-table .count-toggle.has-members {
+    color: var(--accent);
+    font-weight: 700;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+}
+
+/* expandable member sub-row (admin kick list) */
+.admin-table .members-row td {
+    background: var(--bg-2, rgba(128, 128, 128, 0.08));
+    padding: 8px 12px 12px;
+}
+
+/* Lives INSIDE the td: a flex td would stop being a table-cell and the
+   colspan would collapse into a narrow strip under the first column. */
+.members-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.members-empty {
+    color: var(--text-3);
+    font-size: 12.5px;
+}
+
+.member-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+    border-radius: 8px;
+    font-size: 12.5px;
+}
+
+.member-pill.ghost {
+    opacity: 0.6;
+}
+
+.member-pill-name {
+    font-weight: 600;
+}
+
+.member-pill .badge.ghost-badge {
+    background: var(--warn-dim, rgba(200, 150, 0, 0.15));
+    color: var(--warn, #b8860b);
+}
+
 .admin-table .actions-cell {
     white-space: nowrap;
     display: flex;

@@ -520,6 +520,87 @@ body.has-update-bar .outage-banner {
     display: flex;
     gap: 10px;
     max-width: 88%;
+    position: relative;
+}
+
+/* reply affordance: quiet button on the row's outer edge, hover only */
+.msg-reply-btn {
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    color: var(--text-3);
+    cursor: pointer;
+    opacity: 0;
+    font-size: 15px;
+    line-height: 1;
+    align-self: center;
+    transition: opacity var(--speed) var(--ease);
+}
+
+.msg:hover .msg-reply-btn {
+    opacity: 0.8;
+}
+
+.msg-reply-btn:hover {
+    opacity: 1;
+    color: var(--accent);
+}
+
+/* quoted row at the top of a reply bubble — click jumps to the original */
+.msg-quote {
+    border-left: 3px solid var(--accent);
+    background: rgba(127, 127, 127, 0.12);
+    border-radius: 4px;
+    padding: 3px 8px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    max-width: 320px;
+    overflow: hidden;
+    cursor: pointer;
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+}
+
+.msg-quote-name {
+    font-weight: 700;
+    color: var(--accent);
+    flex: 0 0 auto;
+}
+
+.msg-quote-text {
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* target row briefly flashes when a quote click locates it */
+.msg.flash .msg-bubble {
+    animation: msg-flash 1.2s var(--ease);
+}
+
+@keyframes msg-flash {
+    0%,
+    60% {
+        background: var(--accent-dim);
+    }
+    100% {
+        background: var(--bg-2);
+    }
+}
+
+/* @mention highlight inside message text */
+.mention {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.mention.self {
+    background: var(--accent-dim);
+    border-radius: 4px;
+    padding: 0 3px;
 }
 
 .msg.self {
@@ -1328,4 +1409,106 @@ html[data-theme='light'] .switch:checked::after {
 
 html[data-theme='light'] .chat-attachment-remove:hover {
     color: #fff;
+}
+
+/* ---------- reply composer bar + @mention autocomplete menu ---------- */
+
+.composer-wrap {
+    position: relative;
+}
+
+/* active reply context pinned above the input (QQ style) */
+.reply-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    margin-bottom: 6px;
+    border-left: 3px solid var(--accent);
+    background: rgba(127, 127, 127, 0.12);
+    border-radius: 4px;
+    font-size: 12.5px;
+    min-width: 0;
+}
+
+.reply-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.reply-label {
+    color: var(--accent);
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.reply-text {
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.reply-cancel {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-3);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    flex: 0 0 auto;
+}
+
+.reply-cancel:hover {
+    color: var(--danger);
+}
+
+/* member autocomplete, anchored above the composer */
+.mention-menu {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    min-width: 180px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: 4px;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+}
+
+.mention-item {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-1);
+    text-align: left;
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.mention-item.active {
+    background: var(--accent-dim);
+    color: var(--accent);
+}
+
+.mention-at {
+    color: var(--accent);
+    font-weight: 700;
 }

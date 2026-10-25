@@ -566,4 +566,38 @@ describe('test-channelStore', () => {
             }
         }
     });
+
+    describe('9. Per-channel chat retention override', () => {
+        let store;
+        beforeEach(() => {
+            store = newStore('retention');
+        });
+        it('should accept and expose a per-channel retention override', () => {
+            const { channel } = store.create({ id: 'keep-long', name: 'A', chatRetentionHours: 720 });
+            channel.chatRetentionHours.should.equal(720);
+            store.sanitize(store.get('keep-long')).chatRetentionHours.should.equal(720);
+        });
+
+        it('should inherit the global setting when absent or cleared', () => {
+            const { channel } = store.create({ id: 'inherit', name: 'B' });
+            should(channel.chatRetentionHours).be.null();
+            store.update('inherit', { chatRetentionHours: 0 });
+            store.sanitize(store.get('inherit')).chatRetentionHours.should.equal(0);
+            store.update('inherit', { chatRetentionHours: null });
+            should(store.sanitize(store.get('inherit')).chatRetentionHours).be.null();
+        });
+
+        it('should reject out-of-range or non-integer overrides', () => {
+            store.create({ id: 'badret', name: 'C', chatRetentionHours: 9999 }).ok.should.be.false();
+            store.create({ id: 'badret2', name: 'D', chatRetentionHours: 1.5 }).ok.should.be.false();
+            store.create({ id: 'badret3', name: 'E', chatRetentionHours: 'abc' }).ok.should.be.false();
+        });
+
+        it('should survive a registry reload', () => {
+            store.create({ id: 'persist', name: 'F', chatRetentionHours: 48 });
+            const reloaded = new ChannelStore({ filePath: store.filePath, autoInit: false });
+            reloaded.sanitize(reloaded.get('persist')).chatRetentionHours.should.equal(48);
+        });
+    });
+
 });

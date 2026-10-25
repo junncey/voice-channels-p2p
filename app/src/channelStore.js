@@ -46,6 +46,8 @@ const MAX_PARTICIPANTS = 16; // mesh topology: keep small on purpose
 const NAME_MAX = 64;
 const DESCRIPTION_MAX = 200;
 const PASSWORD_MAX = 64;
+// per-channel chat retention override ceiling (hours) — same cap as the global setting
+const RETENTION_MAX = 2160;
 
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1 };
@@ -250,6 +252,22 @@ function validateDefinition(input, { partial = false } = {}) {
             errors.push('password must not be blank');
         } else {
             value.password = input.password;
+        }
+    }
+
+    // Per-channel chat retention override (hours). ''/null = inherit the
+    // global setting; 0 = keep nothing for this channel; otherwise an integer.
+    if (input.chatRetentionHours !== undefined) {
+        const raw = input.chatRetentionHours;
+        if (raw === null || raw === '') {
+            value.chatRetentionHours = null;
+        } else {
+            const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+            if (!Number.isInteger(n) || n < 0 || n > RETENTION_MAX) {
+                errors.push(`chatRetentionHours must be an integer between 0 and ${RETENTION_MAX} (or empty to inherit)`);
+            } else {
+                value.chatRetentionHours = n;
+            }
         }
     }
 
@@ -554,6 +572,7 @@ class ChannelStore {
             hosts: Array.isArray(channel.hosts) ? channel.hosts.map((h) => h.username) : [],
             hasPassword: Boolean(channel.passwordHash),
             temporary: channel.temporary === true,
+            chatRetentionHours: channel.chatRetentionHours ?? null,
             createdAt: channel.createdAt,
             updatedAt: channel.updatedAt,
         };
@@ -598,6 +617,9 @@ class ChannelStore {
             updatedAt: now,
         };
         if (value.password) channel.passwordHash = hashPassword(value.password);
+        if (value.chatRetentionHours !== null && value.chatRetentionHours !== undefined) {
+            channel.chatRetentionHours = value.chatRetentionHours;
+        }
         this.channels.push(channel);
         this.save();
         log.info('Channel created', { id: channel.id, name: channel.name, hosts: channel.hosts.length });
@@ -615,6 +637,8 @@ class ChannelStore {
         if (value.description !== undefined) channel.description = value.description;
         if (value.public !== undefined) channel.public = value.public;
         if (value.maxParticipants !== undefined) channel.maxParticipants = value.maxParticipants;
+        if (value.chatRetentionHours === null) delete channel.chatRetentionHours;
+        else if (value.chatRetentionHours !== undefined) channel.chatRetentionHours = value.chatRetentionHours;
 
         if (value.hosts !== undefined) {
             channel.hosts = value.hosts.map((h) => {

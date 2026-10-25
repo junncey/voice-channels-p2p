@@ -31,6 +31,7 @@ const MAX_IMAGES = 9; // same cap as the client batch protocol
 const MAX_IMAGE_CHARS = 1600 * 1024;
 const NAME_MAX = 24;
 const TEXT_MAX = 500;
+const REPLY_TEXT_MAX = 80; // quote snippet shown inside the reply bubble
 // Disk budget per channel, images included; rows drop from the oldest end
 // until a file fits (images dominate — text rows are a few hundred bytes).
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
@@ -50,7 +51,8 @@ class ChatStore {
      * @param {object}   [options]
      * @param {string}   [options.dir]             history directory
      * @param {function|number} [options.retentionHours] live retention window in
-     *     hours — a function so admin setting changes apply at once; 0 = keep nothing
+     *     hours — a function of the channelId (per-channel override → global
+     *     fallback) so admin setting changes apply at once; 0 = keep nothing
      * @param {number}   [options.maxBytes]        per-channel file budget (tests)
      * @param {number}   [options.sweepMs]         background prune interval (0 = off, for tests)
      */
@@ -78,9 +80,9 @@ class ChatStore {
         return path.join(this.dir, `${id}.json`);
     }
 
-    /** Retention window in ms (0 = the feature is switched off). */
-    retentionMs() {
-        const hours = Number(this.retentionHours());
+    /** Retention window in ms for a channel (0 = the feature is switched off). */
+    retentionMs(id) {
+        const hours = Number(this.retentionHours(id));
         return Number.isFinite(hours) && hours > 0 ? hours * 60 * 60 * 1000 : 0;
     }
 
@@ -116,12 +118,13 @@ class ChatStore {
     /**
      * Store one chat message. `imgs` is an array of validated data:image/*
      * URLs (server-side sanitized before this point; re-validated here).
+     * `reply` is an optional quote of the answered row ({name, text, ts}).
      * Returns the stored message or null (feature off, invalid id/payload).
      * `ts` override exists for tests.
      */
-    append(id, { name, text, imgs = [] }, { persistent = true, ts = Date.now() } = {}) {
+    append(id, { name, text, imgs = [], reply = null }, { persistent = true, ts = Date.now() } = {}) {
         if (!ID_PATTERN.test(id)) return null;
-        if (this.retentionMs() <= 0) return null;
+        if (this.retentionMs(id) <= 0) return null;
 
         // trim + cap exactly like the client composer (input.trim().slice(500))
         // so a stored message never differs from what was rendered live
@@ -133,8 +136,10 @@ class ChatStore {
         const entry = this.entry(id, { persistent });
         const message = { ts, name: cleanName, text: cleanText };
         if (images.length) message.imgs = images; // omitted for text-only rows: keeps files compact
+        const cleanReply = sanitizeReply(reply);
+        if (cleanReply) message.reply = cleanReply;
         entry.messages.push(message);
-        this.prune(entry.messages);
+        this.prune(entry.messages, Date.now(), id);
         while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
         if (persistent) this.save(id, entry);
         return message;
@@ -152,9 +157,9 @@ class ChatStore {
      * gone for good and don't count). Empty when disabled/unknown.
      */
     history(id, { persistent = true, before = 0, limit = CHAT_PAGE_SIZE, maxBytes = MAX_SEND_BYTES } = {}) {
-        if (!ID_PATTERN.test(id) || this.retentionMs() <= 0) return { messages: [], hasMore: false };
+        if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return { messages: [], hasMore: false };
         const entry = this.entry(id, { persistent });
-        this.prune(entry.messages);
+        this.prune(entry.messages, Date.now(), id);
 
         const messages = entry.messages;
         let end = messages.length;
@@ -185,9 +190,10 @@ class ChatStore {
         return { messages: messages.slice(first, end), hasMore: first > 0 };
     }
 
-    /** Drop rows older than the retention window, in place. */
-    prune(messages, now = Date.now()) {
-        const retention = this.retentionMs();
+    /** Drop rows older than the channel's retention window, in place. */
+    prune(messages, now = Date.now(), id = null) {
+        // id-less callers (legacy) fall back to the resolver without an argument
+        const retention = this.retentionMs(id);
         if (retention <= 0) {
             messages.length = 0;
             return;
@@ -196,6 +202,17 @@ class ChatStore {
         let drop = 0;
         while (drop < messages.length && messages[drop].ts <= cutoff) drop++;
         if (drop > 0) messages.splice(0, drop);
+    }
+
+    /**
+     * Full kept history of a channel, oldest first, unpaged (host export).
+     * Prunes first, so expired rows never land in an export.
+     */
+    exportAll(id) {
+        if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return [];
+        const entry = this.entry(id, { persistent: true });
+        this.prune(entry.messages, Date.now(), id);
+        return entry.messages.map((m) => ({ ...m }));
     }
 
     /** Atomic write (tmp + rename; content copy for single-file bind mounts). */
@@ -250,22 +267,27 @@ class ChatStore {
      * history.
      */
     sweep(now = Date.now()) {
-        if (this.retentionMs() <= 0) {
-            for (const id of [...this.channels.keys()]) this.removeChannel(id);
-            for (const id of this.listFiles()) this.removeChannel(id);
-            return;
-        }
         for (const [id, entry] of [...this.channels]) {
+            if (this.retentionMs(id) <= 0) {
+                // this channel's own override switches it off — drop it entirely
+                if (entry.persistent) this.removeChannel(id);
+                else this.channels.delete(id);
+                continue;
+            }
             const before = entry.messages.length;
-            this.prune(entry.messages, now);
+            this.prune(entry.messages, now, id);
             if (entry.messages.length === before) continue;
             if (entry.persistent) this.save(id, entry);
             else if (!entry.messages.length) this.channels.delete(id);
         }
         for (const id of this.listFiles()) {
             if (this.channels.has(id)) continue;
+            if (this.retentionMs(id) <= 0) {
+                this.removeChannel(id); // per-channel override disabled it
+                continue;
+            }
             const messages = this.loadFile(id);
-            this.prune(messages, now);
+            this.prune(messages, now, id);
             this.save(id, { persistent: true, messages });
         }
     }
@@ -296,6 +318,7 @@ function isPlainMessage(m) {
         Number.isFinite(m.ts) &&
         typeof m.name === 'string' &&
         typeof m.text === 'string' &&
+        (m.reply === undefined || isPlainReply(m.reply)) &&
         (m.imgs === undefined ||
             // legacy rows (≤ voice.21) kept the image COUNT only — accepted on
             // load so an upgrade never drops earlier history; the client shows
@@ -303,6 +326,24 @@ function isPlainMessage(m) {
             Number.isInteger(m.imgs) ||
             (Array.isArray(m.imgs) && m.imgs.every((s) => typeof s === 'string')))
     );
+}
+
+/** Reply quote of an answered row — same caps as the live chat event. */
+function isPlainReply(reply) {
+    return (
+        reply &&
+        typeof reply === 'object' &&
+        !Array.isArray(reply) &&
+        typeof reply.name === 'string' &&
+        typeof reply.text === 'string' &&
+        Number.isFinite(reply.ts)
+    );
+}
+
+/** Normalize an incoming reply payload for storage; null = drop it. */
+function sanitizeReply(reply) {
+    if (!isPlainReply(reply)) return null;
+    return { name: reply.name.slice(0, NAME_MAX), text: reply.text.slice(0, REPLY_TEXT_MAX), ts: reply.ts };
 }
 
 /** Keep only whitelisted, size-capped data:image/* URLs, at most MAX_IMAGES. */

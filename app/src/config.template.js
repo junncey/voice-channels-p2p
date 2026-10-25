@@ -139,6 +139,13 @@ module.exports = {
             url: process.env.TURN_SERVER_URL,
             username: process.env.TURN_SERVER_USERNAME,
             credential: process.env.TURN_SERVER_CREDENTIAL,
+            // REST/HMAC mode (coturn use-auth-secret): when set, short-lived
+            // credentials are minted per process and the static username /
+            // credential above are ignored for TURN.
+            secret: process.env.TURN_SERVER_SECRET || '',
+            // minted credential lifetime (seconds) — coturn denies allocate
+            // requests past the username expiry; refresh happens at half-life
+            credentialTtlSec: Number(process.env.TURN_CREDENTIAL_TTL_SEC) || 12 * 3600,
         },
     },
 

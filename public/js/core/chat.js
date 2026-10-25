@@ -14,6 +14,11 @@ const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 // mirrors the server-side persisted-image cap — reject anything bigger on render
 const MAX_IMAGE_CHARS = 1600 * 1024;
 
+/** Escape a member name for the mention RegExp. */
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * @param {HTMLElement} container scrollable message list
  * @param {object} [options]
@@ -25,6 +30,9 @@ const MAX_IMAGE_CHARS = 1600 * 1024;
  * @param {string}  [options.failText] note when every image of a batch failed
  * @param {string}  [options.historyLoadingText] scroll-up pagination loading line
  * @param {string}  [options.historyEndText] scroll-up pagination end-of-history line
+ * @param {function(): string[]} [options.mentionNames] live member names for @highlighting
+ * @param {function(): string} [options.selfName] the local user's display name
+ * @param {function(object): void} [options.onReply] ({name, text, ts}) — the row's reply button was clicked
  */
 export function initChat(
     container,
@@ -37,6 +45,9 @@ export function initChat(
         failText = '',
         historyLoadingText = '',
         historyEndText = '',
+        mentionNames = () => [],
+        selfName = () => '',
+        onReply = null,
     } = {}
 ) {
     let emptyNode = null;
@@ -80,8 +91,9 @@ export function initChat(
      * @param {boolean} [msg.self]
      * @param {boolean} [msg.system]
      * @param {Date} [msg.time]
+     * @param {object} [msg.reply] {name, text, ts} quote of the answered row
      */
-    function add({ name, text, self = false, system = false, time = new Date() }) {
+    function add({ name, text, self = false, system = false, time = new Date(), reply = null }) {
         if (!text) return;
         const stick = nearBottom();
         maybeTimeChip(new Date(time), stick);
@@ -90,7 +102,10 @@ export function initChat(
             append(el('div', { class: 'msg system' }, el('div', { class: 'msg-system-text', text })), stick);
             return;
         }
-        append(buildMessage({ name, self, bubble: textBubble(text), ts: time.getTime() }), stick);
+        append(
+            buildMessage({ name, self, bubble: textBubble(text), ts: time.getTime(), reply, text }),
+            stick
+        );
     }
 
     /**
@@ -130,19 +145,42 @@ export function initChat(
                 const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(images.length, 6))}` });
                 for (const src of images) imagesEl.append(imageNode(src, imageAlt));
                 const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
-                if (text) bubble.append(el('div', { class: 'msg-text', text }));
-                append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts: time.getTime() }), stick);
+                if (text) bubble.append(el('div', { class: 'msg-text' }, ...mentionSegments(text)));
+                append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts: time.getTime(), reply: validReply(msg.reply), text }), stick);
             } else {
-                add({ name: msg.name, text, self: !!msg.self, time });
+                add({ name: msg.name, text, self: !!msg.self, time, reply: validReply(msg.reply) });
             }
             shown++;
         }
         if (shown && dividerText) add({ text: dividerText, system: true });
     }
 
-    /** Plain-text bubble. */
+    /** Plain-text bubble with @mention highlighting. */
     function textBubble(text) {
-        return el('div', { class: 'msg-bubble' }, el('div', { class: 'msg-text', text }));
+        return el('div', { class: 'msg-bubble' }, el('div', { class: 'msg-text' }, ...mentionSegments(text)));
+    }
+
+    /**
+     * Split a text into nodes, highlighting `@name` occurrences of live
+     * members (own name gets a stronger style). Plain text nodes only —
+     * no HTML is ever interpolated.
+     */
+    function mentionSegments(text) {
+        const names = [...new Set(mentionNames().filter(Boolean))];
+        const me = selfName();
+        if (!names.length || !text.includes('@')) return [text];
+        const pattern = new RegExp(`(@(?:${names.map(escapeRegExp).join('|')}))(?![\\p{L}\\p{N}_])`, 'gu');
+        const out = [];
+        let last = 0;
+        for (const match of text.matchAll(pattern)) {
+            const at = match.index;
+            if (at > last) out.push(text.slice(last, at));
+            const name = match[1].slice(1);
+            out.push(el('span', { class: 'mention' + (name === me ? ' self' : ''), text: match[1] }));
+            last = at + match[1].length;
+        }
+        if (last < text.length) out.push(text.slice(last));
+        return out.length ? out : [text];
     }
 
     /** Persisted image URLs, re-validated before touching the DOM. */
@@ -150,6 +188,20 @@ export function initChat(
         return (Array.isArray(imgs) ? imgs : [])
             .filter((src) => typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src))
             .slice(0, 9);
+    }
+
+    /** Reply quote from a message payload, shape-checked before rendering. */
+    function validReply(reply) {
+        if (
+            !reply ||
+            typeof reply !== 'object' ||
+            typeof reply.name !== 'string' ||
+            typeof reply.text !== 'string' ||
+            !Number.isFinite(reply.ts)
+        ) {
+            return null;
+        }
+        return { name: reply.name.slice(0, 24), text: reply.text.slice(0, 80), ts: reply.ts };
     }
 
     function timeChipNode(time) {
@@ -188,11 +240,11 @@ export function initChat(
                 const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(images.length, 6))}` });
                 for (const src of images) imagesEl.append(imageNode(src, imageAlt));
                 bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
-                if (text) bubble.append(el('div', { class: 'msg-text', text }));
+                if (text) bubble.append(el('div', { class: 'msg-text' }, ...mentionSegments(text)));
             } else {
                 bubble = textBubble(text);
             }
-            frag.append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts }));
+            frag.append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts, reply: validReply(msg.reply), text }));
             prevTs = ts;
             shown++;
         }
@@ -265,7 +317,7 @@ export function initChat(
      * @param {boolean} [msg.self]
      * @param {Date}    [msg.time]
      */
-    function openBatch({ batch, name, text = '', count = 1, self = false, time = new Date() }) {
+    function openBatch({ batch, name, text = '', count = 1, self = false, time = new Date(), reply = null }) {
         if (!batch) return;
         const when = new Date(time);
         const stick = nearBottom();
@@ -274,9 +326,9 @@ export function initChat(
         const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(count, 6))}` });
         const progressEl = el('div', { class: 'msg-img-progress', text: imagesProgress(0, count) });
         const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
-        if (text) bubble.append(el('div', { class: 'msg-text', text }));
+        if (text) bubble.append(el('div', { class: 'msg-text' }, ...mentionSegments(text)));
         bubble.append(progressEl);
-        append(buildMessage({ name, self, bubble, ts: when.getTime() }), stick);
+        append(buildMessage({ name, self, bubble, ts: when.getTime(), reply: validReply(reply), text }), stick);
 
         batches.set(batch, { row: container.lastChild, imagesEl, progressEl, bubble, expected: count, done: 0, failed: 0 });
     }
@@ -339,17 +391,55 @@ export function initChat(
      *  DOM order is [avatar, body] for BOTH sides — .msg.self's
      *  flex-direction: row-reverse flips it so the avatar lands on the
      *  right edge with the bubble to its left. `ts` tags the row so the
-     *  scroll-up pagination can stitch time chips to the existing top. */
-    function buildMessage({ name, self, bubble, ts }) {
+     *  scroll-up pagination can stitch time chips to the existing top.
+     *  A reply quote (when present) rides at the top of the bubble, and a
+     *  hover reply button exposes the row to the onReply callback. */
+    function buildMessage({ name, self, bubble, ts, reply = null, text = '' }) {
         const row = el('div', {
             class: 'msg' + (self ? ' self' : ''),
             dataset: { name: name || '?', ...(ts ? { ts: String(ts) } : {}) },
         });
+        if (reply) bubble.prepend(quoteNode(reply));
         const body = el('div', { class: 'msg-body' });
         if (!self && name) body.append(el('div', { class: 'msg-name', text: name }));
         body.append(bubble);
         row.append(avatarNode(name), body);
+        if (onReply) {
+            const btn = el('button', {
+                class: 'msg-reply-btn',
+                type: 'button',
+                'aria-label': 'reply',
+                onclick: (event) => {
+                    event.stopPropagation();
+                    onReply({ name: name || '?', text, ts: ts || 0 });
+                },
+            });
+            row.append(btn);
+        }
         return row;
+    }
+
+    /** Quoted row inside a reply bubble — click scrolls to the original. */
+    function quoteNode(reply) {
+        const node = el(
+            'div',
+            { class: 'msg-quote' },
+            el('span', { class: 'msg-quote-name', text: reply.name || '?' }),
+            el('span', { class: 'msg-quote-text', text: reply.text || '' })
+        );
+        if (reply.ts) {
+            node.addEventListener('click', () => {
+                const target = [...container.children].find(
+                    (child) =>
+                        child.classList?.contains('msg') && child.dataset?.ts === String(reply.ts) && child.dataset?.name === reply.name
+                );
+                if (!target) return;
+                target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                target.classList.add('flash');
+                setTimeout(() => target.classList.remove('flash'), 1200);
+            });
+        }
+        return node;
     }
 
     function avatarNode(name) {

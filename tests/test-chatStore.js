@@ -321,4 +321,63 @@ describe('test-chatStore', () => {
             zeroStore.destroy();
         });
     });
+
+    describe('5. reply quotes + per-channel retention + exportAll', () => {
+        it('should persist the reply quote with the row and cap its size', () => {
+            store = newStore('reply');
+            const row = store.append('room1', {
+                name: 'alice',
+                text: 'answer',
+                reply: { name: 'bob', text: 'x'.repeat(300), ts: 123 },
+            });
+            row.reply.name.should.equal('bob');
+            row.reply.text.length.should.equal(80);
+            row.reply.ts.should.equal(123);
+            // invalid shapes are dropped, the message stays
+            const bad = store.append('room1', { name: 'alice', text: 'no reply', reply: { name: 'x' } });
+            should(bad.reply).be.undefined();
+        });
+
+        it('should honor a per-channel retention override from the resolver', () => {
+            const hours = { roomA: 0, roomB: 1000 };
+            store = newStore('per-channel', { retentionHours: (id) => hours[id] ?? 24 });
+            // override 0 = keep nothing for roomA
+            should(store.append('roomA', { name: 'a', text: 'gone' })).be.null();
+            // roomB keeps rows
+            const row = store.append('roomB', { name: 'b', text: 'kept' });
+            row.text.should.equal('kept');
+            // default applies elsewhere
+            store.append('roomC', { name: 'c', text: 'also kept' }).text.should.equal('also kept');
+        });
+
+        it('should keep a channel override alive even when the global window is off', () => {
+            // global 0 = keep nothing, but a channel may explicitly opt in —
+            // sweep() must not wipe it on the global rule alone
+            const hours = { keep: 48 };
+            store = newStore('global-off', { retentionHours: (id) => hours[id] ?? 0 });
+            store.append('keep', { name: 'a', text: 'kept' });
+            store.append('plain', { name: 'a', text: 'dropped' });
+            should(store.history('plain').messages).be.empty();
+            store.sweep();
+            store.history('keep').messages.should.have.length(1);
+        });
+
+        it('should prune per-channel inside sweep and exportAll', () => {
+            const hours = { fast: 1, slow: 1000 };
+            store = newStore('sweep-id', { retentionHours: (id) => hours[id] ?? 24 });
+            const old = Date.now() - 5 * 60 * 60 * 1000; // 5h ago
+            store.append('fast', { name: 'a', text: 'old' }, { ts: old });
+            store.append('slow', { name: 'a', text: 'old' }, { ts: old });
+            store.sweep();
+            store.history('fast').messages.should.be.empty();
+            store.history('slow').messages.should.have.length(1);
+            // exportAll mirrors the pruned view
+            store.append('slow', { name: 'a', text: 'new' });
+            store.exportAll('slow').map((m) => m.text).should.eql(['old', 'new']);
+            // exported rows are copies — mutating them cannot corrupt the store
+            store.exportAll('slow')[0].text = 'hacked';
+            store.exportAll('slow')[0].text.should.equal('old');
+        });
+    });
+
 });
