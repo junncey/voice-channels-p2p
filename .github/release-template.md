@@ -90,9 +90,11 @@ services:
       - ./.env:/src/.env:ro
       - ./app/src/channels.json:/src/app/src/channels.json
       - ./app/src/chat_history:/src/app/src/chat_history
+      - ./app/src/audit.jsonl:/src/app/src/audit.jsonl
+      - ./app/src/backups:/src/app/src/backups
 ```
 
-必须挂载 `channels.json` 与 `chat_history/`，否则容器重建后频道注册表与聊天历史会丢失；完整模板（含 Traefik 反代示例）见 [`docker-compose.template.yml`](https://github.com/junncey/voice-channels-p2p/blob/main/docker-compose.template.yml)。
+必须挂载 `channels.json` 与 `chat_history/`，否则容器重建后频道注册表与聊天历史会丢失。`audit.jsonl`（审计日志）与 `backups/`（定时备份）自 v1.3.0 起可选挂载：审计文件需先在宿主 `touch app/src/audit.jsonl` 并归 `1000:1000`，否则容器内不可写。完整模板（含 Traefik 反代示例）见 [`docker-compose.template.yml`](https://github.com/junncey/voice-channels-p2p/blob/main/docker-compose.template.yml)。
 
 启动后访问 `/admin`，用 `.env` 中的 `CHANNEL_ADMIN_PASSWORD` 登录并创建频道（`CHANNEL_ADMIN_JWT_SECRET` 未设置时后台整体禁用）。
 
