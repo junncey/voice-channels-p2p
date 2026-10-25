@@ -5,11 +5,15 @@
  *
  * Chat itself travels peer-to-peer over WebRTC DataChannels; the sender's
  * page additionally relays every message (text + compressed image data URLs)
- * here so late joiners can catch up. Messages are kept per channel in
- * app/src/chat_history/<id>.json (atomic write on every append — voice-channel
- * traffic is human-scale) and pruned to the admin-configured retention window
- * (channels.json settings: chatRetentionHours, 0 = keep nothing). Temporary
- * rooms keep history in memory only; it vanishes together with the room.
+ * here so late joiners can catch up. Messages are kept per channel as
+ * append-only JSONL in app/src/chat_history/<id>.jsonl — one appendSync per
+ * message instead of a full-file rewrite (a channel may hold up to 12MB of
+ * image history) — and pruned to the admin-configured retention window
+ * (channels.json settings: chatRetentionHours, 0 = keep nothing). Full
+ * rewrites only happen on retention/cap drops, edits/recalls/reactions and
+ * background compaction. Legacy <id>.json files (single JSON array) are
+ * migrated to JSONL on first load. Temporary rooms keep history in memory
+ * only; it vanishes together with the room.
  */
 
 const fs = require('fs');
@@ -32,9 +36,17 @@ const MAX_IMAGE_CHARS = 1600 * 1024;
 const NAME_MAX = 24;
 const TEXT_MAX = 500;
 const REPLY_TEXT_MAX = 80; // quote snippet shown inside the reply bubble
+// reaction caps: distinct emoji per message, reactor names per emoji, and the
+// emoji string itself (some emoji carry several code points + modifiers)
+const REACTIONS_MAX_EMOJI = 8;
+const REACTIONS_MAX_NAMES = 50;
+const REACTION_EMOJI_MAX = 16;
 // Disk budget per channel, images included; rows drop from the oldest end
 // until a file fits (images dominate — text rows are a few hundred bytes).
+// Append-mode stops at 90% of the budget so compaction runs before it is
+// actually needed.
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
+const COMPACT_AT_RATIO = 0.9;
 // Catch-up pagination: one page sent per request — on join and per
 // scroll-up fetch. The byte budget keeps a single emit under the socket.io
 // packet cap (images dominate — the newest row is always included, older
@@ -56,11 +68,16 @@ class ChatStore {
      * @param {number}   [options.maxBytes]        per-channel file budget (tests)
      * @param {number}   [options.sweepMs]         background prune interval (0 = off, for tests)
      */
-    constructor({ dir = path.join(__dirname, 'chat_history'), retentionHours = 24, maxBytes = MAX_FILE_BYTES, sweepMs = SWEEP_INTERVAL_MS } = {}) {
+    constructor({
+        dir = path.join(__dirname, 'chat_history'),
+        retentionHours = 24,
+        maxBytes = MAX_FILE_BYTES,
+        sweepMs = SWEEP_INTERVAL_MS,
+    } = {}) {
         this.dir = dir;
         this.maxBytes = maxBytes > 0 ? maxBytes : MAX_FILE_BYTES;
         this.retentionHours = typeof retentionHours === 'function' ? retentionHours : () => retentionHours;
-        /** channelId -> { persistent, messages: [{ts,name,text,imgs}] } */
+        /** channelId -> { persistent, messages: [{ts,name,text,...}], fileSize } */
         this.channels = new Map();
         this.sweepTimer = null;
         if (sweepMs > 0) {
@@ -76,8 +93,26 @@ class ChatStore {
         fs.mkdirSync(this.dir, { recursive: true });
     }
 
+    /** Canonical (JSONL) history file of a channel. */
     fileFor(id) {
+        return path.join(this.dir, `${id}.jsonl`);
+    }
+
+    /** Pre-JSONL history file of a channel (migrated away on first load). */
+    legacyFileFor(id) {
         return path.join(this.dir, `${id}.json`);
+    }
+
+    /**
+     * The file that actually holds this channel's history on disk right now
+     * (JSONL after migration, legacy JSON before it). Used by the backup
+     * download so the archive always reflects the real on-disk layout.
+     */
+    existingFileFor(id) {
+        const jsonl = this.fileFor(id);
+        if (fs.existsSync(jsonl)) return jsonl;
+        const legacy = this.legacyFileFor(id);
+        return fs.existsSync(legacy) ? legacy : jsonl;
     }
 
     /** Retention window in ms for a channel (0 = the feature is switched off). */
@@ -90,7 +125,14 @@ class ChatStore {
     entry(id, { persistent = true } = {}) {
         let entry = this.channels.get(id);
         if (!entry) {
-            entry = { persistent, messages: persistent ? this.loadFile(id) : [] };
+            entry = { persistent, messages: persistent ? this.loadFile(id) : [], fileSize: null };
+            if (persistent && entry.messages) {
+                try {
+                    entry.fileSize = fs.existsSync(this.fileFor(id)) ? fs.statSync(this.fileFor(id)).size : 0;
+                } catch {
+                    entry.fileSize = 0;
+                }
+            }
             this.channels.set(id, entry);
         }
         return entry;
@@ -99,20 +141,69 @@ class ChatStore {
     loadFile(id) {
         const file = this.fileFor(id);
         try {
-            if (!fs.existsSync(file)) return [];
-            const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-            return Array.isArray(raw?.messages) ? raw.messages.filter(isPlainMessage) : [];
+            if (fs.existsSync(file)) return this.loadJsonlFile(file);
+        } catch (err) {
+            log.error('Chat history file unreadable', { file, error: err.message });
+            return [];
+        }
+        // no JSONL yet — migrate a legacy <id>.json on first touch
+        const legacy = this.legacyFileFor(id);
+        try {
+            if (!fs.existsSync(legacy)) return [];
+            const raw = JSON.parse(fs.readFileSync(legacy, 'utf8'));
+            const messages = Array.isArray(raw?.messages) ? raw.messages.filter(isPlainMessage) : [];
+            // an empty legacy history has nothing worth materializing as JSONL
+            if (messages.length) this.writeFile(id, messages);
+            fs.unlinkSync(legacy);
+            log.info('Chat history migrated to JSONL', { channel: id, messages: messages.length });
+            return messages;
         } catch (err) {
             // a broken history file must never take the server down — quarantine
             // it (same pattern as the channel registry) and start empty
             try {
-                fs.renameSync(file, `${file}.corrupt`);
+                fs.renameSync(legacy, `${legacy}.corrupt`);
             } catch {
                 /* nothing more we can do */
             }
-            log.error('Chat history file unreadable, quarantined', { file, error: err.message });
+            log.error('Chat history file unreadable, quarantined', { file: legacy, error: err.message });
             return [];
         }
+    }
+
+    /**
+     * Parse a JSONL history file line by line. A torn trailing line (crash
+     * mid-append) is normal for append-only logs and is skipped silently;
+     * lines that still fail to parse are skipped with a warn. A file where
+     * EVERY line is garbage yields an empty history.
+     */
+    loadJsonlFile(file) {
+        const raw = fs.readFileSync(file, 'utf8');
+        if (!raw.trim()) return [];
+        const lines = raw.split('\n');
+        const messages = [];
+        let bad = 0;
+        for (const line of lines) {
+            if (!line) continue;
+            try {
+                const msg = JSON.parse(line);
+                if (isPlainMessage(msg)) messages.push(msg);
+                else bad++;
+            } catch {
+                bad++;
+            }
+        }
+        if (bad && !messages.length) {
+            // completely garbled (not just a torn tail) — quarantine for inspection
+            try {
+                fs.renameSync(file, `${file}.corrupt`);
+            } catch {
+                /* keep going with what we parsed */
+            }
+            log.warn('Chat history file fully unparsable, quarantined', { file, bad_lines: bad });
+            return [];
+        }
+        if (bad) log.warn('Chat history file had unparsable lines', { file, bad_lines: bad, kept: messages.length });
+        return messages;
     }
 
     /**
@@ -139,10 +230,117 @@ class ChatStore {
         const cleanReply = sanitizeReply(reply);
         if (cleanReply) message.reply = cleanReply;
         entry.messages.push(message);
+        const before = entry.messages.length;
         this.prune(entry.messages, Date.now(), id);
         while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
-        if (persistent) this.save(id, entry);
+        const dropped = entry.messages.length !== before;
+        if (persistent) {
+            // O(1) path: nothing left the window/cap and the file is comfortably
+            // inside its budget → append exactly one JSONL line
+            if (
+                !dropped &&
+                entry.fileSize !== null &&
+                entry.fileSize > 0 &&
+                entry.fileSize < this.maxBytes * COMPACT_AT_RATIO
+            ) {
+                this.appendLine(id, entry, message);
+            } else {
+                this.save(id, entry);
+            }
+        }
         return message;
+    }
+
+    /** One-line append; a failure falls back to a full rewrite. */
+    appendLine(id, entry, message) {
+        const line = Buffer.from(JSON.stringify(message) + '\n', 'utf8');
+        try {
+            fs.appendFileSync(this.fileFor(id), line);
+            entry.fileSize = (entry.fileSize || 0) + line.length;
+        } catch (err) {
+            log.warn('Chat history append failed, rewriting', { channel: id, error: err.message });
+            this.save(id, entry);
+        }
+    }
+
+    /**
+     * Edit one of the caller's own messages (matched by ts + sender name —
+     * names are the only identity this system has). Tombstones cannot be
+     * edited. Returns the updated message or null.
+     */
+    edit(id, { ts, name, text }, { persistent = true } = {}) {
+        const row = this.findRow(id, ts, name, { persistent });
+        if (!row || row.deleted) return null;
+        const cleanText = typeof text === 'string' ? text.trim().slice(0, TEXT_MAX) : '';
+        if (!cleanText) return null;
+        row.text = cleanText;
+        row.edited = true;
+        this.persistIf(id, persistent);
+        return row;
+    }
+
+    /**
+     * Recall (soft-delete) a message: the row stays as a tombstone so paging
+     * cursors and reply quotes keep resolving, but the text/images are gone.
+     */
+    remove(id, { ts, name }, { persistent = true } = {}) {
+        const row = this.findRow(id, ts, name, { persistent });
+        if (!row || row.deleted) return null;
+        row.deleted = true;
+        row.text = '';
+        delete row.imgs;
+        delete row.reactions;
+        this.persistIf(id, persistent);
+        return row;
+    }
+
+    /**
+     * Toggle one reactor on one emoji of a message. `who` is the server-side
+     * joined name of the acting member. Returns the updated message or null.
+     */
+    react(id, { ts, name, emoji, who, op }, { persistent = true } = {}) {
+        const row = this.findRow(id, ts, name, { persistent });
+        if (!row || row.deleted) return null;
+        const cleanEmoji = typeof emoji === 'string' ? emoji.trim().slice(0, REACTION_EMOJI_MAX) : '';
+        const whoName = typeof who === 'string' ? who.slice(0, NAME_MAX) : '';
+        if (!cleanEmoji || !whoName) return null;
+
+        const reactions = { ...(row.reactions || {}) };
+        const names = reactions[cleanEmoji] || [];
+        const idx = names.indexOf(whoName);
+        if (op === 'remove') {
+            if (idx !== -1) names.splice(idx, 1);
+        } else if (idx === -1) {
+            // add (idempotent): a repeated add from a racing client is a no-op
+            if (Object.keys(reactions).length >= REACTIONS_MAX_EMOJI && !reactions[cleanEmoji]) return row;
+            if (names.length >= REACTIONS_MAX_NAMES) return row;
+            names.push(whoName);
+        }
+        if (names.length) reactions[cleanEmoji] = names;
+        else delete reactions[cleanEmoji];
+        if (Object.keys(reactions).length) row.reactions = reactions;
+        else delete row.reactions;
+        this.persistIf(id, persistent);
+        return row;
+    }
+
+    /** Find a row by ts + sender name; null when absent (or channel unknown). */
+    findRow(id, ts, name, { persistent = true } = {}) {
+        if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return null;
+        if (!Number.isFinite(ts) || ts <= 0 || typeof name !== 'string' || !name) return null;
+        const entry = this.entry(id, { persistent });
+        for (let i = entry.messages.length - 1; i >= 0; i--) {
+            const row = entry.messages[i];
+            if (row.ts === ts && row.name === name) return row;
+        }
+        return null;
+    }
+
+    /** Full rewrite after an in-place row mutation (edits are rare). */
+    persistIf(id, persistent) {
+        if (!persistent) return;
+        const entry = this.entry(id);
+        this.save(id, entry);
     }
 
     /**
@@ -215,49 +413,72 @@ class ChatStore {
         return entry.messages.map((m) => ({ ...m }));
     }
 
-    /** Atomic write (tmp + rename; content copy for single-file bind mounts). */
+    /**
+     * Atomic full rewrite (tmp + rename; content copy for single-file bind
+     * mounts). Also the compaction point: rows drop from the oldest end
+     * until the serialized file fits its disk budget.
+     */
     save(id, entry) {
         try {
             if (!entry.messages.length) {
-                try {
-                    fs.unlinkSync(this.fileFor(id));
-                } catch {
-                    /* already gone */
+                for (const file of [this.fileFor(id), this.legacyFileFor(id)]) {
+                    try {
+                        fs.unlinkSync(file);
+                    } catch {
+                        /* already gone */
+                    }
                 }
+                entry.fileSize = 0;
                 return;
             }
-            // shrink from the oldest end until the file fits its disk budget
-            let data = JSON.stringify({ version: 1, messages: entry.messages });
-            while (data.length > this.maxBytes && entry.messages.length > 1) {
+            // shrink from the oldest end until the file fits its disk budget.
+            // Byte length, not String#length: CJK text is 3 bytes per code unit
+            // in UTF-8, and the budget is a disk budget.
+            let lines = serializeLines(entry.messages);
+            let bytes = Buffer.byteLength(lines, 'utf8');
+            while (bytes > this.maxBytes && entry.messages.length > 1) {
                 entry.messages.shift();
-                data = JSON.stringify({ version: 1, messages: entry.messages });
+                lines = serializeLines(entry.messages);
+                bytes = Buffer.byteLength(lines, 'utf8');
             }
-            const file = this.fileFor(id);
-            const tmp = `${file}.tmp`;
-            fs.writeFileSync(tmp, data, 'utf8');
-            try {
-                fs.renameSync(tmp, file);
-            } catch (err) {
-                // Docker bind-mounts channels.json-style single files: rename()
-                // cannot replace a mount point, copy the payload over instead
-                if (!['EBUSY', 'EXDEV', 'EPERM'].includes(err.code)) throw err;
-                fs.copyFileSync(tmp, file);
-                fs.unlinkSync(tmp);
-            }
+            this.writeFile(id, entry.messages, lines);
+            entry.fileSize = bytes;
         } catch (err) {
             log.error('Chat history save failed', { channel: id, error: err.message });
         }
     }
 
-    /** Forget a channel entirely (room destroyed / admin delete). */
+    writeFile(id, messages, lines = serializeLines(messages)) {
+        const file = this.fileFor(id);
+        const tmp = `${file}.tmp`;
+        fs.writeFileSync(tmp, lines, 'utf8');
+        try {
+            fs.renameSync(tmp, file);
+        } catch (err) {
+            // Docker bind-mounts channels.json-style single files: rename()
+            // cannot replace a mount point, copy the payload over instead
+            if (!['EBUSY', 'EXDEV', 'EPERM'].includes(err.code)) throw err;
+            fs.copyFileSync(tmp, file);
+            fs.unlinkSync(tmp);
+        }
+    }
+
+    /** Forget a channel entirely (room destroyed / admin delete / restore). */
     removeChannel(id) {
         if (typeof id !== 'string' || !id) return;
         this.channels.delete(id);
-        try {
-            fs.unlinkSync(this.fileFor(id));
-        } catch (err) {
-            if (err.code !== 'ENOENT') log.warn('Chat history removal failed', { channel: id, error: err.message });
+        for (const file of [this.fileFor(id), this.legacyFileFor(id)]) {
+            try {
+                fs.unlinkSync(file);
+            } catch (err) {
+                if (err.code !== 'ENOENT') log.warn('Chat history removal failed', { channel: id, error: err.message });
+            }
         }
+    }
+
+    /** Drop every in-memory cache entry so the next read re-loads from disk. */
+    reload() {
+        this.channels.clear();
     }
 
     /**
@@ -276,6 +497,7 @@ class ChatStore {
             }
             const before = entry.messages.length;
             this.prune(entry.messages, now, id);
+            while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
             if (entry.messages.length === before) continue;
             if (entry.persistent) this.save(id, entry);
             else if (!entry.messages.length) this.channels.delete(id);
@@ -286,19 +508,28 @@ class ChatStore {
                 this.removeChannel(id); // per-channel override disabled it
                 continue;
             }
+            // loadFile() may itself migrate a legacy .json to .jsonl — the
+            // existence check runs after it so a fresh migration is not
+            // immediately rewritten again
             const messages = this.loadFile(id);
+            const before = messages.length;
             this.prune(messages, now, id);
-            this.save(id, { persistent: true, messages });
+            if (messages.length !== before || !fs.existsSync(this.fileFor(id))) {
+                this.save(id, { persistent: true, messages });
+            }
         }
     }
 
+    /** Channel ids that have a history file on disk (JSONL or legacy JSON). */
     listFiles() {
         try {
-            return fs
-                .readdirSync(this.dir)
-                .filter((name) => name.endsWith('.json'))
-                .map((name) => name.slice(0, -'.json'.length))
-                .filter((id) => ID_PATTERN.test(id));
+            const ids = new Set();
+            for (const name of fs.readdirSync(this.dir)) {
+                for (const ext of ['.jsonl', '.json']) {
+                    if (name.endsWith(ext)) ids.add(name.slice(0, -ext.length));
+                }
+            }
+            return [...ids].filter((id) => ID_PATTERN.test(id));
         } catch {
             return [];
         }
@@ -310,6 +541,10 @@ class ChatStore {
     }
 }
 
+function serializeLines(messages) {
+    return messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
+}
+
 function isPlainMessage(m) {
     return (
         m &&
@@ -319,6 +554,9 @@ function isPlainMessage(m) {
         typeof m.name === 'string' &&
         typeof m.text === 'string' &&
         (m.reply === undefined || isPlainReply(m.reply)) &&
+        (m.edited === undefined || typeof m.edited === 'boolean') &&
+        (m.deleted === undefined || typeof m.deleted === 'boolean') &&
+        (m.reactions === undefined || isPlainReactions(m.reactions)) &&
         (m.imgs === undefined ||
             // legacy rows (≤ voice.21) kept the image COUNT only — accepted on
             // load so an upgrade never drops earlier history; the client shows
@@ -338,6 +576,15 @@ function isPlainReply(reply) {
         typeof reply.text === 'string' &&
         Number.isFinite(reply.ts)
     );
+}
+
+/** Reactions map: emoji -> array of reactor names (plain strings only). */
+function isPlainReactions(reactions) {
+    if (!reactions || typeof reactions !== 'object' || Array.isArray(reactions)) return false;
+    for (const names of Object.values(reactions)) {
+        if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) return false;
+    }
+    return true;
 }
 
 /** Normalize an incoming reply payload for storage; null = drop it. */

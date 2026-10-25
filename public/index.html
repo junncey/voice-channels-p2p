@@ -5,6 +5,10 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>语音频道</title>
         <link rel="icon" href="/images/favicon.svg" type="image/svg+xml" />
+        <link rel="manifest" href="/manifest.webmanifest" />
+        <link rel="apple-touch-icon" href="/images/icon-192.png" />
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d1117" />
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#e8ecf2" />
         <script src="/js/core/theme-boot.js"></script>
         <link rel="stylesheet" href="/css/tokens.css" />
         <link rel="stylesheet" href="/css/base.css" />
@@ -15,7 +19,16 @@
             <header class="topbar">
                 <a class="brand" href="/">
                     <span class="brand-mark">
-                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <svg
+                            viewBox="0 0 24 24"
+                            width="20"
+                            height="20"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
                             <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
                             <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
                             <line x1="12" y1="19" x2="12" y2="22" />
@@ -24,29 +37,62 @@
                     <span data-i18n="app.brand">语音频道</span>
                 </a>
                 <nav class="topbar-nav">
+                    <div class="lang-switch" id="langSwitch">
+                        <button type="button" class="lang-opt" data-lang="zh">中</button>
+                        <button type="button" class="lang-opt" data-lang="en">EN</button>
+                    </div>
                     <button id="themeBtn" class="theme-toggle" type="button">
                         <span class="theme-icon" aria-hidden="true"></span>
                         <span class="theme-label"></span>
                     </button>
-                    <button id="clearDataBtn" class="topbar-link topbar-clear" data-i18n="index.clearData">清除用户信息</button>
+                    <button id="clearDataBtn" class="topbar-link topbar-clear" data-i18n="index.clearData">
+                        清除用户信息
+                    </button>
                 </nav>
             </header>
 
             <main class="hero">
                 <h1 data-i18n="app.tagline">点开链接，加入语音与文字聊天</h1>
                 <p data-i18n="app.heroSub">无需安装 · 无需注册 · 端到端直连</p>
-                <button id="createTempBtn" class="btn primary hero-action" data-i18n="index.createTemp">创建临时房间</button>
+                <button id="createTempBtn" class="btn primary hero-action" data-i18n="index.createTemp">
+                    创建临时房间
+                </button>
             </main>
 
             <section class="channels-section">
                 <div class="channels-head">
                     <h2 data-i18n="index.title">频道</h2>
+                    <input
+                        id="channelSearch"
+                        class="input channel-search"
+                        data-i18n-ph="index.searchPlaceholder"
+                        maxlength="40"
+                        autocomplete="off"
+                    />
                     <span id="statusHint" class="channels-status"></span>
                 </div>
+                <div id="recentRow" class="channel-row-group hidden">
+                    <h3 data-i18n="index.recent">最近访问</h3>
+                    <div id="recentGrid" class="channel-grid"></div>
+                </div>
+                <div id="favRow" class="channel-row-group hidden">
+                    <h3 data-i18n="index.favorites">收藏</h3>
+                    <div id="favGrid" class="channel-grid"></div>
+                </div>
+                <h3 id="allHeading" class="channel-row-heading hidden" data-i18n="index.allChannels">全部频道</h3>
                 <div id="channelGrid" class="channel-grid"></div>
                 <div id="emptyState" class="empty-state hidden">
                     <div class="empty-icon">
-                        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                        <svg
+                            viewBox="0 0 24 24"
+                            width="34"
+                            height="34"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
                             <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
                             <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
                             <line x1="12" y1="19" x2="12" y2="22" />
@@ -70,7 +116,9 @@
                     </button>
                     <button id="clearAllBtn" class="btn danger">
                         <span data-i18n="index.clearAll">清除用户名与全部配置</span>
-                        <span class="hint" data-i18n="index.clearAllHint">包含音频设备选择、开关与对其他成员的音量调节</span>
+                        <span class="hint" data-i18n="index.clearAllHint"
+                            >包含音频设备选择、开关与对其他成员的音量调节</span
+                        >
                     </button>
                     <button id="clearCancelBtn" class="btn" data-i18n="admin.cancel">取消</button>
                 </div>

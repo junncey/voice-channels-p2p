@@ -28,6 +28,10 @@ const path = require('path');
 const crypto = require('crypto');
 const { io } = require('socket.io-client');
 
+// the audit trail must not touch the repo's real file either (env must be
+// pinned before server.js loads, hence its position after the requires)
+process.env.VC_AUDIT_FILE = path.join(os.tmpdir(), `vc-audit-test-${process.pid}.jsonl`);
+
 const SRC = path.join(__dirname, '..', 'app', 'src');
 const CHANNELS_FILE = path.join(SRC, 'channels.json');
 const CHAT_DIR = path.join(SRC, 'chat_history');
@@ -37,6 +41,13 @@ const GHOST_MS = Number(process.env.GHOST_GRACE_MS);
 const backupDir = path.join(os.tmpdir(), `vc-server-test-${Date.now()}`);
 const hadChannelsFile = fs.existsSync(CHANNELS_FILE);
 const hadChatDir = fs.existsSync(CHAT_DIR);
+// registry sidecar files that already exist belong to the USER — the after()
+// hook may only delete the ones this suite itself produced (the old cleanup
+// wiped a pre-existing channels.json.bak whenever the main file was absent)
+const REGISTRY_SIDEcars = ['.bak', '.corrupt', '.tmp'];
+const preexistingSidecars = new Set(
+    REGISTRY_SIDEcars.filter((suffix) => fs.existsSync(CHANNELS_FILE + suffix)).map((suffix) => CHANNELS_FILE + suffix)
+);
 
 // backup before the server auto-creates them
 fs.mkdirSync(backupDir, { recursive: true });
@@ -94,7 +105,13 @@ async function adminApi(method, urlPath, body) {
 
 /** Fresh unique room id per test so ghost-expiry broadcasts never cross-talk. */
 function freshRoom(prefix) {
-    return prefix + crypto.randomUUID().slice(0, 8).replace(/[^a-zA-Z0-9]/g, '');
+    return (
+        prefix +
+        crypto
+            .randomUUID()
+            .slice(0, 8)
+            .replace(/[^a-zA-Z0-9]/g, '')
+    );
 }
 
 describe('test-server (signaling integration)', function () {
@@ -127,8 +144,11 @@ describe('test-server (signaling integration)', function () {
     after(() => {
         // hand the data files back exactly as they were
         if (hadChannelsFile) fs.copyFileSync(path.join(backupDir, 'channels.json'), CHANNELS_FILE);
-        else for (const suffix of ['', '.bak', '.corrupt', '.tmp']) {
-            if (fs.existsSync(CHANNELS_FILE + suffix)) fs.unlinkSync(CHANNELS_FILE + suffix);
+        else if (fs.existsSync(CHANNELS_FILE)) fs.unlinkSync(CHANNELS_FILE);
+        // sidecars: delete only what the TEST created, never a user's files
+        for (const suffix of REGISTRY_SIDEcars) {
+            const file = CHANNELS_FILE + suffix;
+            if (!preexistingSidecars.has(file) && fs.existsSync(file)) fs.unlinkSync(file);
         }
         if (hadChatDir) {
             fs.rmSync(CHAT_DIR, { recursive: true, force: true });
@@ -222,6 +242,24 @@ describe('test-server (signaling integration)', function () {
             const row = history.messages.find((m) => m.text === 'hello history');
             if (!row) throw new Error('history must contain the stored message');
             row.name.should.equal('carol');
+        });
+
+        it('should ack the sender with the authoritative ts of the stored row', async () => {
+            const ua = crypto.randomUUID();
+            const a = track(connect());
+            a.emit('join', joinPayload('troom', ua, 'frank'));
+            await once(a, 'serverInfo');
+            const ack = once(a, 'chatAck');
+            a.emit('chat', { room_id: 'troom', msg: 'ack me' });
+            const { ts } = await ack;
+            Number.isFinite(ts).should.be.true();
+            ts.should.be.above(0);
+
+            // that ts is exactly what edit/recall/reaction look up later
+            const done = once(a, 'chatEdit');
+            a.emit('chatEdit', { room_id: 'troom', ts, name: 'frank', msg: 'ack me (edited)' });
+            const edited = await done;
+            edited.text.should.equal('ack me (edited)');
         });
 
         it('should persist the reply quote with the row', async () => {

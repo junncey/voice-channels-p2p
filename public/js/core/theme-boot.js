@@ -1,13 +1,36 @@
 /* Applied synchronously in <head> (CSP forbids inline scripts) so the
  * correct palette is on <html> before the first paint — no dark flash
- * when a light-theme user loads a page. Dark is the default. */
+ * when a light-theme user loads a page. Preference values: 'dark' (default),
+ * 'light', 'auto' (= follow the OS, live). */
 (function () {
-    var theme = 'dark';
+    var pref = 'dark';
     try {
         var stored = localStorage.getItem('vc_theme');
-        if (stored === 'light') theme = 'light';
+        if (stored === 'light' || stored === 'dark' || stored === 'auto') pref = stored;
     } catch (e) {
         /* private mode etc. — stay on the default */
     }
-    document.documentElement.dataset.theme = theme;
+    function resolve() {
+        if (pref !== 'auto') return pref;
+        try {
+            return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        } catch (e) {
+            return 'dark';
+        }
+    }
+    function apply() {
+        document.documentElement.dataset.theme = resolve();
+        document.documentElement.dataset.themePref = pref;
+    }
+    apply();
+    try {
+        var mq = window.matchMedia('(prefers-color-scheme: light)');
+        var onChange = function () {
+            if (pref === 'auto') apply();
+        };
+        if (mq.addEventListener) mq.addEventListener('change', onChange);
+        else if (mq.addListener) mq.addListener(onChange);
+    } catch (e) {
+        /* no live switching on this engine — the next reload re-resolves */
+    }
 })();

@@ -66,6 +66,41 @@ function bindUi() {
         }
     });
 
+    $('#statsBtn').addEventListener('click', openStats);
+    $('#statsCloseBtn').addEventListener('click', () => $('#statsModal').classList.add('hidden'));
+    $('#auditBtn').addEventListener('click', () => openAudit());
+    $('#auditRefreshBtn').addEventListener('click', () => openAudit());
+    $('#auditCloseBtn').addEventListener('click', () => $('#auditModal').classList.add('hidden'));
+
+    // restore: pick a tar.gz → confirm → upload (whole-state replace)
+    let pendingRestoreFile = null;
+    $('#restoreBtn').addEventListener('click', () => $('#restoreFileInput').click());
+    $('#restoreFileInput').addEventListener('change', (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = ''; // allow re-picking the same file
+        if (!file) return;
+        pendingRestoreFile = file;
+        $('#restoreModal').classList.remove('hidden');
+    });
+    $('#restoreCancel').addEventListener('click', () => {
+        pendingRestoreFile = null;
+        $('#restoreModal').classList.add('hidden');
+    });
+    $('#restoreOk').addEventListener('click', async () => {
+        const file = pendingRestoreFile;
+        pendingRestoreFile = null;
+        $('#restoreModal').classList.add('hidden');
+        if (!file) return;
+        toast(t('admin.restoring'));
+        try {
+            const res = await api.adminRestore(file);
+            toast(t('admin.restored', { channels: res.channels ?? 0, histories: res.histories ?? 0 }), 'ok');
+            load();
+        } catch (err) {
+            toast(err.message || t('common.error'), 'error');
+        }
+    });
+
     $('#confirmCancel').addEventListener('click', () => {
         pendingDelete = null;
         $('#confirmModal').classList.add('hidden');
@@ -252,14 +287,11 @@ function membersRow(channel) {
                     el('span', { class: 'member-pill-name', text: member.name || '?' }),
                     member.presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
                     member.ghost ? el('span', { class: 'badge ghost-badge', text: t('admin.memberGhost') }) : null,
-                    el(
-                        'button',
-                        {
-                            class: 'btn danger sm',
-                            text: t('admin.kick'),
-                            onclick: () => kickMember(channel.id, member),
-                        }
-                    )
+                    el('button', {
+                        class: 'btn danger sm',
+                        text: t('admin.kick'),
+                        onclick: () => kickMember(channel.id, member),
+                    })
                 )
             )
         );
@@ -277,6 +309,131 @@ async function kickMember(channelId, member) {
     } catch (err) {
         toast(err.message || t('common.error'), 'error');
     }
+}
+
+// ---------------------------------------------------------------------------
+// stats + audit panels
+// ---------------------------------------------------------------------------
+
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes)) return '—';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatUptime(sec) {
+    if (!Number.isFinite(sec)) return '—';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+async function openStats() {
+    const body = $('#statsBody');
+    body.textContent = '…';
+    $('#statsModal').classList.remove('hidden');
+    let stats;
+    try {
+        stats = await api.adminStats();
+    } catch (err) {
+        body.textContent = err.message || t('common.error');
+        return;
+    }
+    const cards = [
+        [t('admin.stats.channels'), String(stats.registeredChannels)],
+        [t('admin.stats.temps'), String(stats.tempRooms)],
+        [t('admin.stats.online'), String(stats.onlineTotal)],
+        [t('admin.stats.historyFiles'), String(stats.historyFiles)],
+        [t('admin.stats.historySize'), formatBytes(stats.historyBytes)],
+        [t('admin.stats.retention'), `${stats.retentionHours}h`],
+        [t('admin.stats.uptime'), formatUptime(stats.uptimeSec)],
+        [t('admin.stats.version'), `${stats.appVersion} / node ${stats.nodeVersion}`],
+    ];
+    body.replaceChildren(
+        el(
+            'div',
+            { class: 'stats-cards' },
+            ...cards.map(([label, value]) =>
+                el(
+                    'div',
+                    { class: 'stat-card' },
+                    el('span', { class: 'stat-label', text: label }),
+                    el('span', { class: 'stat-value', text: value })
+                )
+            )
+        ),
+        stats.activeChannels?.length
+            ? el(
+                  'table',
+                  { class: 'admin-table stats-table' },
+                  el(
+                      'thead',
+                      {},
+                      el(
+                          'tr',
+                          {},
+                          el('th', { text: t('admin.table.name') }),
+                          el('th', { text: t('admin.table.online') }),
+                          el('th', { text: t('admin.table.id') })
+                      )
+                  ),
+                  el(
+                      'tbody',
+                      {},
+                      ...stats.activeChannels.map((row) =>
+                          el(
+                              'tr',
+                              {},
+                              el('td', { text: `${row.name || row.id}${row.temporary ? ' *' : ''}` }),
+                              el('td', { text: String(row.online) }),
+                              el('td', { class: 'id-cell', text: row.id })
+                          )
+                      )
+                  )
+              )
+            : el('p', { class: 'members-empty', text: t('admin.stats.noActive') })
+    );
+}
+
+async function openAudit() {
+    const body = $('#auditBody');
+    body.textContent = '…';
+    $('#auditModal').classList.remove('hidden');
+    let events;
+    try {
+        ({ events } = await api.adminAudit(200));
+    } catch (err) {
+        body.textContent = err.message || t('common.error');
+        return;
+    }
+    if (!events.length) {
+        body.replaceChildren(el('p', { class: 'members-empty', text: t('admin.auditEmpty') }));
+        return;
+    }
+    body.replaceChildren(
+        ...events.map((event) =>
+            el(
+                'div',
+                { class: 'audit-row' },
+                el('span', {
+                    class: 'audit-time',
+                    text: String(event.t || '')
+                        .replace('T', ' ')
+                        .slice(0, 19),
+                }),
+                el('span', { class: `audit-event ${String(event.event || '').slice(0, 20)}`, text: event.event }),
+                el(
+                    'span',
+                    { class: 'audit-fields' },
+                    ...Object.entries(event)
+                        .filter(([key]) => !['t', 'event'].includes(key))
+                        .map(([key, value]) => `${key}=${value}`)
+                        .join(' ')
+                )
+            )
+        )
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -305,9 +462,8 @@ function openEditor(channel) {
     // explicit checkbox clears it (only offered when one is set)
     $('#fPassword').value = '';
     const hasPassword = !!channel?.hasPassword;
-    $('#pwHint').textContent = editingId && hasPassword
-        ? t('admin.field.passwordEditHint')
-        : t('admin.field.passwordCreateHint');
+    $('#pwHint').textContent =
+        editingId && hasPassword ? t('admin.field.passwordEditHint') : t('admin.field.passwordCreateHint');
     $('#fClearPwRow').classList.toggle('hidden', !(editingId && hasPassword));
     $('#fClearPw').checked = false;
 

@@ -91,7 +91,11 @@ describe('test-chatStore', () => {
         it('should serve history inside the catch-up byte budget', () => {
             store = newStore('budget-send');
             store.append('room1', { name: 'a', text: 'old text' });
-            store.append('room1', { name: 'a', text: 'big pics', imgs: [IMG('p1=', 400 * 1024), IMG('p2=', 400 * 1024)] });
+            store.append('room1', {
+                name: 'a',
+                text: 'big pics',
+                imgs: [IMG('p1=', 400 * 1024), IMG('p2=', 400 * 1024)],
+            });
             store.append('room1', { name: 'a', text: 'fresh text' });
 
             // default budget: everything fits
@@ -184,7 +188,10 @@ describe('test-chatStore', () => {
             const now = Date.now();
             store.append('room1', { name: 'a', text: 'old' }, { ts: now - 2 * 60 * 60 * 1000 });
             store.append('room1', { name: 'a', text: 'fresh' }, { ts: now });
-            store.history('room1').messages.map((m) => m.text).should.eql(['fresh']);
+            store
+                .history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['fresh']);
         });
 
         it('should keep nothing while retention is 0', () => {
@@ -317,7 +324,9 @@ describe('test-chatStore', () => {
 
             const zeroStore = new ChatStore({ dir, retentionHours: 0, sweepMs: 0 });
             zeroStore.sweep();
-            fs.readdirSync(dir).filter((f) => f.endsWith('.json')).should.be.empty();
+            fs.readdirSync(dir)
+                .filter((f) => f.endsWith('.json'))
+                .should.be.empty();
             zeroStore.destroy();
         });
     });
@@ -373,11 +382,175 @@ describe('test-chatStore', () => {
             store.history('slow').messages.should.have.length(1);
             // exportAll mirrors the pruned view
             store.append('slow', { name: 'a', text: 'new' });
-            store.exportAll('slow').map((m) => m.text).should.eql(['old', 'new']);
+            store
+                .exportAll('slow')
+                .map((m) => m.text)
+                .should.eql(['old', 'new']);
             // exported rows are copies — mutating them cannot corrupt the store
             store.exportAll('slow')[0].text = 'hacked';
             store.exportAll('slow')[0].text.should.equal('old');
         });
     });
 
+    describe('4. JSONL append-only storage', () => {
+        it('should store one line per message instead of rewriting the file', () => {
+            store = newStore('jsonl');
+            store.append('room1', { name: 'a', text: 'one' });
+            store.append('room1', { name: 'a', text: 'two' });
+            const file = path.join(store.dir, 'room1.jsonl');
+            fs.existsSync(file).should.be.true();
+            const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+            lines.should.have.length(2);
+            JSON.parse(lines[0]).text.should.equal('one');
+            JSON.parse(lines[1]).text.should.equal('two');
+        });
+
+        it('should migrate a legacy .json file to .jsonl on first load and drop the old file', () => {
+            const dir = tempDir('migrate');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'old.json'),
+                JSON.stringify({ version: 1, messages: [{ ts: Date.now(), name: 'a', text: 'kept' }] }),
+                'utf8'
+            );
+            const migrated = new ChatStore({ dir, sweepMs: 0 });
+            migrated
+                .history('old')
+                .messages.map((m) => m.text)
+                .should.eql(['kept']);
+            fs.existsSync(path.join(dir, 'old.jsonl')).should.be.true();
+            fs.existsSync(path.join(dir, 'old.json')).should.be.false();
+            migrated.destroy();
+        });
+
+        it('should enforce the disk budget in bytes, not UTF-16 code units (CJK)', () => {
+            // 3 bytes per CJK char in UTF-8 vs 1 in String#length: a budget
+            // measured in code units let a Chinese channel grow ~3x past it
+            const maxBytes = 4096;
+            store = newStore('cjk-budget', { maxBytes });
+            for (let i = 0; i < 200; i++) {
+                store.append('room1', { name: '张三', text: '汉字内容重复填充'.repeat(10) + i });
+            }
+            const file = path.join(store.dir, 'room1.jsonl');
+            const size = fs.statSync(file).size;
+            size.should.be.belowOrEqual(maxBytes);
+            // and the newest row must still be there
+            store.history('room1').messages.at(-1).text.should.endWith('199');
+        });
+
+        it('should survive a torn trailing line (crash mid-append)', () => {
+            const dir = tempDir('torn');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+                path.join(dir, 'room1.jsonl'),
+                JSON.stringify({ ts: Date.now(), name: 'a', text: 'ok' }) + '\n{"ts":1,"name":"a","text":"to',
+                'utf8'
+            );
+            const torn = new ChatStore({ dir, sweepMs: 0 });
+            torn.history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['ok']);
+            torn.destroy();
+        });
+
+        it('should quarantine a fully garbled JSONL file', () => {
+            const dir = tempDir('garbled');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'room1.jsonl'), '###\n???\n!!!', 'utf8');
+            const garbled = new ChatStore({ dir, sweepMs: 0 });
+            garbled.history('room1').messages.should.be.empty();
+            fs.existsSync(path.join(dir, 'room1.jsonl.corrupt')).should.be.true();
+            garbled.destroy();
+        });
+
+        it('should pick up disk state after reload()', () => {
+            store = newStore('reload-method');
+            store.append('room1', { name: 'a', text: 'on disk' });
+            store.channels.get('room1').messages.length = 0; // simulate stale memory
+            store.reload();
+            store
+                .history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['on disk']);
+        });
+    });
+
+    describe('6. edit / recall / reactions', () => {
+        it('should edit a row in place and flag it', () => {
+            const dir = tempDir('edit');
+            const ts = Date.now() - 1000;
+            const first = new ChatStore({ dir, sweepMs: 0 });
+            first.append('room1', { name: 'a', text: 'before' }, { ts });
+            first.destroy();
+
+            const second = new ChatStore({ dir, sweepMs: 0 });
+            const updated = second.edit('room1', { ts, name: 'a', text: '  after  ' });
+            updated.text.should.equal('after');
+            updated.edited.should.be.true();
+            second.destroy();
+
+            const third = new ChatStore({ dir, sweepMs: 0 });
+            third.history('room1').messages[0].text.should.equal('after');
+            third.history('room1').messages[0].edited.should.be.true();
+            third.destroy();
+        });
+
+        it('should refuse edits to other senders or missing rows', () => {
+            store = newStore('edit-guard');
+            const ts = Date.now() - 1000;
+            store.append('room1', { name: 'a', text: 'mine' }, { ts });
+            should.equal(store.edit('room1', { ts, name: 'b', text: 'x' }), null);
+            should.equal(store.edit('room1', { ts: ts - 5000, name: 'a', text: 'x' }), null);
+            should.equal(store.edit('room1', { ts, name: 'a', text: '   ' }), null);
+        });
+
+        it('should recall into a tombstone that keeps paging cursors stable', () => {
+            store = newStore('recall');
+            const oldTs = Date.now() - 1000;
+            const newTs = Date.now();
+            store.append('room1', { name: 'a', text: 'old' }, { ts: oldTs });
+            store.append('room1', { name: 'a', text: 'gone soon' }, { ts: newTs });
+            const tomb = store.remove('room1', { ts: newTs, name: 'a' });
+            tomb.deleted.should.be.true();
+            should.equal(tomb.text, '');
+            const messages = store.history('room1').messages;
+            messages.should.have.length(2); // the row stays as a tombstone
+            messages[1].deleted.should.be.true();
+            should.equal(messages[1].imgs, undefined);
+            // a tombstone cannot be edited or re-recalled
+            should.equal(store.edit('room1', { ts: newTs, name: 'a', text: 'zombie' }), null);
+            should.equal(store.remove('room1', { ts: newTs, name: 'a' }), null);
+        });
+
+        it('should toggle reactions per reactor and cap the shape', () => {
+            store = newStore('react');
+            const ts = Date.now() - 1000;
+            store.append('room1', { name: 'a', text: 'hello' }, { ts });
+            const add = store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
+            add.reactions.should.eql({ '👍': ['b'] });
+            // same reactor twice = no duplicate; a second reactor joins in
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'c' });
+            store.history('room1').messages[0].reactions.should.eql({ '👍': ['b', 'c'] });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b', op: 'remove' });
+            store.history('room1').messages[0].reactions.should.eql({ '👍': ['c'] });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'c', op: 'remove' });
+            should.equal(store.history('room1').messages[0].reactions, undefined);
+            // distinct-emoji cap (8): a 9th distinct emoji is refused
+            for (const emoji of ['😀', '😁', '😂', '🤣', '😅', '😆', '😉', '😊']) {
+                store.react('room1', { ts, name: 'a', emoji, who: 'b' });
+            }
+            const capped = store.react('room1', { ts, name: 'a', emoji: '😏', who: 'b' });
+            Object.keys(capped.reactions).should.have.length(8);
+        });
+
+        it('should work for in-memory temp rooms too', () => {
+            store = newStore('temp-lifecycle');
+            const ts = Date.now();
+            store.append('tmp1', { name: 'a', text: 'x' }, { persistent: false, ts });
+            store.edit('tmp1', { ts, name: 'a', text: 'y' }, { persistent: false }).text.should.equal('y');
+            store.remove('tmp1', { ts, name: 'a' }, { persistent: false }).deleted.should.be.true();
+            fs.readdirSync(store.dir).should.be.empty();
+        });
+    });
 });

@@ -11,12 +11,13 @@
 import { api } from '/js/core/api.js';
 import { Mesh } from '/js/core/webrtc.js';
 import { AudioHub, getTestBeepUrl } from '/js/core/audio.js';
-import { initChat } from '/js/core/chat.js';
+import { initChat, openEmojiPicker } from '/js/core/chat.js';
 import { fileToImageMessage, sendImageData, createImageReceiver } from '/js/core/images.js';
 import { createDropdown } from '/js/core/dropdown.js';
-import { initI18n, t } from '/js/core/i18n.js';
+import { initI18n, t, getLang, setLang } from '/js/core/i18n.js';
 import { initSoundSettings, playSound } from '/js/core/sound.js';
 import { initVersionCheck } from '/js/core/version.js';
+import { getThemePref, setThemePref } from '/js/core/theme.js';
 import { createWakeLock } from '/js/pages/channel/wakeLock.js';
 import { installDebugHooks } from '/js/pages/channel/debug.js';
 import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
@@ -105,7 +106,9 @@ let intentionalUnload = false;
 let textOnly = false;
 let micOn = false;
 let pttActive = false;
+let deafened = false; // self-deafen: silence every remote member locally
 let lastOnAir = false; // last peerStatus(audio) we broadcast
+let lastDeafenSent = null; // last peerStatus(deafen) we broadcast
 let isPresenter = false;
 let joinLockOn = false;
 let localStream = null;
@@ -315,12 +318,98 @@ function replyPayload() {
     return { name: replyTo.name, text: replyTo.text.slice(0, 80), ts: replyTo.ts };
 }
 
+// ----- edit composer (one's own already-sent text message) -----
+
+let editing = null; // {name, ts} of the row being edited
+
+function startEdit({ name, text, ts }) {
+    cancelReply();
+    editing = { name, ts };
+    const input = $('#chatInput');
+    input.value = text;
+    autoGrowChatInput();
+    $('#editBar').classList.remove('hidden');
+    $('#editPreview').replaceChildren(
+        el('span', { class: 'reply-label', text: t('chat.editing') }),
+        el('span', { class: 'reply-text', text: text.slice(0, 60) })
+    );
+    input.focus();
+}
+
+function cancelEdit() {
+    if (!editing) return;
+    editing = null;
+    $('#editBar').classList.add('hidden');
+    const input = $('#chatInput');
+    input.value = '';
+    autoGrowChatInput();
+    input.focus();
+}
+
+// ----- typing indicator (DataChannel broadcast, nothing touches the server) -----
+
+const TYPING_SEND_MS = 3000; // re-announce cadence while composing
+const TYPING_TIMEOUT_MS = 6000; // peer silence assumption
+let typingSentAt = 0;
+const typingPeers = new Map(); // display name -> expiry timer
+
+function maybeSendTyping() {
+    if (!joined || !mesh) return;
+    const now = Date.now();
+    if (now - typingSentAt < TYPING_SEND_MS) return;
+    typingSentAt = now;
+    mesh.sendChat({ type: 'typing', from: selfName });
+}
+
+function notePeerTyping(name) {
+    if (!name || name === selfName) return;
+    clearTimeout(typingPeers.get(name));
+    typingPeers.set(
+        name,
+        setTimeout(() => {
+            typingPeers.delete(name);
+            renderTyping();
+        }, TYPING_TIMEOUT_MS)
+    );
+    renderTyping();
+}
+
+function renderTyping() {
+    const bar = $('#typingBar');
+    const names = [...typingPeers.keys()];
+    if (!names.length) {
+        bar.classList.add('hidden');
+        return;
+    }
+    const label =
+        names.length === 1
+            ? t('chat.typing', { name: names[0] })
+            : names.length === 2
+              ? t('chat.typingTwo', { a: names[0], b: names[1] })
+              : t('chat.typingMany', { n: names.length });
+    $('#typingText').textContent = label;
+    bar.classList.remove('hidden');
+}
+
+function clearTyping() {
+    for (const timer of typingPeers.values()) clearTimeout(timer);
+    typingPeers.clear();
+    renderTyping();
+}
+
 // ----- @mention autocomplete (menu above the composer) -----
 
 let mention = null; // { items, index, at } — at = index of the '@' in the input
 
 function memberNamesForMention() {
-    return [...new Set([...members.values()].filter((m) => !m.self).map((m) => m.peer_name).filter(Boolean))];
+    return [
+        ...new Set(
+            [...members.values()]
+                .filter((m) => !m.self)
+                .map((m) => m.peer_name)
+                .filter(Boolean)
+        ),
+    ];
 }
 
 function updateMentionMenu() {
@@ -332,7 +421,9 @@ function updateMentionMenu() {
     if (!m) return closeMentionMenu();
     const at = caret - m[1].length - 1; // position of the '@'
     const frag = m[1].toLowerCase();
-    const items = memberNamesForMention().filter((name) => name.toLowerCase().startsWith(frag)).slice(0, 6);
+    const items = memberNamesForMention()
+        .filter((name) => name.toLowerCase().startsWith(frag))
+        .slice(0, 6);
     if (!items.length) return closeMentionMenu();
     mention = { items, index: 0, at };
 
@@ -410,6 +501,9 @@ async function boot() {
         emptyText: t('chat.empty'),
         downloadText: t('chat.saveImage'),
         yesterdayText: t('chat.yesterday'),
+        todayText: t('chat.today'),
+        deletedText: t('chat.deleted'),
+        editedText: t('chat.editedMark'),
         avatarFor: (name) => avatars.get(name) || '',
         imagesProgress: (got, total) => t('chat.imagesProgress', { got, total }),
         failText: t('chat.imageBroken'),
@@ -419,7 +513,19 @@ async function boot() {
         // and .mention.self is keyed off it (chat.js compares with selfName)
         mentionNames: () => [...members.values()].map((m) => m.peer_name),
         selfName: () => selfName,
+        isHost: () => isPresenter,
         onReply: startReply,
+        onEdit: startEdit,
+        onDelete: ({ name, ts }) => {
+            if (!socket || !joined) return;
+            socket.emit('chatDelete', { room_id: channelId, ts, name });
+        },
+        onReact: ({ name, ts, emoji, on }) => {
+            if (!socket || !joined) return;
+            socket.emit('chatReact', { room_id: channelId, ts, name, emoji, op: on ? 'add' : 'remove' });
+        },
+        jumpNewText: (n) => t('chat.jumpNew', { n }),
+        jumpText: t('chat.jumpBottom'),
     });
     bindHistoryPaging($('#chatMessages'));
     bindUi();
@@ -510,8 +616,12 @@ function bindUi() {
         } else attemptSignalingReconnect({ manual: true });
     });
     $('#micBtn').addEventListener('click', onMicBtnClick);
+    $('#deafenBtn').addEventListener('click', toggleDeafen);
+    bindPttHoldButton();
     $('#chatForm').addEventListener('submit', onChatSubmit);
     bindChatInput();
+    bindChatSearch();
+    bindAppearanceControls();
 
     bindImageUi();
     bindSettingsUi();
@@ -660,7 +770,7 @@ function parseHistoryRows(messages) {
         // legacy rows (≤ voice.21) kept only the image count — show it as a placeholder
         const legacyCount = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
         if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
-        if (!text && !imgs.length) continue;
+        if (!text && !imgs.length && msg.deleted !== true) continue;
         const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
         const reply =
             msg.reply && typeof msg.reply === 'object' && typeof msg.reply.name === 'string'
@@ -670,11 +780,17 @@ function parseHistoryRows(messages) {
                       ts: Number(msg.reply.ts) || 0,
                   }
                 : null;
+        const deleted = msg.deleted === true;
+        const reactions =
+            msg.reactions && typeof msg.reactions === 'object' && !Array.isArray(msg.reactions) ? msg.reactions : null;
         rows.push({
             name,
             text,
-            imgs,
+            imgs: deleted ? [] : imgs,
             reply,
+            deleted,
+            edited: msg.edited === true,
+            reactions,
             self: name === selfName,
             time: ts ? new Date(ts) : new Date(),
         });
@@ -741,6 +857,8 @@ function registerSocketHandlers() {
             updateHeaderActions();
             syncMembers(cfg.peers || {});
             chat.add({ text: t('chat.joined', { name: selfName }), system: true, self: true });
+            syncPttHoldButton();
+            applyDeafenState(); // reflects the (session-local) state on the fresh member card
             // password accepted — keep it for the next auto-join
             if (channelPassword) saveChannelPw(channelPassword);
             // tell everyone in the room which avatar we carry (peers list only
@@ -752,6 +870,12 @@ function registerSocketHandlers() {
             updateHeaderActions();
         }
         updateOnlineCount();
+    });
+
+    socket.on('chatAck', ({ ts } = {}) => {
+        // server-assigned timestamp for the row we rendered optimistically —
+        // without it edit/recall/reaction would look up a ts nobody else has
+        chat.bindServerTs(ts);
     });
 
     socket.on('chatHistory', (cfg) => {
@@ -808,12 +932,35 @@ function registerSocketHandlers() {
     socket.on('iceCandidate', (cfg) => mesh.handleIceCandidate(cfg));
     socket.on('sessionDescription', (cfg) => mesh.handleSessionDescription(cfg));
 
+    // message lifecycle — the server broadcasts the persisted result to
+    // everyone (sender included), so the DOM follows the store
+    socket.on('chatEdit', (cfg) => {
+        if (Number.isFinite(cfg?.ts))
+            chat.editMessage({ name: String(cfg.name || '').slice(0, 24), ts: cfg.ts, text: String(cfg.text || '') });
+    });
+    socket.on('chatDelete', (cfg) => {
+        if (Number.isFinite(cfg?.ts)) chat.deleteMessage({ name: String(cfg.name || '').slice(0, 24), ts: cfg.ts });
+    });
+    socket.on('chatReact', (cfg) => {
+        if (Number.isFinite(cfg?.ts))
+            chat.reactMessage({ name: String(cfg.name || '').slice(0, 24), ts: cfg.ts, reactions: cfg.reactions });
+    });
+
     socket.on('peerStatus', ({ peer_id, element, status }) => {
-        if (element !== 'audio') return;
-        const member = members.get(peer_id);
-        if (!member) return;
-        member.peer_audio_status = status === true;
-        updateMicIconNode(peer_id, status === true);
+        if (element === 'audio') {
+            const member = members.get(peer_id);
+            if (!member) return;
+            member.peer_audio_status = status === true;
+            updateMicIconNode(peer_id, status === true);
+            return;
+        }
+        if (element === 'deafen') {
+            const member = members.get(peer_id);
+            if (!member) return;
+            member.peer_deafen = status === true;
+            const node = $(`#memberList .member[data-id="${peer_id}"] .member-deafen`);
+            if (node) node.classList.toggle('on', status === true);
+        }
     });
 
     socket.on('peerName', ({ peer_id, peer_name: rawName, peer_name_old }) => {
@@ -980,14 +1127,22 @@ function meshHandlers() {
         onRemoteStream(peerId, stream) {
             attachRemoteAudio(peerId, stream);
             if (hub?.ctx) {
-                hub.watch(peerId, stream, ({ speaking }) => {
+                hub.watch(peerId, stream, ({ level, speaking }) => {
                     const node = $(`#memberList .member[data-id="${peerId}"]`);
-                    if (node) node.classList.toggle('speaking', speaking);
+                    if (!node) return;
+                    node.classList.toggle('speaking', speaking);
+                    // continuous ring: the avatar glow breathes with the level
+                    node.style.setProperty('--lvl', (Math.min(1, level * 2.2) || 0).toFixed(3));
                 });
             }
         },
         onChat(peerId, data) {
             if (!data || typeof data !== 'object') return;
+            if (data.type === 'typing') {
+                // the sender's identity is the DataChannel peer, not `from`
+                notePeerTyping(members.get(peerId)?.peer_name || String(data.from || '').slice(0, 24));
+                return;
+            }
             if (data.type === 'chat') {
                 const name = members.get(peerId)?.peer_name || String(data.from || '').slice(0, 24) || '?';
                 const batch = typeof data.batch === 'string' && data.batch.length <= 64 ? data.batch : '';
@@ -1375,8 +1530,15 @@ const UNSTABLE_GOOD_POLLS = 2; // clean polls before the badge clears
 const lossStreaks = new Map();
 
 function notePeerLoss(peerId, info) {
-    const rec =
-        lossStreaks.get(peerId) || { last: null, loss: null, jitter: null, kbps: null, bad: 0, good: 0, unstable: false };
+    const rec = lossStreaks.get(peerId) || {
+        last: null,
+        loss: null,
+        jitter: null,
+        kbps: null,
+        bad: 0,
+        good: 0,
+        unstable: false,
+    };
     const inbound = info?.inbound;
     if (inbound) {
         const prev = rec.last;
@@ -1588,6 +1750,7 @@ function syncMembers(peersMap) {
             peer_name: name,
             peer_presenter: !!info.peer_presenter,
             peer_audio_status: info.peer_audio_status === true,
+            peer_deafen: info.peer_deafen === true,
             joined_at: info.joined_at || existing?.joined_at || Date.now(),
             avatar,
             // remembered per-user volume; an in-session adjustment wins over the stored one
@@ -1613,6 +1776,7 @@ function ensureSelfMember() {
         peer_name: selfName,
         peer_presenter: isPresenter,
         peer_audio_status: onAir(),
+        peer_deafen: deafened,
         joined_at: 0, // self always first
         avatar: selfAvatar || undefined,
         self: true,
@@ -1675,6 +1839,18 @@ function micIconNode(on) {
     return el('span', {
         class: 'member-mic' + (on ? '' : ' off'),
         html: on ? MIC_ON_SVG : MIC_OFF_SVG,
+    });
+}
+
+const DEAFEN_SVG =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M21 14a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2h1"/><path d="M3 14a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2H5"/><line x1="2" y1="2" x2="22" y2="22"/></svg>';
+
+/** Headphones-off badge on a member card (visible while self-deafened). */
+function deafenIconNode(on) {
+    return el('span', {
+        class: 'member-deafen' + (on ? ' on' : ''),
+        title: t('channel.deafenBadge'),
+        html: DEAFEN_SVG,
     });
 }
 
@@ -1753,6 +1929,7 @@ function renderMembers() {
                             ? el('span', { class: 'badge unstable-badge', text: t('channel.peerUnstable') })
                             : null,
                         !info.self ? pathBadgeNode(peerId) : null,
+                        deafenIconNode(!!info.peer_deafen),
                         micIconNode(info.peer_audio_status)
                     )
                 )
@@ -1783,6 +1960,16 @@ function renderMembers() {
                     )
                 );
             }
+
+            // touch fallback: hover never happens on a phone, so tapping a
+            // member row reveals the volume slider (and host actions) instead
+            node.addEventListener('click', (event) => {
+                if (event.target.closest('button, input, a')) return;
+                const wasOpen = node.classList.contains('open');
+                for (const other of list.querySelectorAll('.member.open')) other.classList.remove('open');
+                if (!wasOpen) node.classList.add('open');
+            });
+
             return node;
         })
     );
@@ -1937,11 +2124,51 @@ function applyMicState() {
     const self = members.get(selfUuid);
     if (self) self.peer_audio_status = live;
     updateVoiceControls();
+    syncPttHoldButton();
     updateMicIconNode(selfUuid, live); // in-place: full re-renders kill a mid-drag volume slider
+}
+
+// ----- self-deafen: mute every remote member at once (own mic unaffected) -----
+
+function toggleDeafen() {
+    deafened = !deafened;
+    applyDeafenState();
+}
+
+function applyDeafenState() {
+    $('#deafenBtn').classList.toggle('on', deafened);
+    $('#deafenBtn').title = t(deafened ? 'channel.undeafen' : 'channel.deafen');
+    const self = members.get(selfUuid);
+    if (self) self.peer_deafen = deafened;
+    const icon = $('#memberList .member[data-id="' + (selfUuid || '') + '"] .member-deafen');
+    if (icon) icon.classList.toggle('on', deafened);
+    reapplyAllVolumes(); // 0×anything silences both playback paths
+    if (socket && joined && deafened !== lastDeafenSent) {
+        lastDeafenSent = deafened;
+        socket.emit('peerStatus', {
+            room_id: channelId,
+            peer_name: selfName,
+            peer_id: selfUuid,
+            element: 'deafen',
+            status: deafened,
+        });
+    }
 }
 
 function bindPttKeys() {
     window.addEventListener('keydown', (event) => {
+        // Ctrl/Cmd+M: toggle the mic from anywhere (typing in the composer
+        // must keep inserting an 'm', so it stays exempt)
+        if ((event.ctrlKey || event.metaKey) && event.code === 'KeyM') {
+            const target = event.target;
+            const typing =
+                target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+            if (!typing && joined && localStream) {
+                event.preventDefault();
+                setMic(!micOn);
+            }
+            return;
+        }
         if (event.code !== PTT_KEY_CODE || event.repeat) return;
         if (!settings.ptt || !joined || !localStream || !micOn) return;
         const target = event.target;
@@ -1962,6 +2189,42 @@ function bindPttKeys() {
         pttActive = false;
         applyMicState();
     });
+}
+
+// ----- touch push-to-talk: a hold-to-talk button for devices with no keyboard -----
+// Visible only while PTT mode is on and the primary pointer is coarse.
+
+const coarsePointer = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+
+function bindPttHoldButton() {
+    const btn = $('#pttHoldBtn');
+    if (!btn) return;
+    const start = (event) => {
+        if (!settings.ptt || !joined || !localStream || !micOn || pttActive) return;
+        event.preventDefault();
+        btn.classList.add('active');
+        pttActive = true;
+        applyMicState();
+    };
+    const stop = () => {
+        if (!pttActive) return;
+        btn.classList.remove('active');
+        pttActive = false;
+        applyMicState();
+    };
+    btn.addEventListener('pointerdown', start);
+    btn.addEventListener('pointerup', stop);
+    btn.addEventListener('pointercancel', stop);
+    btn.addEventListener('pointerleave', stop);
+    btn.addEventListener('contextmenu', (event) => event.preventDefault());
+}
+
+function syncPttHoldButton() {
+    const btn = $('#pttHoldBtn');
+    if (!btn) return;
+    const show = coarsePointer && settings.ptt && joined && !!localStream && micOn;
+    btn.classList.toggle('hidden', !show);
+    if (!show) btn.classList.remove('active');
 }
 
 function buildAudioConstraints() {
@@ -2091,9 +2354,9 @@ function onCtxStateChange() {
     syncMicPipeline(); // raw track <-> gain-processed track
 }
 
-/** total gain for a remote peer: per-user volume × master volume */
+/** total gain for a remote peer: per-user volume × master volume × (0 when deafened) */
 function peerTotalGain(peerId) {
-    return (members.get(peerId)?.volume ?? 1) * settings.volume;
+    return (members.get(peerId)?.volume ?? 1) * settings.volume * (deafened ? 0 : 1);
 }
 
 function removeAudioEl(peerId) {
@@ -2496,9 +2759,23 @@ function bindChatInput() {
     input.addEventListener('input', () => {
         autoGrowChatInput();
         updateMentionMenu();
+        if (input.value.trim()) maybeSendTyping();
     });
     input.addEventListener('keydown', onChatInputKeydown);
     $('#replyCancelBtn').addEventListener('click', cancelReply);
+    $('#editCancelBtn').addEventListener('click', cancelEdit);
+
+    // composer emoji: insert at the caret via the shared palette
+    $('#emojiBtn').addEventListener('click', (event) => {
+        openEmojiPicker(event.currentTarget, (emoji) => {
+            const box = $('#chatInput');
+            const at = box.selectionStart ?? box.value.length;
+            const end = box.selectionEnd ?? at;
+            box.setRangeText(emoji, at, end, 'end');
+            box.focus();
+            autoGrowChatInput();
+        });
+    });
 
     // QQ-style send-key menu behind the caret next to the send button
     const menu = $('#sendKeyMenu');
@@ -2542,6 +2819,11 @@ function autoGrowChatInput() {
 function onChatInputKeydown(event) {
     // mention menu navigation wins over everything else while it is open
     if (mentionMenuKeydown(event)) return;
+    // Esc bails out of the reply/edit composers (sendKey menu handled below)
+    if (event.key === 'Escape') {
+        if (editing) cancelEdit();
+        else if (replyTo) cancelReply();
+    }
     // IME composition: Enter confirms the candidate text, it must never send
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key !== 'Enter') return;
@@ -2598,6 +2880,17 @@ async function onChatSubmit(event) {
     const input = $('#chatInput');
     const text = input.value.trim().slice(0, 500);
     const images = [...pendingImages];
+
+    // edit mode: resubmit one's own already-sent row (text only; the server
+    // broadcasts the persisted result back to everyone including us)
+    if (editing) {
+        if (text && socket) {
+            socket.emit('chatEdit', { room_id: channelId, ts: editing.ts, name: editing.name, msg: text });
+        }
+        cancelEdit();
+        return;
+    }
+
     if (!text && !images.length) return;
     input.value = '';
     autoGrowChatInput();
@@ -2651,6 +2944,88 @@ async function onChatSubmit(event) {
         });
         chat.addBatchImage(batch, payload.dataUrl, t('chat.image'));
     }
+}
+
+// ---------------------------------------------------------------------------
+// chat search — filters the RENDERED rows (loaded pages only, no server round
+// trip); the counter says how many of the loaded messages match
+// ---------------------------------------------------------------------------
+
+function bindChatSearch() {
+    const btn = $('#chatSearchBtn');
+    const input = $('#chatSearchInput');
+    const count = $('#chatSearchCount');
+    let open = false;
+
+    const close = () => {
+        open = false;
+        btn.classList.remove('active');
+        input.classList.add('hidden');
+        count.classList.add('hidden');
+        input.value = '';
+        chat?.setSearch('');
+    };
+    btn.addEventListener('click', () => {
+        if (open) return close();
+        open = true;
+        btn.classList.add('active');
+        input.classList.remove('hidden');
+        input.focus();
+    });
+    input.addEventListener('input', () => {
+        const result = chat?.setSearch(input.value);
+        if (result) {
+            count.classList.remove('hidden');
+            count.textContent = t('chat.searchCount', { hits: result.hits, total: result.total });
+        } else {
+            count.classList.add('hidden');
+        }
+    });
+    input.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.stopPropagation();
+            close();
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// appearance (settings modal): theme preference + UI language
+// ---------------------------------------------------------------------------
+
+function bindAppearanceControls() {
+    const themeSeg = $('#themeSegmented');
+    const renderTheme = () => {
+        const pref = getThemePref();
+        for (const btn of themeSeg.querySelectorAll('.segment')) {
+            btn.classList.toggle('active', btn.dataset.themePref === pref);
+        }
+    };
+    themeSeg.addEventListener('click', (event) => {
+        const pref = event.target.closest('.segment')?.dataset.themePref;
+        if (pref && pref !== getThemePref()) {
+            setThemePref(pref);
+            renderTheme();
+        }
+    });
+    renderTheme();
+
+    const langSeg = $('#langSegmented');
+    const renderLang = () => {
+        for (const btn of langSeg.querySelectorAll('.segment')) {
+            btn.classList.toggle('active', btn.dataset.lang === getLang());
+        }
+    };
+    langSeg.addEventListener('click', (event) => {
+        const lang = event.target.closest('.segment')?.dataset.lang;
+        if (lang && lang !== getLang()) {
+            // switching language reloads the page — take that as intended so
+            // the leave-site prompt stays quiet
+            intentionalUnload = true;
+            setLang(lang);
+        }
+    });
+    renderLang();
 }
 
 // ---------------------------------------------------------------------------
@@ -2871,6 +3246,8 @@ function teardown() {
     socket?.disconnect();
     teardownMedia();
     clearPendingImages();
+    clearTyping();
+    syncPttHoldButton();
     for (const peerId of [...members.keys()]) dropPeer(peerId, { silent: true });
 }
 

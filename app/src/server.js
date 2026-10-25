@@ -36,8 +36,10 @@ const Logs = require('./logs');
 const ChannelStore = require('./channelStore');
 const ChatStore = require('./chatStore');
 const Version = require('./version');
+const Audit = require('./audit');
 const { pipeline, Readable } = require('stream');
 const { createTarIterator } = require('./backup');
+const { applyBackupArchive, RestoreError } = require('./restore');
 const { applyEmbedHeaders } = require('./middleware/embedHeaders');
 
 const log = new Logs('server');
@@ -116,12 +118,16 @@ const turnServerUrls = (turnServerUrl || '')
     .split(',')
     .map((url) => url.trim())
     .filter(Boolean);
-const turnStaticAuth = config.webrtc.turn.enabled && turnServerUrls.length && turnServerUsername && turnServerCredential;
+const turnStaticAuth =
+    config.webrtc.turn.enabled && turnServerUrls.length && turnServerUsername && turnServerCredential;
 const turnDynamicAuth = config.webrtc.turn.enabled && turnServerUrls.length && turnSecret;
 if (turnDynamicAuth) {
     // REST/HMAC wins when both are configured: nothing long-lived should keep
     // travelling to clients just because static creds are still in the env.
-    log.info('TURN REST/HMAC credentials enabled (use-auth-secret)', { ttl_sec: turnTtlSec, urls: turnServerUrls.length });
+    log.info('TURN REST/HMAC credentials enabled (use-auth-secret)', {
+        ttl_sec: turnTtlSec,
+        urls: turnServerUrls.length,
+    });
 } else if (turnStaticAuth) {
     turnServerUrls.forEach((url) => {
         iceServers.push({ urls: url, username: turnServerUsername, credential: turnServerCredential });
@@ -191,6 +197,19 @@ if (!consoleEnabled) {
     );
 }
 
+// Append-only audit trail: membership changes (join/leave/kick) and admin
+// data operations land here even with debug logging off. VC_AUDIT_FILE
+// redirects it (the integration tests point it at a throwaway file).
+const audit = new Audit(process.env.VC_AUDIT_FILE || path.join(__dirname, 'audit.jsonl'));
+
+// Scheduled rolling backup (off unless CHANNEL_BACKUP_INTERVAL_HOURS is set):
+// writes a tar.gz into CHANNEL_BACKUP_DIR and keeps the newest
+// CHANNEL_BACKUP_KEEP archives. Read from env directly so existing config.js
+// files (created before these options existed) keep working unchanged.
+const BACKUP_INTERVAL_HOURS = Number(process.env.CHANNEL_BACKUP_INTERVAL_HOURS) || 0;
+const BACKUP_KEEP = Math.max(1, Number(process.env.CHANNEL_BACKUP_KEEP) || 7);
+const BACKUP_DIR = process.env.CHANNEL_BACKUP_DIR || path.join(__dirname, 'backups');
+
 /** Sign admin / host tokens with the dedicated console secret. */
 function signConsoleToken(payload, expiresIn) {
     return jwt.sign(payload, channelsCfg.adminJwtSecret, { expiresIn: expiresIn || channelsCfg.adminJwtExp || '24h' });
@@ -215,6 +234,18 @@ const loginLimiter = rateLimit({
     windowMs: minBlockTime * 60 * 1000,
     max: maxAttempts,
     message: { error: `Too many login attempts. Please try again after ${minBlockTime} minute(s).` },
+    keyGenerator: (req) => getIP(req),
+});
+
+// Coarse safety net for the public REST surface (/api/channels, /api/version,
+// …) which is otherwise unauthenticated and unlimited. Generous enough that
+// the homepage's 15s polling never trips it (≈ 12 req/5min per open tab);
+// admin routes carry their own JWTs and only need the headroom for backups.
+const apiLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 600,
+    standardHeaders: true,
+    message: { error: 'Too many requests' },
     keyGenerator: (req) => getIP(req),
 });
 
@@ -281,6 +312,7 @@ function getRoomPeers(roomId) {
             peer_presenter: !!info.peer_presenter,
             peer_audio: !!info.peer_audio,
             peer_audio_status: !!info.peer_audio_status,
+            peer_deafen: !!info.peer_deafen,
             peer_avatar: info.peer_avatar || null,
             joined_at: info.joined_at,
         };
@@ -359,9 +391,27 @@ const staticOptions = {
     index: false,
     setHeaders: (res, filePath) => {
         if (filePath.endsWith('.js')) res.setHeader('Content-Type', 'application/javascript');
+        // Cache policy: icons/images never change in place → cache hard.
+        // Everything else (js/css/lang) gets a short freshness window and must
+        // revalidate afterwards, so a deploy shows up within minutes while the
+        // version-check banner still covers the gap (HTML itself is no-cache).
+        if (path.dirname(filePath).endsWith(path.join('public', 'images'))) {
+            res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+        } else {
+            res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+        }
     },
 };
 app.use(express.static(dir.public, staticOptions));
+
+// REST-wide safety net (login endpoints keep their stricter limiter — order
+// matters: the specific limiter must run first, so mount this after routes…
+// except Express matches in registration order, hence the skip below)
+app.use('/api', (req, res, next) => {
+    // already throttled harder by their own limiter
+    if (req.path === '/admin/login' || req.path === '/host/login') return next();
+    return apiLimiter(req, res, next);
+});
 
 app.use(cors(corsOptions));
 app.use(compression());
@@ -595,6 +645,7 @@ app.post('/api/admin/kick', requireAdmin, (req, res) => {
         // evictChannelPeers, with the race closed)
         setTimeout(() => target.disconnect(true), 100).unref?.();
         log.info('Admin kicked member', { channel, uuid });
+        audit.record('adminKick', { channel, uuid, name: peers[channel]?.[uuid]?.peer_name });
     } else {
         const entry = peers[channel][uuid];
         clearTimeout(ghosts.get(ghostKey(channel, uuid)));
@@ -602,6 +653,7 @@ app.post('/api/admin/kick', requireAdmin, (req, res) => {
         releaseRoomEntry(channel, uuid);
         broadcastRemovePeer(channel, uuid, entry?.socket_id);
         log.info('Admin expired ghost member', { channel, uuid });
+        audit.record('adminKickGhost', { channel, uuid, name: entry?.peer_name });
     }
     res.json({ success: true });
 });
@@ -619,6 +671,7 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
 app.post('/api/admin/channels', requireAdmin, (req, res) => {
     const result = channelStore.create(checkXSS(req.body) || {});
     if (!result.ok) return res.status(400).json({ error: result.errors.join('; ') });
+    audit.record('channelCreate', { id: result.channel.id, name: result.channel.name });
     res.status(201).json({ channel: result.channel });
 });
 
@@ -629,6 +682,7 @@ app.put('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
             ? res.status(404).json({ error: result.errors[0] })
             : res.status(400).json({ error: result.errors.join('; ') });
     }
+    audit.record('channelUpdate', { id: result.channel.id });
     res.json({ channel: result.channel });
 });
 
@@ -641,6 +695,7 @@ app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
     chatStore.removeChannel(id);
     const evicted = evictChannelPeers(id, 'channelDeleted');
     if (evicted) log.info('Channel deleted by admin, peers evicted', { channel: id, evicted });
+    audit.record('channelDelete', { id, evicted });
     res.json({ success: true });
 });
 
@@ -656,13 +711,13 @@ app.get('/api/admin/backup', requireAdmin, (req, res) => {
         const registry = path.basename(channelStore.filePath);
         if (fs.existsSync(channelStore.filePath)) entries.push({ name: registry, path: channelStore.filePath });
         for (const id of chatStore.listFiles()) {
-            const file = chatStore.fileFor(id);
-            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}.json`, path: file });
+            const file = chatStore.existingFileFor(id);
+            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}${path.extname(file)}`, path: file });
         }
         // preflight readability so failures surface as a clean 500 instead of a
         // mid-stream abort after the download headers are already sent
         for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
-        const stamp = new Date().toISOString().slice(0, 10);
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
         res.set({
             'Content-Type': 'application/gzip',
             'Content-Disposition': `attachment; filename="voice-channels-backup-${stamp}.tar.gz"`,
@@ -670,12 +725,101 @@ app.get('/api/admin/backup', requireAdmin, (req, res) => {
         });
         pipeline(Readable.from(createTarIterator(entries)), zlib.createGzip(), res, (err) => {
             if (err) log.error('Backup stream failed', { files: entries.length, error: err.message });
-            else log.info('Admin backup served', { files: entries.length });
+            else {
+                log.info('Admin backup served', { files: entries.length });
+                audit.record('backup', { files: entries.length });
+            }
         });
     } catch (err) {
         log.error('Admin backup failed', { error: err.message });
         res.status(500).json({ error: 'backup failed' });
     }
+});
+
+/**
+ * Restore a backup archive (see restore.js). The upload arrives as a raw
+ * tar.gz body (bounded by the express.raw limit); every entry is validated
+ * before anything on disk is replaced. Whole-state: history of channels not
+ * present in the archive is removed. Best run while nobody is connected —
+ * live sessions keep their in-memory rooms either way.
+ */
+// 64MB gzipped ceiling: a real archive (12MB/channel history budget) stays far
+// below it, and the body + decompressed form both live in memory on a small host
+app.post('/api/admin/restore', requireAdmin, express.raw({ type: () => true, limit: '64mb' }), async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ error: 'empty upload' });
+    }
+    try {
+        const stats = await applyBackupArchive(req.body, { channelStore, chatStore });
+        audit.record('restore', { channels: stats.channels, histories: stats.histories });
+        // the rendered page cache embeds nothing channel-specific, but a
+        // restored registry deserves a fresh start for any memoized views
+        res.json({ success: true, ...stats });
+    } catch (err) {
+        const status = err instanceof RestoreError ? err.status : 500;
+        if (status === 500) log.error('Admin restore failed', { error: err.message });
+        res.status(status).json({ error: err.message });
+    }
+});
+
+/** Newest-first tail of the audit trail (membership + admin data ops). */
+app.get('/api/admin/audit', requireAdmin, (req, res) => {
+    const limit = Number(req.query.limit) || 200;
+    res.set('Cache-Control', 'no-store');
+    res.json({ events: audit.tail(limit) });
+});
+
+/**
+ * Server statistics for the admin console: registry/temp-room counts, live
+ * membership, persisted history footprint and a per-channel online table.
+ * Message counts come from the in-memory caches — channels nobody touched
+ * since boot report their file size only (cheap; never a full disk walk).
+ */
+app.get('/api/admin/stats', requireAdmin, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    let onlineTotal = 0;
+    const activeChannels = [];
+    for (const roomId of Object.keys(peers)) {
+        const online = getPeerCount(roomId);
+        if (!online) continue;
+        onlineTotal += online;
+        activeChannels.push({
+            id: roomId,
+            name: channelStore.get(roomId)?.name || channelStore.getTemp(roomId)?.name || roomId,
+            temporary: channelStore.isTemp(roomId),
+            online,
+        });
+    }
+    let historyBytes = 0;
+    let historyFiles = 0;
+    let storedMessages = 0;
+    for (const id of chatStore.listFiles()) {
+        historyFiles++;
+        try {
+            historyBytes += fs.statSync(chatStore.existingFileFor(id)).size;
+        } catch {
+            /* raced a delete — the walk only feeds a summary */
+        }
+        const cached = chatStore.channels.get(id);
+        if (cached) storedMessages += cached.messages.length;
+    }
+    activeChannels.sort((a, b) => b.online - a.online);
+    res.json({
+        registeredChannels: channelStore.channels.length,
+        tempRooms: channelStore.temps.size,
+        activeChannels,
+        onlineTotal,
+        historyFiles,
+        historyBytes,
+        storedMessages,
+        retentionHours: channelStore.settings.chatRetentionHours,
+        tempRoomsEnabled: tempRoomsEnabled(),
+        consoleEnabled,
+        scheduledBackup: BACKUP_INTERVAL_HOURS > 0 ? `${BACKUP_INTERVAL_HOURS}h × ${BACKUP_KEEP}` : 'off',
+        uptimeSec: Math.round(process.uptime()),
+        nodeVersion: process.versions.node,
+        appVersion: require('../../package.json').version,
+    });
 });
 
 /**
@@ -707,10 +851,12 @@ app.get('/api/host/:channelId/export', (req, res) => {
     const lines = [`# ${channel.name || channelId} — ${tStamp(new Date())}`, ''];
     for (const row of rows) {
         const when = new Date(row.ts);
-        let body = row.text || '';
-        if (Array.isArray(row.imgs)) body += body ? ` [${row.imgs.length} image(s)]` : `[${row.imgs.length} image(s)]`;
+        let body = row.deleted ? '（已撤回）' : row.text || '';
+        if (!row.deleted && Array.isArray(row.imgs))
+            body += body ? ` [${row.imgs.length} image(s)]` : `[${row.imgs.length} image(s)]`;
         if (row.reply) body = `> ${row.reply.name}: ${row.reply.text}\n${body}`;
-        lines.push(`**${tStamp(when)} ${row.name}:** ${body}`);
+        const edited = !row.deleted && row.edited ? '（已编辑）' : '';
+        lines.push(`**${tStamp(when)} ${row.name}:${edited}** ${body}`);
     }
     lines.push('');
     const md = lines.join('\n');
@@ -793,8 +939,74 @@ server.listen(port, null, () => {
         ice_servers: iceServers.length,
         ip_whitelist: ipWhitelist.enabled ? ipWhitelist : false,
         api_key_secret: config.api.keySecret ? 'configured' : 'not set',
+        scheduled_backup: BACKUP_INTERVAL_HOURS > 0 ? `every ${BACKUP_INTERVAL_HOURS}h, keep ${BACKUP_KEEP}` : 'off',
     });
+    if (BACKUP_INTERVAL_HOURS > 0) startScheduledBackup();
 });
+
+// ---------------------------------------------------------------------------
+// Scheduled rolling backup — same archive as the admin download, written to
+// BACKUP_DIR on an interval and pruned to the newest BACKUP_KEEP files.
+// ---------------------------------------------------------------------------
+
+function startScheduledBackup() {
+    const intervalMs = BACKUP_INTERVAL_HOURS * 60 * 60 * 1000;
+    const run = () => {
+        writeScheduledBackup()
+            .then((file) => log.info('Scheduled backup written', { file }))
+            .catch((err) => log.error('Scheduled backup failed', { error: err.message }));
+    };
+    // first copy right away (so a fresh deploy has one), then on the interval
+    run();
+    const timer = setInterval(run, intervalMs);
+    timer.unref?.();
+}
+
+/** Build the backup archive into BACKUP_DIR; resolves with the file path. */
+function writeScheduledBackup() {
+    return new Promise((resolve, reject) => {
+        const entries = [];
+        if (fs.existsSync(channelStore.filePath))
+            entries.push({ name: path.basename(channelStore.filePath), path: channelStore.filePath });
+        for (const id of chatStore.listFiles()) {
+            const file = chatStore.existingFileFor(id);
+            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}${path.extname(file)}`, path: file });
+        }
+        try {
+            for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
+            fs.mkdirSync(BACKUP_DIR, { recursive: true });
+        } catch (err) {
+            return reject(err);
+        }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        const outFile = path.join(BACKUP_DIR, `voice-channels-backup-${stamp}.tar.gz`);
+        const out = fs.createWriteStream(outFile);
+        pipeline(Readable.from(createTarIterator(entries)), zlib.createGzip(), out, (err) => {
+            if (err) {
+                fs.unlink(outFile, () => {});
+                return reject(err);
+            }
+            pruneScheduledBackups();
+            audit.record('scheduledBackup', { file: path.basename(outFile), entries: entries.length });
+            resolve(outFile);
+        });
+    });
+}
+
+/** Keep only the newest BACKUP_KEEP archives in BACKUP_DIR. */
+function pruneScheduledBackups() {
+    try {
+        const files = fs
+            .readdirSync(BACKUP_DIR)
+            .filter((name) => name.startsWith('voice-channels-backup-') && name.endsWith('.tar.gz'))
+            .sort(); // stamps sort lexicographically = chronologically
+        for (const name of files.slice(0, Math.max(0, files.length - BACKUP_KEEP))) {
+            fs.unlinkSync(path.join(BACKUP_DIR, name));
+        }
+    } catch (err) {
+        log.warn('Scheduled backup prune failed', { error: err.message });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Socket.IO signaling — mesh P2P (unchanged protocol core)
@@ -826,6 +1038,7 @@ io.sockets.on('connect', async (socket) => {
         delete sockets[socket.id];
         joinFailures.delete(socket.id); // per-socket state cleanup
         chatSends.delete(socket.id);
+        chatPageSends.delete(socket.id);
         chatBatches.delete(socket.id); // pending image batches die with the sender
     });
 
@@ -1067,7 +1280,23 @@ io.sockets.on('connect', async (socket) => {
         channels[channel][socket.id] = socket;
         socket.channels[channel] = { uuid: peer_uuid, name: peer_name };
 
-        log.debug('[join] channel peers', { channel, peers: getRoomPeers(channel) });
+        // info (not debug): membership is the one thing an operator must be
+        // able to reconstruct from default logs, plus the audit trail
+        log.info('[join] peer joined', {
+            channel,
+            name: peer_name,
+            uuid: peer_uuid,
+            presenter: isPresenter,
+            resumed,
+            peers: getPeerCount(channel),
+        });
+        audit.record('join', {
+            channel,
+            name: peer_name,
+            presenter: isPresenter,
+            resumed,
+            ip: getSocketIP(socket),
+        });
 
         joinFailures.delete(socket.id); // a successful join resets the failure counter
 
@@ -1278,7 +1507,8 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
-     * Relay audio status to peers
+     * Relay audio/deafen status to peers. 'audio' is the mic state;
+     * 'deafen' marks a member who silenced ALL remote audio locally.
      */
     socket.on('peerStatus', async (cfg) => {
         const config = checkXSS(cfg);
@@ -1292,9 +1522,9 @@ io.sockets.on('connect', async (socket) => {
             return;
         }
 
-        if (element !== 'audio') return;
-
-        peers[room_id][senderUuid]['peer_audio_status'] = status === true;
+        if (element === 'audio') peers[room_id][senderUuid]['peer_audio_status'] = status === true;
+        else if (element === 'deafen') peers[room_id][senderUuid]['peer_deafen'] = status === true;
+        else return;
 
         await sendToRoom(room_id, socket.id, 'peerStatus', {
             peer_id: senderUuid,
@@ -1357,11 +1587,14 @@ io.sockets.on('connect', async (socket) => {
         // receiver and persisted with the row)
         const reply = sanitizeChatReply(cfg.reply);
         if (!imageCount) {
-            chatStore.append(
+            const stored = chatStore.append(
                 room_id,
                 { name: peer_name, text, imgs: [], ...(reply ? { reply } : {}) },
                 { persistent: !channelStore.isTemp(room_id) }
             );
+            // the sender rendered its own row with a local timestamp; hand back
+            // the authoritative ts so edit/recall/reaction can find that row
+            if (stored) socket.emit('chatAck', { ts: stored.ts });
             return;
         }
 
@@ -1382,19 +1615,108 @@ io.sockets.on('connect', async (socket) => {
      * Scroll-up pagination for the persisted chat history: the client asks
      * for the page strictly older than its cursor (`before` ts) and gets it
      * back on the ack — request and response stay paired without any
-     * client-side request ids. Read-only: member-gated but not flood-gated,
-     * and the page size is server-fixed (never trusted from the client).
+     * client-side request ids. Read-only and member-gated; the page size is
+     * server-fixed (never trusted from the client). Throttled per socket:
+     * every call runs a prune + image-payload estimate, so a scripted client
+     * must not be able to spin the disk.
      */
     socket.on('chatPage', (cfg, ack) => {
         if (!Validate.isValidData(cfg)) return;
         const { room_id } = cfg;
         if (!roomSessionUuid(socket, room_id)) return;
+        if (isChatPageFlooded(socket.id)) return;
         const before = Number.isFinite(cfg.before) && cfg.before > 0 ? cfg.before : 0;
         const page = chatStore.history(room_id, {
             persistent: !channelStore.isTemp(room_id),
             before,
         });
         if (typeof ack === 'function') ack(page);
+    });
+
+    /**
+     * Message lifecycle after delivery: edit / recall / emoji reaction. These
+     * ride the socket (not the DataChannel) so text-only members and
+     * mid-session joiners see them too; the server is the single writer of
+     * the history store, everyone (sender included) gets one broadcast.
+     * Identity: the acting name always comes from the JOINED session state —
+     * edits/recalls are therefore limited to one's own rows, except that a
+     * presenter may recall anything (moderation).
+     */
+    socket.on('chatEdit', async (cfg) => {
+        const config = checkXSS(cfg);
+        if (!Validate.isValidData(config)) return;
+        const { room_id } = config;
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) return;
+        if (isChatFlooded(socket.id)) return;
+
+        const peer_name = peers[room_id]?.[senderUuid]?.peer_name;
+        const ts = Number(config.ts);
+        const text = typeof config.msg === 'string' ? config.msg.slice(0, 500) : '';
+        if (!peer_name || !Number.isFinite(ts) || ts <= 0 || !text.trim()) return;
+
+        const persistent = !channelStore.isTemp(room_id);
+        const updated = chatStore.edit(room_id, { ts, name: peer_name, text }, { persistent });
+        if (!updated) return;
+        await broadcastToRoom(room_id, 'chatEdit', { ts, name: peer_name, text: updated.text });
+    });
+
+    socket.on('chatDelete', async (cfg) => {
+        const config = checkXSS(cfg);
+        if (!Validate.isValidData(config)) return;
+        const { room_id } = config;
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) return;
+        if (isChatFlooded(socket.id)) return;
+
+        const peer_name = peers[room_id]?.[senderUuid]?.peer_name;
+        const ts = Number(config.ts);
+        const targetName = typeof config.name === 'string' ? config.name.slice(0, 24) : '';
+        if (!peer_name || !Number.isFinite(ts) || ts <= 0 || !targetName) return;
+        // presenters may recall anyone's message; members only their own
+        const isPresenter = presenters[room_id]?.[senderUuid]?.is_presenter === true;
+        if (targetName !== peer_name && !isPresenter) return;
+
+        const persistent = !channelStore.isTemp(room_id);
+        const updated = chatStore.remove(room_id, { ts, name: targetName }, { persistent });
+        if (!updated) return;
+        if (isPresenter && targetName !== peer_name) {
+            audit.record('hostRecall', { channel: room_id, by: peer_name, target: targetName });
+        }
+        await broadcastToRoom(room_id, 'chatDelete', { ts, name: targetName, by: peer_name });
+    });
+
+    socket.on('chatReact', async (cfg) => {
+        const config = checkXSS(cfg);
+        if (!Validate.isValidData(config)) return;
+        const { room_id } = config;
+        const senderUuid = roomSessionUuid(socket, room_id);
+        if (!senderUuid) return;
+        if (isChatFlooded(socket.id)) return;
+
+        const peer_name = peers[room_id]?.[senderUuid]?.peer_name;
+        const ts = Number(config.ts);
+        const targetName = typeof config.name === 'string' ? config.name.slice(0, 24) : '';
+        // checkXSS never sees the emoji (DOMPurify would mangle non-ASCII
+        // markup-free strings harmlessly, but keep the payload raw + capped
+        // like the image/emoji paths): shape-check it directly instead
+        const emoji = typeof cfg.emoji === 'string' ? cfg.emoji.slice(0, 16) : '';
+        if (!peer_name || !Number.isFinite(ts) || ts <= 0 || !targetName || !emoji) return;
+
+        const persistent = !channelStore.isTemp(room_id);
+        const updated = chatStore.react(
+            room_id,
+            { ts, name: targetName, emoji, who: peer_name, op: cfg.op },
+            { persistent }
+        );
+        if (!updated) return;
+        await broadcastToRoom(room_id, 'chatReact', {
+            ts,
+            name: targetName,
+            emoji,
+            who: peer_name,
+            reactions: updated.reactions || null,
+        });
     });
 
     /**
@@ -1452,7 +1774,16 @@ io.sockets.on('connect', async (socket) => {
 
         const target = liveSessionSocket(room_id, peer_id);
         if (!target) return;
-        log.debug('[' + socket.id + '] kick out peer [' + peer_id + '] from room [' + room_id + ']');
+        log.info('[' + socket.id + '] kick out peer [' + peer_id + '] from room [' + room_id + ']', {
+            by: peers[room_id][senderUuid].peer_name,
+            target: peers[room_id][peer_id]?.peer_name,
+        });
+        audit.record('hostKick', {
+            channel: room_id,
+            by: peers[room_id][senderUuid].peer_name,
+            target: peers[room_id][peer_id]?.peer_name,
+            reason: peer_kicked_reason,
+        });
         await target.emit('kickOut', {
             peer_name: peers[room_id][senderUuid].peer_name,
             peer_kicked_reason: peer_kicked_reason,
@@ -1503,6 +1834,17 @@ io.sockets.on('connect', async (socket) => {
             if (peer_id != socket_id) {
                 await sock.emit(msg, config);
             }
+        }
+    }
+
+    /**
+     * Send async data to EVERY member of a room, sender included — used by
+     * chat lifecycle events (edit/recall/react) where the sender's DOM must
+     * follow the server-persisted result like everyone else's.
+     */
+    async function broadcastToRoom(room_id, msg, config = {}) {
+        for (const sock of Object.values(channels[room_id] || {})) {
+            await sock.emit(msg, config);
         }
     }
 
@@ -1600,9 +1942,27 @@ function isChatFlooded(socketId, now = Date.now()) {
     return false;
 }
 
+// chatPage is read-only but not free (prune + per-row payload estimate per
+// call), so a member cannot spin it either. Looser than the write budget —
+// a fast scroll through history legitimately fires bursts of pages.
+const CHAT_PAGE_FLOOD_MAX = 30;
+const CHAT_PAGE_FLOOD_WINDOW_MS = 10 * 1000;
+const chatPageSends = new Map(); // socket.id -> timestamps inside the window
+
+function isChatPageFlooded(socketId, now = Date.now()) {
+    const stamps = (chatPageSends.get(socketId) || []).filter((ts) => now - ts < CHAT_PAGE_FLOOD_WINDOW_MS);
+    if (stamps.length >= CHAT_PAGE_FLOOD_MAX) {
+        chatPageSends.set(socketId, stamps);
+        return true;
+    }
+    stamps.push(now);
+    chatPageSends.set(socketId, stamps);
+    return false;
+}
+
 /** Store a completed (or TTL-expired) batch as one history row. */
 function finalizeChatBatch(socketId, pending) {
-    chatStore.append(
+    const stored = chatStore.append(
         pending.room_id,
         {
             name: pending.name,
@@ -1612,6 +1972,8 @@ function finalizeChatBatch(socketId, pending) {
         },
         { persistent: !channelStore.isTemp(pending.room_id) }
     );
+    // same authoritative-ts handshake as the text path (see the chat handler)
+    if (stored) sockets[socketId]?.emit('chatAck', { ts: stored.ts });
 }
 
 /** Flush expired pending batches so a sender whose image events never
@@ -1700,7 +2062,8 @@ function expireGhost(channel, uuid) {
     const name = entry.peer_name;
     releaseRoomEntry(channel, uuid);
     broadcastRemovePeer(channel, uuid, socketId);
-    log.debug('[ghost] grace expired, session removed', { channel, uuid, name });
+    log.info('[ghost] grace expired, session removed', { channel, uuid, name });
+    audit.record('ghostExpire', { channel, name });
 }
 
 /**
@@ -1757,7 +2120,14 @@ function removePeerFrom(channel, socket, reason = 'unknown') {
     ghosts.delete(ghostKey(channel, session.uuid));
     releaseRoomEntry(channel, session.uuid);
     broadcastRemovePeer(channel, session.uuid, socket.id);
-    log.debug('[removePeerFrom]', { channel, reason, uuid: session.uuid, peers_left: getPeerCount(channel) });
+    log.info('[leave] peer removed', {
+        channel,
+        reason,
+        name: session.name,
+        uuid: session.uuid,
+        peers_left: getPeerCount(channel),
+    });
+    audit.record('leave', { channel, name: session.name, reason });
 }
 
 /**

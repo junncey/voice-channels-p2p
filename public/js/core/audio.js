@@ -29,7 +29,13 @@ export class AudioHub {
             this.ctx = new AC();
         }
         if (this.ctx.state === 'suspended') {
-            await this.ctx.resume().catch(() => {});
+            // Never block the caller on autoplay policy: without a user gesture
+            // Chrome leaves resume() pending indefinitely, which used to stall
+            // the whole auto-join (no socket, no peers) until the first click.
+            // Playback already falls back to <audio> elements until the context
+            // starts, so a bounded attempt is enough.
+            const resumed = this.ctx.resume().catch(() => {});
+            await Promise.race([resumed, new Promise((resolve) => setTimeout(resolve, 250))]);
         }
     }
 

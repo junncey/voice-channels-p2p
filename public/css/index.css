@@ -286,3 +286,86 @@ button.topbar-link {
 .theme-toggle .theme-icon svg {
     display: block;
 }
+
+/* ============================================================
+   New: language switch, live search, favorites + recent rows
+   ============================================================ */
+
+.lang-switch {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+}
+.lang-opt {
+    border: 0;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 12px;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+.lang-opt + .lang-opt {
+    border-left: 1px solid var(--border-soft);
+}
+.lang-opt.active {
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.channel-search {
+    width: 220px;
+    max-width: 40vw;
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
+.channel-row-group {
+    margin-bottom: 22px;
+}
+.channel-row-group h3,
+.channel-row-heading {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 10px;
+}
+.channel-row-heading {
+    margin-top: 22px;
+}
+
+.channel-card-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+}
+.fav-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-3);
+    cursor: pointer;
+    transition:
+        color var(--speed) var(--ease),
+        border-color var(--speed) var(--ease);
+}
+.fav-btn:hover {
+    color: var(--warn);
+    border-color: var(--warn);
+}
+.fav-btn.on {
+    color: var(--warn);
+    border-color: var(--warn);
+    background: var(--warn-dim);
+}
+.fav-btn.on svg {
+    fill: var(--warn);
+}

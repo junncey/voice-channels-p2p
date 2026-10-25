@@ -5,6 +5,10 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>频道管理</title>
         <link rel="icon" href="/images/favicon.svg" type="image/svg+xml" />
+        <link rel="manifest" href="/manifest.webmanifest" />
+        <link rel="apple-touch-icon" href="/images/icon-192.png" />
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d1117" />
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#e8ecf2" />
         <script src="/js/core/theme-boot.js"></script>
         <link rel="stylesheet" href="/css/tokens.css" />
         <link rel="stylesheet" href="/css/base.css" />
@@ -19,7 +23,13 @@
                     <form id="loginForm">
                         <div class="field">
                             <label for="adminPass" data-i18n="admin.password">管理密码</label>
-                            <input id="adminPass" class="input" type="password" maxlength="64" autocomplete="current-password" />
+                            <input
+                                id="adminPass"
+                                class="input"
+                                type="password"
+                                maxlength="64"
+                                autocomplete="current-password"
+                            />
                         </div>
                         <p id="loginError" class="login-error" role="alert"></p>
                         <button type="submit" class="btn primary login-btn" data-i18n="admin.login">登录</button>
@@ -40,17 +50,46 @@
 
                 <div class="admin-toolbar">
                     <button id="newChannelBtn" class="btn primary">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                        <svg
+                            viewBox="0 0 24 24"
+                            width="14"
+                            height="14"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2.4"
+                            stroke-linecap="round"
+                        >
                             <path d="M12 5v14M5 12h14" />
                         </svg>
                         <span data-i18n="admin.newChannel">新建频道</span>
                     </button>
-                    <button id="tempSettingsBtn" class="btn ghost sm" data-i18n="admin.serverSettings" data-i18n-title="admin.serverSettingsHint">
+                    <button
+                        id="tempSettingsBtn"
+                        class="btn ghost sm"
+                        data-i18n="admin.serverSettings"
+                        data-i18n-title="admin.serverSettingsHint"
+                    >
                         服务器设置
                     </button>
-                    <button id="backupBtn" class="btn ghost sm" data-i18n="admin.backup" data-i18n-title="admin.backupHint">
+                    <button id="statsBtn" class="btn ghost sm" data-i18n="admin.stats">统计</button>
+                    <button id="auditBtn" class="btn ghost sm" data-i18n="admin.audit">审计日志</button>
+                    <button
+                        id="backupBtn"
+                        class="btn ghost sm"
+                        data-i18n="admin.backup"
+                        data-i18n-title="admin.backupHint"
+                    >
                         下载备份
                     </button>
+                    <button
+                        id="restoreBtn"
+                        class="btn ghost sm"
+                        data-i18n="admin.restore"
+                        data-i18n-title="admin.restoreHint"
+                    >
+                        恢复备份
+                    </button>
+                    <input type="file" id="restoreFileInput" accept=".gz,.tar.gz,application/gzip" hidden />
                     <span id="loadError" class="admin-error"></span>
                 </div>
 
@@ -82,7 +121,9 @@
                 <h2 id="editorTitle" data-i18n="admin.newChannel">新建频道</h2>
                 <form id="editorForm">
                     <div class="field" id="idField">
-                        <label for="fId" data-i18n="admin.field.id">频道 ID（可选，留空自动生成；创建后不可修改）</label>
+                        <label for="fId" data-i18n="admin.field.id"
+                            >频道 ID（可选，留空自动生成；创建后不可修改）</label
+                        >
                         <input id="fId" class="input" maxlength="32" autocomplete="off" spellcheck="false" />
                         <span class="field-hint" data-i18n="admin.idHint">3-32 位字母、数字、- 或 _；留空自动生成</span>
                     </div>
@@ -96,12 +137,24 @@
                     </div>
                     <div class="field-row">
                         <div class="field">
-                            <label for="fMax" data-i18n="admin.field.maxParticipants">人数上限（语音 mesh 建议 ≤ 8）</label>
+                            <label for="fMax" data-i18n="admin.field.maxParticipants"
+                                >人数上限（语音 mesh 建议 ≤ 8）</label
+                            >
                             <input id="fMax" class="input" type="number" min="2" max="16" value="8" />
                         </div>
                         <div class="field">
-                            <label for="fRetention" data-i18n="admin.field.retention">聊天保留（小时，留空继承全局）</label>
-                            <input id="fRetention" class="input" type="number" min="0" max="2160" step="1" placeholder="—" />
+                            <label for="fRetention" data-i18n="admin.field.retention"
+                                >聊天保留（小时，留空继承全局）</label
+                            >
+                            <input
+                                id="fRetention"
+                                class="input"
+                                type="number"
+                                min="0"
+                                max="2160"
+                                step="1"
+                                placeholder="—"
+                            />
                         </div>
                         <div class="field check-field">
                             <label>
@@ -111,8 +164,16 @@
                         </div>
                     </div>
                     <div class="field">
-                        <label for="fPassword" data-i18n="admin.field.password">频道密码（可选，游客加入时需输入）</label>
-                        <input id="fPassword" class="input" type="password" maxlength="64" autocomplete="new-password" />
+                        <label for="fPassword" data-i18n="admin.field.password"
+                            >频道密码（可选，游客加入时需输入）</label
+                        >
+                        <input
+                            id="fPassword"
+                            class="input"
+                            type="password"
+                            maxlength="64"
+                            autocomplete="new-password"
+                        />
                         <span id="pwHint" class="field-hint"></span>
                         <label id="fClearPwRow" class="pw-clear-row hidden">
                             <input id="fClearPw" type="checkbox" />
@@ -122,12 +183,16 @@
                     <div class="field">
                         <label data-i18n="admin.field.hosts">主持人（登录后获得主持人权限）</label>
                         <div id="hostRows" class="host-rows"></div>
-                        <button type="button" id="addHostBtn" class="btn ghost sm" data-i18n="admin.addHost">添加主持人</button>
+                        <button type="button" id="addHostBtn" class="btn ghost sm" data-i18n="admin.addHost">
+                            添加主持人
+                        </button>
                     </div>
                     <p id="editorError" class="login-error" role="alert"></p>
                     <div class="modal-actions">
                         <button type="button" id="editorCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
-                        <button type="submit" id="editorSubmit" class="btn primary" data-i18n="admin.create">创建</button>
+                        <button type="submit" id="editorSubmit" class="btn primary" data-i18n="admin.create">
+                            创建
+                        </button>
                     </div>
                 </form>
             </div>
@@ -147,7 +212,9 @@
                     <div class="field">
                         <label for="sTempMaxRooms" data-i18n="admin.s.tempMaxRooms">临时房间总数上限</label>
                         <input id="sTempMaxRooms" class="input" type="number" min="0" max="10000" step="1" required />
-                        <span class="field-hint" data-i18n="admin.s.tempMaxRoomsHint">全服务器同时存活的临时房间数，0 表示不再新建</span>
+                        <span class="field-hint" data-i18n="admin.s.tempMaxRoomsHint"
+                            >全服务器同时存活的临时房间数，0 表示不再新建</span
+                        >
                     </div>
                     <div class="field-row align-top">
                         <div class="field">
@@ -156,31 +223,75 @@
                             <span class="field-hint" data-i18n="admin.s.tempMaxPerIpHint">0 表示不再新建</span>
                         </div>
                         <div class="field">
-                            <label for="sSocketMaxChannels" data-i18n="admin.s.socketMaxChannels">单连接频道数上限</label>
-                            <input id="sSocketMaxChannels" class="input" type="number" min="1" max="16" step="1" required />
+                            <label for="sSocketMaxChannels" data-i18n="admin.s.socketMaxChannels"
+                                >单连接频道数上限</label
+                            >
+                            <input
+                                id="sSocketMaxChannels"
+                                class="input"
+                                type="number"
+                                min="1"
+                                max="16"
+                                step="1"
+                                required
+                            />
                             <span class="field-hint" data-i18n="admin.s.socketMaxChannelsHint">正常页面为 1</span>
                         </div>
                     </div>
                     <div class="field-row align-top">
                         <div class="field">
                             <label for="sTempCreateMax" data-i18n="admin.s.tempCreateMax">窗口内创建上限</label>
-                            <input id="sTempCreateMax" class="input" type="number" min="0" max="1000" step="1" required />
+                            <input
+                                id="sTempCreateMax"
+                                class="input"
+                                type="number"
+                                min="0"
+                                max="1000"
+                                step="1"
+                                required
+                            />
                             <span class="field-hint" data-i18n="admin.s.tempCreateMaxHint">0 表示不再新建</span>
                         </div>
                         <div class="field">
-                            <label for="sTempCreateWindowMin" data-i18n="admin.s.tempCreateWindowMin">频率窗口（分钟）</label>
-                            <input id="sTempCreateWindowMin" class="input" type="number" min="1" max="1440" step="1" required />
-                            <span class="field-hint" data-i18n="admin.s.tempCreateWindowMinHint">创建频率限制的滑动窗口长度</span>
+                            <label for="sTempCreateWindowMin" data-i18n="admin.s.tempCreateWindowMin"
+                                >频率窗口（分钟）</label
+                            >
+                            <input
+                                id="sTempCreateWindowMin"
+                                class="input"
+                                type="number"
+                                min="1"
+                                max="1440"
+                                step="1"
+                                required
+                            />
+                            <span class="field-hint" data-i18n="admin.s.tempCreateWindowMinHint"
+                                >创建频率限制的滑动窗口长度</span
+                            >
                         </div>
                     </div>
                     <div class="field">
-                        <label for="sChatRetentionHours" data-i18n="admin.s.chatRetentionHours">聊天记录保留时长（小时）</label>
-                        <input id="sChatRetentionHours" class="input" type="number" min="0" max="2160" step="1" required />
-                        <span class="field-hint" data-i18n="admin.s.chatRetentionHoursHint">新成员加入频道时可见的文字聊天历史保留时长；0 表示不保留任何记录（图片消息不持久化）</span>
+                        <label for="sChatRetentionHours" data-i18n="admin.s.chatRetentionHours"
+                            >聊天记录保留时长（小时）</label
+                        >
+                        <input
+                            id="sChatRetentionHours"
+                            class="input"
+                            type="number"
+                            min="0"
+                            max="2160"
+                            step="1"
+                            required
+                        />
+                        <span class="field-hint" data-i18n="admin.s.chatRetentionHoursHint"
+                            >新成员加入频道时可见的文字聊天历史保留时长；0 表示不保留任何记录（图片消息不持久化）</span
+                        >
                     </div>
                     <p id="settingsError" class="login-error" role="alert"></p>
                     <div class="modal-actions">
-                        <button type="button" id="settingsCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                        <button type="button" id="settingsCancel" class="btn ghost" data-i18n="admin.cancel">
+                            取消
+                        </button>
                         <button type="submit" id="settingsSave" class="btn primary" data-i18n="admin.save">保存</button>
                     </div>
                 </form>
@@ -195,6 +306,41 @@
                 <div class="modal-actions">
                     <button id="confirmCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
                     <button id="confirmOk" class="btn danger" data-i18n="common.confirm">确认</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 统计面板 -->
+        <div id="statsModal" class="overlay hidden">
+            <div class="modal stats-modal">
+                <h2 data-i18n="admin.stats">统计</h2>
+                <div id="statsBody" class="stats-body">…</div>
+                <div class="modal-actions">
+                    <button id="statsCloseBtn" class="btn primary" data-i18n="settings.done">完成</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 审计日志 -->
+        <div id="auditModal" class="overlay hidden">
+            <div class="modal audit-modal">
+                <h2 data-i18n="admin.audit">审计日志</h2>
+                <div id="auditBody" class="audit-body">…</div>
+                <div class="modal-actions">
+                    <button id="auditRefreshBtn" class="btn ghost" data-i18n="admin.auditRefresh">刷新</button>
+                    <button id="auditCloseBtn" class="btn primary" data-i18n="settings.done">完成</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 恢复确认（复用删除确认的样式但文案不同） -->
+        <div id="restoreModal" class="overlay hidden">
+            <div class="modal">
+                <h2 data-i18n="admin.restore">恢复备份</h2>
+                <p id="restoreText" class="confirm-text" data-i18n="admin.restoreConfirm"></p>
+                <div class="modal-actions">
+                    <button id="restoreCancel" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                    <button id="restoreOk" class="btn danger" data-i18n="common.confirm">确认</button>
                 </div>
             </div>
         </div>

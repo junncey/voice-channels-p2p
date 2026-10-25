@@ -11,6 +11,7 @@ const DEFAULT_LANG = 'zh';
 const LANG_KEY = 'vc_lang';
 
 let dict = {};
+let currentLang = DEFAULT_LANG;
 
 function resolveLang() {
     const params = new URLSearchParams(location.search);
@@ -27,6 +28,7 @@ function resolveLang() {
 
 export async function initI18n() {
     const lang = resolveLang();
+    currentLang = lang;
     document.documentElement.lang = lang;
     try {
         const res = await fetch(`/lang/${lang}.json`, { cache: 'no-cache' });
@@ -35,6 +37,22 @@ export async function initI18n() {
         dict = {};
     }
     applyStaticTranslations();
+}
+
+/** The active language code ('zh' | 'en'). */
+export function getLang() {
+    return currentLang;
+}
+
+/**
+ * Switch the UI language. Everything static is translated at boot from
+ * data-i18n attributes, so the cheapest correct re-render is a reload —
+ * the caller decides when that is acceptable (and says so in its hint).
+ */
+export function setLang(lang) {
+    if (lang !== 'zh' && lang !== 'en') return;
+    localStorage.setItem(LANG_KEY, lang);
+    location.reload();
 }
 
 export function t(key, vars) {

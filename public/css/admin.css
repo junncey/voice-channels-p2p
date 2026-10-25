@@ -314,3 +314,91 @@
     accent-color: var(--danger);
 }
 
+/* ============================================================
+   New: stats panel + audit log
+   ============================================================ */
+
+.stats-modal,
+.audit-modal {
+    width: min(680px, 92vw);
+}
+.stats-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+.stats-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+}
+.stat-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-m);
+    background: var(--bg-1);
+}
+.stat-label {
+    font-size: 11.5px;
+    color: var(--text-3);
+}
+.stat-value {
+    font-size: 16px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-1);
+}
+.stats-table {
+    width: 100%;
+}
+
+.audit-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 60vh;
+    overflow-y: auto;
+    font-size: 12.5px;
+}
+.audit-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 5px 8px;
+    border-radius: var(--radius-s);
+}
+.audit-row:nth-child(odd) {
+    background: var(--bg-1);
+}
+.audit-time {
+    flex: 0 0 auto;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+.audit-event {
+    flex: 0 0 auto;
+    min-width: 84px;
+    font-weight: 600;
+    color: var(--accent);
+}
+.audit-event.hostKick,
+.audit-event.adminKick,
+.audit-event.adminKickGhost,
+.audit-event.hostRecall,
+.audit-event.channelDelete {
+    color: var(--danger);
+}
+.audit-event.restore,
+.audit-event.backup,
+.audit-event.scheduledBackup {
+    color: var(--info);
+}
+.audit-fields {
+    color: var(--text-2);
+    word-break: break-all;
+}

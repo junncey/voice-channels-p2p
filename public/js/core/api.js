@@ -57,8 +57,22 @@ export const api = {
         request(`/api/admin/channels/${encodeURIComponent(id)}`, { method: 'PUT', body, admin: true }),
     adminDeleteChannel: (id) =>
         request(`/api/admin/channels/${encodeURIComponent(id)}`, { method: 'DELETE', admin: true }),
-    adminKick: (channel, uuid) =>
-        request('/api/admin/kick', { method: 'POST', body: { channel, uuid }, admin: true }),
+    adminKick: (channel, uuid) => request('/api/admin/kick', { method: 'POST', body: { channel, uuid }, admin: true }),
+    adminStats: () => request('/api/admin/stats', { admin: true }),
+    adminAudit: (limit = 200) => request(`/api/admin/audit?limit=${encodeURIComponent(limit)}`, { admin: true }),
+
+    /** Upload a tar.gz backup and restore it over the live data (admin). */
+    adminRestore(file) {
+        return fetch('/api/admin/restore', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${getAdminToken()}`, 'Content-Type': 'application/gzip' },
+            body: file,
+        }).then(async (res) => {
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new ApiError(data.error || `HTTP ${res.status}`, res.status);
+            return data;
+        });
+    },
 
     /** Download the server backup (channels.json + chat history) as tar.gz. */
     adminBackup() {

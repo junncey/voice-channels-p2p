@@ -3,6 +3,11 @@
  * nickname above the bubble for others, centered time separators).
  * Plain text only (textContent everywhere, no HTML injection; image/avatar
  * sources must be validated data:image URLs — we never interpolate HTML).
+ *
+ * Message lifecycle after delivery (edit / recall / emoji reaction) is applied
+ * in place by editMessage/deleteMessage/reactMessage — the server broadcasts
+ * the persisted result to everyone including the sender, so the DOM follows
+ * the store instead of trusting local echo.
  */
 
 import { el, formatTime, formatDate, avatarColor } from './utils.js';
@@ -14,6 +19,40 @@ const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 // mirrors the server-side persisted-image cap — reject anything bigger on render
 const MAX_IMAGE_CHARS = 1600 * 1024;
 
+/** Palette offered by the reaction picker and the composer emoji button. */
+const EMOJIS = [
+    '👍',
+    '👎',
+    '❤️',
+    '😂',
+    '😭',
+    '😮',
+    '🥳',
+    '🎉',
+    '🔥',
+    '👀',
+    '🙏',
+    '👌',
+    '🤔',
+    '😅',
+    '😢',
+    '😡',
+    '🥰',
+    '😎',
+    '🤝',
+    '👏',
+    '💯',
+    '🤣',
+    '😍',
+    '🥺',
+    '😴',
+    '🫡',
+    '✅',
+    '❌',
+    '⚡',
+    '🌙',
+];
+
 /** Escape a member name for the mention RegExp. */
 function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -22,9 +61,12 @@ function escapeRegExp(text) {
 /**
  * @param {HTMLElement} container scrollable message list
  * @param {object} [options]
- * @param {string}  [options.emptyText] placeholder shown when the list is empty
- * @param {string}  [options.downloadText] lightbox save-image button label
+ * @param {string}  [options.emptyText] placeholder shown when the list is empty * @param {string}  [options.downloadText] lightbox save-image button label
  * @param {string}  [options.yesterdayText] time-separator label for yesterday
+ * @param {string}  [options.todayText] day separator label for today
+ * @param {function(Date): string} [options.dayText] day separator label (older days)
+ * @param {string}  [options.deletedText] tombstone text for recalled messages
+ * @param {string}  [options.editedText] "(edited)" marker
  * @param {function(string):string} [options.avatarFor] name -> custom avatar data URL ('' = none)
  * @param {function(number, number):string} [options.imagesProgress] (got, total) -> progress label
  * @param {string}  [options.failText] note when every image of a batch failed
@@ -32,7 +74,13 @@ function escapeRegExp(text) {
  * @param {string}  [options.historyEndText] scroll-up pagination end-of-history line
  * @param {function(): string[]} [options.mentionNames] live member names for @highlighting
  * @param {function(): string} [options.selfName] the local user's display name
- * @param {function(object): void} [options.onReply] ({name, text, ts}) — the row's reply button was clicked
+ * @param {function(): boolean} [options.isHost] presenter rights (recall anyone's message)
+ * @param {function(object): void} [options.onReply] ({name, text, ts}) — reply button clicked
+ * @param {function(object): void} [options.onEdit] ({name, text, ts}) — edit button clicked
+ * @param {function(object): void} [options.onDelete] ({name, ts}) — recall button clicked
+ * @param {function(object): void} [options.onReact] ({name, ts, emoji, on}) — reaction toggled
+ * @param {function(number): string} [options.jumpNewText] (n) -> "n new messages" pill label
+ * @param {string}  [options.jumpText] back-to-bottom pill label
  */
 export function initChat(
     container,
@@ -40,6 +88,10 @@ export function initChat(
         emptyText = '',
         downloadText = 'Save',
         yesterdayText = '昨天',
+        todayText = '今天',
+        dayText = null,
+        deletedText = '',
+        editedText = '',
         avatarFor = null,
         imagesProgress = (got, total) => `${got}/${total}`,
         failText = '',
@@ -47,14 +99,65 @@ export function initChat(
         historyEndText = '',
         mentionNames = () => [],
         selfName = () => '',
+        isHost = () => false,
         onReply = null,
+        onEdit = null,
+        onDelete = null,
+        onReact = null,
+        jumpNewText = (n) => `${n}`,
+        jumpText = '↓',
     } = {}
 ) {
+    console.log('[vc-build] chat-ackfix4');
     let emptyNode = null;
     let lastTime = null;
+    let lastDay = null; // toDateString() of the last rendered message's day
     let footerNode = null; // scroll-up pagination status line pinned to the top
     /** batchId -> { imagesEl, progressEl, textEl, expected, done } */
     const batches = new Map();
+    /** own rows awaiting the server's authoritative ts (FIFO, see bindServerTs) */
+    const pendingOwn = [];
+
+    // ----- back-to-bottom pill (also counts messages that arrived below the fold) -----
+    let jumpPill = null;
+    let newBelow = 0;
+
+    function nearBottom() {
+        return container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    }
+
+    function scrollBottom() {
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function updateJumpPill() {
+        if (nearBottom()) {
+            newBelow = 0;
+            if (jumpPill) jumpPill.classList.add('hidden');
+            return;
+        }
+        if (!jumpPill) {
+            jumpPill = el(
+                'button',
+                {
+                    class: 'chat-jump hidden',
+                    type: 'button',
+                    onclick: () => {
+                        scrollBottom();
+                        updateJumpPill();
+                    },
+                },
+                el('span', { class: 'chat-jump-label' })
+            );
+            // the composer follows the list in the DOM — hosting the pill there
+            // keeps it anchored above the input regardless of the composer height
+            (container.nextElementSibling || container.parentElement).append(jumpPill);
+        }
+        jumpPill.classList.remove('hidden');
+        jumpPill.firstChild.textContent = newBelow > 0 ? jumpNewText(newBelow) : jumpText;
+    }
+
+    container.addEventListener('scroll', updateJumpPill, { passive: true });
 
     function showEmpty() {
         if (!emptyText || emptyNode) return;
@@ -62,8 +165,15 @@ export function initChat(
         container.append(emptyNode);
     }
 
-    function nearBottom() {
-        return container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    function dayLabel(date) {
+        const now = new Date();
+        if (date.toDateString() === now.toDateString()) return todayText;
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        if (date.toDateString() === yesterday.toDateString()) return yesterdayText;
+        if (dayText) return dayText(date);
+        const y = date.getFullYear() === now.getFullYear() ? '' : `${date.getFullYear()}-`;
+        return `${y}${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     }
 
     function timeChipText(d) {
@@ -75,13 +185,24 @@ export function initChat(
         return d.getFullYear() === now.getFullYear() ? formatDate(d) : `${d.getFullYear()}/${formatDate(d)}`;
     }
 
+    /**
+     * Time chip between messages, upgraded to a full-day separator whenever
+     * the calendar day changes (always inserted then, regardless of the gap).
+     */
     function maybeTimeChip(time, stick) {
+        const day = time.toDateString();
+        if (day !== lastDay) {
+            append(el('div', { class: 'chat-time day', text: dayLabel(time) }), stick, true);
+            lastDay = day;
+            lastTime = time.getTime();
+            return;
+        }
         const ts = time.getTime();
         if (lastTime !== null && ts - lastTime <= TIME_GAP_MS) {
             lastTime = Math.max(lastTime, ts);
             return;
         }
-        append(el('div', { class: 'chat-time', text: timeChipText(time) }), stick);
+        append(el('div', { class: 'chat-time', text: timeChipText(time) }), stick, true);
         lastTime = ts;
     }
     /**
@@ -92,9 +213,22 @@ export function initChat(
      * @param {boolean} [msg.system]
      * @param {Date} [msg.time]
      * @param {object} [msg.reply] {name, text, ts} quote of the answered row
+     * @param {boolean} [msg.deleted] render as a recall tombstone
+     * @param {boolean} [msg.edited] show the "(edited)" marker
+     * @param {object|null} [msg.reactions] emoji -> [reactor names]
      */
-    function add({ name, text, self = false, system = false, time = new Date(), reply = null }) {
-        if (!text) return;
+    function add({
+        name,
+        text,
+        self = false,
+        system = false,
+        time = new Date(),
+        reply = null,
+        deleted = false,
+        edited = false,
+        reactions = null,
+    }) {
+        if (!text && !deleted) return;
         const stick = nearBottom();
         maybeTimeChip(new Date(time), stick);
 
@@ -102,9 +236,53 @@ export function initChat(
             append(el('div', { class: 'msg system' }, el('div', { class: 'msg-system-text', text })), stick);
             return;
         }
-        append(
-            buildMessage({ name, self, bubble: textBubble(text), ts: time.getTime(), reply, text }),
-            stick
+        const row = buildMessage({
+            name,
+            self,
+            bubble: deleted ? tombstoneBubble() : textBubble(text, edited),
+            ts: time.getTime(),
+            reply,
+            text: deleted ? '' : text,
+            deleted,
+            reactions,
+        });
+        append(row, stick);
+        // the server assigns the authoritative ts; chatAck binds it back to the
+        // row we just rendered (edit/recall/reaction look rows up by ts+name)
+        if (self && !deleted) rememberPending(row);
+    }
+
+    /** Queue a locally rendered own row until the server's chatAck lands. */
+    function rememberPending(row) {
+        if (!row || !row.dataset?.ts) return;
+        pendingOwn.push(row);
+        if (pendingOwn.length > 20) pendingOwn.shift();
+    }
+
+    /**
+     * Bind the server-assigned ts to the oldest still-pending own row. Called
+     * on every chatAck; a row removed by a channel switch is skipped.
+     */
+    function bindServerTs(ts) {
+        const value = Number(ts);
+        if (!Number.isFinite(value) || value <= 0) return;
+        while (pendingOwn.length) {
+            const row = pendingOwn.shift();
+            if (!row.isConnected) continue;
+            row.dataset.ts = String(value);
+            // the hover actions captured the old ts in their click closures —
+            // rebuild them so edit/recall use the server-side identity
+            refreshRowActions(row);
+            return;
+        }
+    }
+
+    /** Greyed-out body of a recalled message. */
+    function tombstoneBubble() {
+        return el(
+            'div',
+            { class: 'msg-bubble deleted' },
+            el('div', { class: 'msg-text tombstone', text: deletedText })
         );
     }
 
@@ -137,7 +315,7 @@ export function initChat(
             const time = msg.time instanceof Date && !isNaN(msg.time) ? msg.time : new Date();
             const text = typeof msg.text === 'string' ? msg.text : '';
             const images = validImages(msg.imgs);
-            if (!text && !images.length) continue;
+            if (!text && !images.length && !msg.deleted) continue;
 
             if (images.length) {
                 const stick = nearBottom();
@@ -145,19 +323,46 @@ export function initChat(
                 const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(images.length, 6))}` });
                 for (const src of images) imagesEl.append(imageNode(src, imageAlt));
                 const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
-                if (text) bubble.append(el('div', { class: 'msg-text' }, ...mentionSegments(text)));
-                append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts: time.getTime(), reply: validReply(msg.reply), text }), stick);
+                if (text) bubble.append(textNode(text, !!msg.edited));
+                append(
+                    buildMessage({
+                        name: msg.name,
+                        self: !!msg.self,
+                        bubble,
+                        ts: time.getTime(),
+                        reply: validReply(msg.reply),
+                        text,
+                        deleted: !!msg.deleted,
+                        reactions: validReactions(msg.reactions),
+                    }),
+                    stick
+                );
             } else {
-                add({ name: msg.name, text, self: !!msg.self, time, reply: validReply(msg.reply) });
+                add({
+                    name: msg.name,
+                    text,
+                    self: !!msg.self,
+                    time,
+                    reply: validReply(msg.reply),
+                    deleted: !!msg.deleted,
+                    edited: !!msg.edited,
+                    reactions: validReactions(msg.reactions),
+                });
             }
             shown++;
         }
         if (shown && dividerText) add({ text: dividerText, system: true });
     }
 
-    /** Plain-text bubble with @mention highlighting. */
-    function textBubble(text) {
-        return el('div', { class: 'msg-bubble' }, el('div', { class: 'msg-text' }, ...mentionSegments(text)));
+    /** Plain-text bubble with @mention highlighting (+ edited marker). */
+    function textBubble(text, edited = false) {
+        return el('div', { class: 'msg-bubble' }, textNode(text, edited));
+    }
+
+    function textNode(text, edited) {
+        const node = el('div', { class: 'msg-text' }, ...mentionSegments(text));
+        if (edited) node.append(el('span', { class: 'msg-edited', text: editedText }));
+        return node;
     }
 
     /**
@@ -186,7 +391,10 @@ export function initChat(
     /** Persisted image URLs, re-validated before touching the DOM. */
     function validImages(imgs) {
         return (Array.isArray(imgs) ? imgs : [])
-            .filter((src) => typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src))
+            .filter(
+                (src) =>
+                    typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src)
+            )
             .slice(0, 9);
     }
 
@@ -202,6 +410,17 @@ export function initChat(
             return null;
         }
         return { name: reply.name.slice(0, 24), text: reply.text.slice(0, 80), ts: reply.ts };
+    }
+
+    /** Reactions map from a message payload, shape-checked before rendering. */
+    function validReactions(reactions) {
+        if (!reactions || typeof reactions !== 'object' || Array.isArray(reactions)) return null;
+        const out = {};
+        for (const [emoji, names] of Object.entries(reactions)) {
+            if (typeof emoji !== 'string' || emoji.length > 16) continue;
+            if (Array.isArray(names)) out[emoji] = names.filter((n) => typeof n === 'string').slice(0, 50);
+        }
+        return Object.keys(out).length ? out : null;
     }
 
     function timeChipNode(time) {
@@ -225,26 +444,47 @@ export function initChat(
     function prependHistory(messages, { imageAlt = 'image' } = {}) {
         const frag = document.createDocumentFragment();
         let prevTs = null;
+        let prevDay = null;
         let shown = 0;
         for (const msg of Array.isArray(messages) ? messages : []) {
             if (!msg || typeof msg !== 'object') continue;
             const time = msg.time instanceof Date && !isNaN(msg.time) ? msg.time : new Date();
             const ts = time.getTime();
+            const day = time.toDateString();
             const text = typeof msg.text === 'string' ? msg.text : '';
             const images = validImages(msg.imgs);
-            if (!text && !images.length) continue;
+            if (!text && !images.length && !msg.deleted) continue;
 
-            if (prevTs === null || ts - prevTs > TIME_GAP_MS) frag.append(timeChipNode(time));
+            if (prevDay !== day) {
+                frag.append(el('div', { class: 'chat-time day', text: dayLabel(time) }));
+                prevDay = day;
+                prevTs = null;
+            } else if (prevTs === null || ts - prevTs > TIME_GAP_MS) {
+                frag.append(timeChipNode(time));
+            }
             let bubble;
-            if (images.length) {
+            if (msg.deleted) {
+                bubble = tombstoneBubble();
+            } else if (images.length) {
                 const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(images.length, 6))}` });
                 for (const src of images) imagesEl.append(imageNode(src, imageAlt));
                 bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
-                if (text) bubble.append(el('div', { class: 'msg-text' }, ...mentionSegments(text)));
+                if (text) bubble.append(textNode(text, !!msg.edited));
             } else {
-                bubble = textBubble(text);
+                bubble = textBubble(text, !!msg.edited);
             }
-            frag.append(buildMessage({ name: msg.name, self: !!msg.self, bubble, ts, reply: validReply(msg.reply), text }));
+            frag.append(
+                buildMessage({
+                    name: msg.name,
+                    self: !!msg.self,
+                    bubble,
+                    ts,
+                    reply: validReply(msg.reply),
+                    text: msg.deleted ? '' : text,
+                    deleted: !!msg.deleted,
+                    reactions: validReactions(msg.reactions),
+                })
+            );
             prevTs = ts;
             shown++;
         }
@@ -267,9 +507,15 @@ export function initChat(
             }
         }
         if (topRow?.dataset?.ts) {
+            const topDate = new Date(Number(topRow.dataset.ts));
+            const newDay = topDate.toDateString() !== prevDay;
             const gap = Number(topRow.dataset.ts) - prevTs;
-            if (gap > TIME_GAP_MS) {
-                if (!topChip) frag.append(timeChipNode(new Date(Number(topRow.dataset.ts))));
+            if (newDay) {
+                // calendar-day boundary always separates — as a day line
+                if (topChip) topChip.replaceWith(el('div', { class: 'chat-time day', text: dayLabel(topDate) }));
+                else frag.append(el('div', { class: 'chat-time day', text: dayLabel(topDate) }));
+            } else if (gap > TIME_GAP_MS) {
+                if (!topChip) frag.append(timeChipNode(topDate));
                 // else the existing chip already separates the two blocks
             } else if (topChip) {
                 // the boundary chip may itself be the insert anchor (first
@@ -326,11 +572,21 @@ export function initChat(
         const imagesEl = el('div', { class: `msg-images c${Math.max(1, Math.min(count, 6))}` });
         const progressEl = el('div', { class: 'msg-img-progress', text: imagesProgress(0, count) });
         const bubble = el('div', { class: 'msg-bubble img' }, imagesEl);
-        if (text) bubble.append(el('div', { class: 'msg-text' }, ...mentionSegments(text)));
+        if (text) bubble.append(textNode(text, false));
         bubble.append(progressEl);
-        append(buildMessage({ name, self, bubble, ts: when.getTime(), reply: validReply(reply), text }), stick);
+        const row = buildMessage({ name, self, bubble, ts: when.getTime(), reply: validReply(reply), text });
+        append(row, stick);
+        if (self) rememberPending(row); // chatAck after the batch is stored
 
-        batches.set(batch, { row: container.lastChild, imagesEl, progressEl, bubble, expected: count, done: 0, failed: 0 });
+        batches.set(batch, {
+            row: container.lastChild,
+            imagesEl,
+            progressEl,
+            bubble,
+            expected: count,
+            done: 0,
+            failed: 0,
+        });
     }
 
     /**
@@ -369,7 +625,7 @@ export function initChat(
                 entry.progressEl.remove();
             }
             batches.delete(batch);
-            if (stick) container.scrollTop = container.scrollHeight;
+            if (stick) scrollBottom();
             return;
         }
         entry.progressEl.textContent = imagesProgress(entry.done, entry.expected);
@@ -387,35 +643,201 @@ export function initChat(
         return img;
     }
 
+    /** Find a rendered row by ts + sender name (the message identity). */
+    function findRow(name, ts) {
+        if (!name || !Number.isFinite(ts)) return null;
+        for (const child of [...container.children].reverse()) {
+            if (child.classList?.contains('msg') && child.dataset?.ts === String(ts) && child.dataset?.name === name) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    // ----- live message lifecycle (server-broadcast results) -----
+
+    /** Apply an edit broadcast: new text + the edited marker. */
+    function editMessage({ name, ts, text }) {
+        const row = findRow(name, ts);
+        if (!row || typeof text !== 'string') return;
+        row._deleted = false;
+        row.dataset.text = text;
+        const bubble = row.querySelector('.msg-bubble');
+        if (!bubble) return;
+        const quote = row.querySelector('.msg-quote');
+        const imgs = row.querySelector('.msg-images');
+        bubble.replaceChildren();
+        if (quote) bubble.append(quote);
+        if (imgs) bubble.append(imgs);
+        bubble.append(textNode(text, true));
+        refreshRowActions(row);
+    }
+
+    /** Apply a recall broadcast: the row becomes a tombstone. */
+    function deleteMessage({ name, ts }) {
+        const row = findRow(name, ts);
+        if (!row) return;
+        row._deleted = true;
+        row.dataset.text = '';
+        row.classList.add('recalled');
+        const bubble = row.querySelector('.msg-bubble');
+        if (bubble) bubble.replaceChildren(el('div', { class: 'msg-text tombstone', text: deletedText }));
+        row.querySelector('.msg-reactions')?.remove();
+        row.querySelector('.msg-actions')?.remove();
+    }
+
+    /** Apply a reaction broadcast: re-render the reaction bar from the map. */
+    function reactMessage({ name, ts, reactions }) {
+        const row = findRow(name, ts);
+        if (!row || row._deleted) return;
+        row.querySelector('.msg-reactions')?.remove();
+        const map = validReactions(reactions);
+        row._reactions = map || undefined;
+        if (!map) return;
+        row.querySelector('.msg-body')?.append(reactionsNode(row, map));
+    }
+
+    /** Reaction chips under a bubble; clicking toggles the local user's entry. */
+    function reactionsNode(row, map) {
+        const me = selfName();
+        const wrap = el('div', { class: 'msg-reactions' });
+        for (const [emoji, names] of Object.entries(map)) {
+            const mine = names.includes(me);
+            const chip = el(
+                'button',
+                {
+                    class: 'msg-reaction' + (mine ? ' mine' : ''),
+                    type: 'button',
+                    title: names.slice(0, 6).join(', '),
+                },
+                emoji,
+                names.length > 1 ? el('span', { class: 'msg-reaction-count', text: String(names.length) }) : null
+            );
+            chip.addEventListener('click', (event) => {
+                event.stopPropagation();
+                onReact?.({ name: row.dataset.name, ts: Number(row.dataset.ts), emoji, on: !mine });
+            });
+            wrap.append(chip);
+        }
+        return wrap;
+    }
+
+    /** Rebuild a row's hover action buttons after a state change. */
+    function refreshRowActions(row) {
+        row.querySelector('.msg-actions')?.remove();
+        const actions = rowActionsNode(row);
+        if (actions) row.append(actions);
+    }
+
+    /** The hover action cluster: reply / react / edit / recall. */
+    function rowActionsNode(row) {
+        if (!onReply && !onReact && !onEdit && !onDelete) return null;
+        const name = row.dataset.name || '?';
+        const ts = Number(row.dataset.ts) || 0;
+        const mine = name === selfName();
+        const host = isHost();
+        const buttons = [];
+        if (onReply) {
+            buttons.push(
+                el(
+                    'button',
+                    {
+                        class: 'msg-action-btn',
+                        type: 'button',
+                        'aria-label': 'reply',
+                        title: 'reply',
+                        onclick: (event) => {
+                            event.stopPropagation();
+                            onReply({ name, text: row.dataset.text || '', ts });
+                        },
+                    },
+                    '↩'
+                )
+            );
+        }
+        if (onReact && !row._deleted) {
+            buttons.push(
+                el(
+                    'button',
+                    {
+                        class: 'msg-action-btn',
+                        type: 'button',
+                        'aria-label': 'react',
+                        title: 'react',
+                        onclick: (event) => {
+                            event.stopPropagation();
+                            openEmojiPicker(event.currentTarget, (emoji) =>
+                                onReact({ name, ts, emoji, on: !(row._reactions?.[emoji] || []).includes(selfName()) })
+                            );
+                        },
+                    },
+                    '😊'
+                )
+            );
+        }
+        if (onEdit && mine && !row._deleted && row.dataset.text) {
+            buttons.push(
+                el(
+                    'button',
+                    {
+                        class: 'msg-action-btn',
+                        type: 'button',
+                        'aria-label': 'edit',
+                        title: 'edit',
+                        onclick: (event) => {
+                            event.stopPropagation();
+                            onEdit({ name, text: row.dataset.text, ts });
+                        },
+                    },
+                    '✎'
+                )
+            );
+        }
+        if (onDelete && !row._deleted && (mine || host)) {
+            buttons.push(
+                el(
+                    'button',
+                    {
+                        class: 'msg-action-btn danger',
+                        type: 'button',
+                        'aria-label': 'recall',
+                        title: 'recall',
+                        onclick: (event) => {
+                            event.stopPropagation();
+                            onDelete({ name, ts });
+                        },
+                    },
+                    '🗑'
+                )
+            );
+        }
+        if (!buttons.length) return null;
+        return el('div', { class: 'msg-actions' }, ...buttons);
+    }
+
     /** One QQ-style row: avatar beside a body of [nickname] + bubble.
      *  DOM order is [avatar, body] for BOTH sides — .msg.self's
      *  flex-direction: row-reverse flips it so the avatar lands on the
      *  right edge with the bubble to its left. `ts` tags the row so the
      *  scroll-up pagination can stitch time chips to the existing top.
-     *  A reply quote (when present) rides at the top of the bubble, and a
-     *  hover reply button exposes the row to the onReply callback. */
-    function buildMessage({ name, self, bubble, ts, reply = null, text = '' }) {
+     *  A reply quote (when present) rides at the top of the bubble, hover
+     *  buttons expose reply/react/edit/recall, and a reaction bar renders
+     *  under the bubble when the row carries reactions. */
+    function buildMessage({ name, self, bubble, ts, reply = null, text = '', deleted = false, reactions = null }) {
         const row = el('div', {
-            class: 'msg' + (self ? ' self' : ''),
-            dataset: { name: name || '?', ...(ts ? { ts: String(ts) } : {}) },
+            class: 'msg' + (self ? ' self' : '') + (deleted ? ' recalled' : ''),
+            dataset: { name: name || '?', ...(ts ? { ts: String(ts) } : {}), ...(text ? { text } : {}) },
         });
+        row._deleted = deleted;
+        row._reactions = reactions || undefined;
         if (reply) bubble.prepend(quoteNode(reply));
         const body = el('div', { class: 'msg-body' });
         if (!self && name) body.append(el('div', { class: 'msg-name', text: name }));
         body.append(bubble);
+        if (reactions) body.append(reactionsNode(row, reactions));
         row.append(avatarNode(name), body);
-        if (onReply) {
-            const btn = el('button', {
-                class: 'msg-reply-btn',
-                type: 'button',
-                'aria-label': 'reply',
-                onclick: (event) => {
-                    event.stopPropagation();
-                    onReply({ name: name || '?', text, ts: ts || 0 });
-                },
-            });
-            row.append(btn);
-        }
+        const actions = rowActionsNode(row);
+        if (actions) row.append(actions);
         return row;
     }
 
@@ -429,10 +851,7 @@ export function initChat(
         );
         if (reply.ts) {
             node.addEventListener('click', () => {
-                const target = [...container.children].find(
-                    (child) =>
-                        child.classList?.contains('msg') && child.dataset?.ts === String(reply.ts) && child.dataset?.name === reply.name
-                );
+                const target = findRow(reply.name, reply.ts);
                 if (!target) return;
                 target.scrollIntoView({ block: 'center', behavior: 'smooth' });
                 target.classList.add('flash');
@@ -477,13 +896,48 @@ export function initChat(
         }
     }
 
-    function append(node, stick) {
+    // ----- client-side search over the rendered rows (loaded pages only) -----
+
+    /**
+     * Filter the rendered list by a query (matches sender name and text).
+     * '' / null clears the filter. Returns { total, hits } for the caller's
+     * counter, or null when the filter was cleared.
+     */
+    function setSearch(query) {
+        const q = (query || '').trim().toLowerCase();
+        if (!q) {
+            container.classList.remove('searching');
+            for (const child of container.children) child.classList.remove('hit', 'miss');
+            return null;
+        }
+        container.classList.add('searching');
+        let total = 0;
+        let hits = 0;
+        for (const child of container.children) {
+            if (!child.classList?.contains('msg') || child.classList.contains('system')) {
+                child.classList.add('miss');
+                child.classList.remove('hit');
+                continue;
+            }
+            total++;
+            const name = (child.dataset?.name || '').toLowerCase();
+            const text = (child.dataset?.text || '').toLowerCase();
+            const match = name.includes(q) || text.includes(q);
+            child.classList.toggle('hit', match);
+            child.classList.toggle('miss', !match);
+            if (match) hits++;
+        }
+        return { total, hits };
+    }
+
+    function append(node, stick, isChip = false) {
         if (emptyNode) {
             emptyNode.remove();
             emptyNode = null;
         }
         container.append(node);
-        if (stick) container.scrollTop = container.scrollHeight;
+        if (stick) scrollBottom();
+        else if (!isChip && node.classList?.contains('msg')) newBelow = newBelow + 1;
         // cap history so a long session can't grow the DOM unbounded
         while (container.children.length > 300) {
             const removed = container.firstChild;
@@ -495,6 +949,7 @@ export function initChat(
             removed.remove();
         }
         if (!container.children.length) showEmpty();
+        updateJumpPill(); // shows/hides the pill without a scroll event
     }
 
     // ----- lightbox (click an image to view it full size) -----
@@ -507,7 +962,12 @@ export function initChat(
         img.src = src;
         const download = el('a', { class: 'btn ghost sm', download: alt || 'image', href: src, text: downloadText });
         download.setAttribute('download', alt || 'image');
-        lightbox = el('div', { class: 'lightbox', onclick: () => closeLightbox() }, el('div', { class: 'lightbox-bar', onclick: (e) => e.stopPropagation() }, download), img);
+        lightbox = el(
+            'div',
+            { class: 'lightbox', onclick: () => closeLightbox() },
+            el('div', { class: 'lightbox-bar', onclick: (e) => e.stopPropagation() }, download),
+            img
+        );
         document.body.append(lightbox);
         document.addEventListener('keydown', lightboxEsc);
     }
@@ -524,5 +984,84 @@ export function initChat(
     }
 
     showEmpty();
-    return { add, addHistory, prependHistory, setHistoryFooter, addImage, openBatch, addBatchImage, failBatchImage, setAvatar, renamePeer };
+    return {
+        add,
+        addHistory,
+        prependHistory,
+        setHistoryFooter,
+        addImage,
+        openBatch,
+        addBatchImage,
+        failBatchImage,
+        setAvatar,
+        renamePeer,
+        editMessage,
+        deleteMessage,
+        reactMessage,
+        bindServerTs,
+        setSearch,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Emoji picker — a small fixed palette used by the reaction button and the
+// composer. Plain textContent, one popover at a time, closes on outside
+// click / Esc / pick.
+// ---------------------------------------------------------------------------
+
+let emojiPickerNode = null;
+
+export function closeEmojiPicker() {
+    if (!emojiPickerNode) return;
+    emojiPickerNode.remove();
+    document.removeEventListener('click', emojiPickerOutside, true);
+    document.removeEventListener('keydown', emojiPickerEsc, true);
+    emojiPickerNode = null;
+}
+
+function emojiPickerOutside(event) {
+    if (emojiPickerNode && !emojiPickerNode.contains(event.target)) closeEmojiPicker();
+}
+
+function emojiPickerEsc(event) {
+    if (event.key === 'Escape') closeEmojiPicker();
+}
+
+/**
+ * @param {HTMLElement} anchor element to position near
+ * @param {function(string): void} onPick called with the chosen emoji
+ */
+export function openEmojiPicker(anchor, onPick) {
+    closeEmojiPicker();
+    emojiPickerNode = el(
+        'div',
+        { class: 'emoji-picker', role: 'menu' },
+        ...EMOJIS.map((emoji) =>
+            el('button', {
+                class: 'emoji-picker-item',
+                type: 'button',
+                text: emoji,
+                onclick: () => {
+                    closeEmojiPicker();
+                    onPick(emoji);
+                },
+            })
+        )
+    );
+    document.body.append(emojiPickerNode);
+    const rect = anchor.getBoundingClientRect();
+    const pick = emojiPickerNode.getBoundingClientRect();
+    // clamp inside the viewport: prefer above-right of the anchor
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - pick.width - 8));
+    const top =
+        rect.top - pick.height - 6 > 8
+            ? rect.top - pick.height - 6
+            : Math.min(rect.bottom + 6, window.innerHeight - pick.height - 8);
+    emojiPickerNode.style.left = `${left}px`;
+    emojiPickerNode.style.top = `${top}px`;
+    // the opening click itself must not count as "outside"
+    setTimeout(() => {
+        document.addEventListener('click', emojiPickerOutside, true);
+        document.addEventListener('keydown', emojiPickerEsc, true);
+    }, 0);
 }

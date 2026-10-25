@@ -5,6 +5,10 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>语音频道</title>
         <link rel="icon" href="/images/favicon.svg" type="image/svg+xml" />
+        <link rel="manifest" href="/manifest.webmanifest" />
+        <link rel="apple-touch-icon" href="/images/icon-192.png" />
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d1117" />
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#e8ecf2" />
         <script src="/js/core/theme-boot.js"></script>
         <link rel="stylesheet" href="/css/tokens.css" />
         <link rel="stylesheet" href="/css/base.css" />
@@ -14,12 +18,25 @@
         <header class="channel-header">
             <div class="channel-id">
                 <button id="backBtn" class="icon-btn" data-i18n-title="notFound.home" aria-label="home">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M19 12H5" /><path d="m12 19-7-7 7-7" />
+                    <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <path d="M19 12H5" />
+                        <path d="m12 19-7-7 7-7" />
                     </svg>
                 </button>
                 <div class="channel-titles">
-                    <h1><span id="channelName">…</span><span id="tempBadge" class="badge temp hidden" data-i18n="channel.tempBadge">临时房间</span></h1>
+                    <h1>
+                        <span id="channelName">…</span
+                        ><span id="tempBadge" class="badge temp hidden" data-i18n="channel.tempBadge">临时房间</span>
+                    </h1>
                     <p id="channelDesc"></p>
                 </div>
             </div>
@@ -29,15 +46,33 @@
                     <span id="onlineCount">0</span>
                 </span>
                 <button id="copyLinkBtn" class="btn ghost sm">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg
+                        viewBox="0 0 24 24"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
                         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
                         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
                     </svg>
                     <span data-i18n="channel.copyLink">复制邀请链接</span>
                 </button>
                 <span id="hostBadge" class="badge host hidden" data-i18n="channel.hostBadge">主持人</span>
-                <button id="exportChatBtn" class="btn ghost sm hidden" data-i18n="channel.exportChat" data-i18n-title="channel.exportChatHint">导出聊天</button>
-                <button id="hostLoginEntryBtn" class="btn ghost sm hidden" data-i18n="channel.hostLoginBtn">主持人登录</button>
+                <button
+                    id="exportChatBtn"
+                    class="btn ghost sm hidden"
+                    data-i18n="channel.exportChat"
+                    data-i18n-title="channel.exportChatHint"
+                >
+                    导出聊天
+                </button>
+                <button id="hostLoginEntryBtn" class="btn ghost sm hidden" data-i18n="channel.hostLoginBtn">
+                    主持人登录
+                </button>
                 <button id="lockBtn" class="btn ghost sm hidden">
                     <span id="lockBtnLabel"></span>
                 </button>
@@ -58,11 +93,51 @@
                         <span id="micBtnIcon" class="mic-icon mic-on"></span>
                         <span id="micBtnLabel"></span>
                     </button>
+                    <button id="pttHoldBtn" class="ptt-hold-btn hidden" data-i18n="channel.pttHold">按住说话</button>
                     <div class="voice-controls-row">
-                        <button id="settingsBtn" class="btn ghost voice-icon-btn" data-i18n-title="settings.title" aria-label="audio settings">
-                            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <button
+                            id="deafenBtn"
+                            class="btn ghost voice-icon-btn"
+                            data-i18n-title="channel.deafen"
+                            aria-label="deafen"
+                        >
+                            <svg
+                                id="deafenIcon"
+                                viewBox="0 0 24 24"
+                                width="17"
+                                height="17"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            >
+                                <path d="M3 14v-2a9 9 0 0 1 18 0v2" />
+                                <path d="M21 14a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2h1" />
+                                <path d="M3 14a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2H5" />
+                                <line x1="2" y1="2" x2="22" y2="22" />
+                            </svg>
+                        </button>
+                        <button
+                            id="settingsBtn"
+                            class="btn ghost voice-icon-btn"
+                            data-i18n-title="settings.title"
+                            aria-label="audio settings"
+                        >
+                            <svg
+                                viewBox="0 0 24 24"
+                                width="17"
+                                height="17"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            >
                                 <circle cx="12" cy="12" r="3" />
-                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+                                <path
+                                    d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"
+                                />
                             </svg>
                         </button>
                         <button id="leaveBtn" class="btn danger voice-btn" data-i18n="channel.leave">离开频道</button>
@@ -74,19 +149,108 @@
             <section class="panel chat-panel">
                 <div class="panel-head">
                     <h2 data-i18n="channel.chatPanel">文字聊天</h2>
+                    <div class="chat-search" id="chatSearchWrap">
+                        <input
+                            id="chatSearchInput"
+                            class="input chat-search-input hidden"
+                            data-i18n-ph="channel.searchPlaceholder"
+                            maxlength="40"
+                            autocomplete="off"
+                        />
+                        <span id="chatSearchCount" class="chat-search-count hidden"></span>
+                        <button
+                            type="button"
+                            id="chatSearchBtn"
+                            class="icon-btn chat-search-btn"
+                            data-i18n-title="channel.search"
+                            aria-label="search messages"
+                        >
+                            <svg
+                                viewBox="0 0 24 24"
+                                width="15"
+                                height="15"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            >
+                                <circle cx="11" cy="11" r="7" />
+                                <path d="m20 20-3.5-3.5" />
+                            </svg>
+                        </button>
+                    </div>
                 </div>
                 <div id="chatMessages" class="chat-messages"></div>
                 <div id="chatComposer" class="chat-composer">
+                    <div id="typingBar" class="typing-bar hidden"><span id="typingText"></span></div>
                     <div id="replyBar" class="reply-bar hidden">
                         <span id="replyPreview" class="reply-preview"></span>
-                        <button type="button" id="replyCancelBtn" class="reply-cancel" data-i18n-title="chat.replyCancel">✕</button>
+                        <button
+                            type="button"
+                            id="replyCancelBtn"
+                            class="reply-cancel"
+                            data-i18n-title="chat.replyCancel"
+                        >
+                            ✕
+                        </button>
+                    </div>
+                    <div id="editBar" class="reply-bar edit hidden">
+                        <span id="editPreview" class="reply-preview"></span>
+                        <button type="button" id="editCancelBtn" class="reply-cancel" data-i18n-title="chat.editCancel">
+                            ✕
+                        </button>
                     </div>
                     <div id="chatAttachments" class="chat-attachments hidden"></div>
                     <div class="composer-wrap">
                         <form id="chatForm" class="chat-form" autocomplete="off">
-                            <textarea id="chatInput" class="input chat-input" data-i18n-ph="channel.chatPlaceholder" maxlength="500" rows="1"></textarea>
-                            <button type="button" id="imageBtn" class="icon-btn chat-image-btn" data-i18n-title="chat.sendImage" aria-label="send image">
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <textarea
+                                id="chatInput"
+                                class="input chat-input"
+                                data-i18n-ph="channel.chatPlaceholder"
+                                maxlength="500"
+                                rows="1"
+                            ></textarea>
+                            <button
+                                type="button"
+                                id="emojiBtn"
+                                class="icon-btn chat-image-btn"
+                                data-i18n-title="channel.emoji"
+                                aria-label="emoji"
+                            >
+                                <svg
+                                    viewBox="0 0 24 24"
+                                    width="18"
+                                    height="18"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                >
+                                    <circle cx="12" cy="12" r="9" />
+                                    <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+                                    <line x1="9" y1="9" x2="9.01" y2="9" />
+                                    <line x1="15" y1="9" x2="15.01" y2="9" />
+                                </svg>
+                            </button>
+                            <button
+                                type="button"
+                                id="imageBtn"
+                                class="icon-btn chat-image-btn"
+                                data-i18n-title="chat.sendImage"
+                                aria-label="send image"
+                            >
+                                <svg
+                                    viewBox="0 0 24 24"
+                                    width="18"
+                                    height="18"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                >
                                     <rect x="3" y="3" width="18" height="18" rx="2" />
                                     <circle cx="9" cy="9" r="2" />
                                     <path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21" />
@@ -106,9 +270,26 @@
                                     </label>
                                 </div>
                                 <div class="send-btn-group">
-                                    <button type="submit" class="btn primary send-btn" data-i18n="channel.send">发送</button>
-                                    <button type="button" id="sendKeyBtn" class="btn primary send-caret-btn" data-i18n-title="channel.sendKeyTitle" aria-haspopup="true">
-                                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                                    <button type="submit" class="btn primary send-btn" data-i18n="channel.send">
+                                        发送
+                                    </button>
+                                    <button
+                                        type="button"
+                                        id="sendKeyBtn"
+                                        class="btn primary send-caret-btn"
+                                        data-i18n-title="channel.sendKeyTitle"
+                                        aria-haspopup="true"
+                                    >
+                                        <svg
+                                            viewBox="0 0 24 24"
+                                            width="13"
+                                            height="13"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            stroke-width="2.6"
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                        >
                                             <path d="m17 14-5-5-5 5" />
                                         </svg>
                                     </button>
@@ -131,13 +312,24 @@
                     <input id="nickInput" class="input" data-i18n-ph="channel.nickPlaceholder" maxlength="24" />
                 </div>
                 <div id="joinPasswordField" class="field hidden">
-                    <input id="channelPwInput" class="input" type="password" data-i18n-ph="channel.passwordPlaceholder" maxlength="64" autocomplete="off" />
+                    <input
+                        id="channelPwInput"
+                        class="input"
+                        type="password"
+                        data-i18n-ph="channel.passwordPlaceholder"
+                        maxlength="64"
+                        autocomplete="off"
+                    />
                 </div>
                 <p id="joinError" class="join-error" role="alert"></p>
                 <button id="joinBtn" class="btn primary join-btn" data-i18n="channel.joinBtn">进入频道</button>
                 <div class="join-row">
-                    <button id="textOnlyBtn" class="btn ghost join-alt" data-i18n="channel.textOnlyBtn">仅文字模式加入</button>
-                    <button id="hostLoginBtn" class="btn ghost join-alt" data-i18n="channel.hostLoginBtn">主持人登录</button>
+                    <button id="textOnlyBtn" class="btn ghost join-alt" data-i18n="channel.textOnlyBtn">
+                        仅文字模式加入
+                    </button>
+                    <button id="hostLoginBtn" class="btn ghost join-alt" data-i18n="channel.hostLoginBtn">
+                        主持人登录
+                    </button>
                 </div>
             </div>
         </div>
@@ -153,12 +345,22 @@
                     </div>
                     <div class="field">
                         <label for="hostPass" data-i18n="channel.hostPassword">密码</label>
-                        <input id="hostPass" class="input" type="password" maxlength="64" autocomplete="current-password" />
+                        <input
+                            id="hostPass"
+                            class="input"
+                            type="password"
+                            maxlength="64"
+                            autocomplete="current-password"
+                        />
                     </div>
                     <p id="hostLoginError" class="join-error" role="alert"></p>
                     <div class="modal-actions">
-                        <button type="button" id="hostCancelBtn" class="btn ghost" data-i18n="admin.cancel">取消</button>
-                        <button type="submit" class="btn primary" data-i18n="channel.hostLoginSubmit">登录并进入</button>
+                        <button type="button" id="hostCancelBtn" class="btn ghost" data-i18n="admin.cancel">
+                            取消
+                        </button>
+                        <button type="submit" class="btn primary" data-i18n="channel.hostLoginSubmit">
+                            登录并进入
+                        </button>
                     </div>
                 </form>
             </div>
@@ -175,7 +377,9 @@
                     </div>
                     <p id="renameError" class="join-error" role="alert"></p>
                     <div class="modal-actions">
-                        <button type="button" id="renameCancelBtn" class="btn ghost" data-i18n="admin.cancel">取消</button>
+                        <button type="button" id="renameCancelBtn" class="btn ghost" data-i18n="admin.cancel">
+                            取消
+                        </button>
                         <button type="submit" class="btn primary" data-i18n="channel.renameSubmit">保存</button>
                     </div>
                 </form>
@@ -192,11 +396,27 @@
                         <div class="avatar-row">
                             <div id="avatarPreview" class="avatar-preview"></div>
                             <div class="avatar-actions">
-                                <button type="button" id="avatarUploadBtn" class="btn ghost sm" data-i18n="settings.avatarChange">更换头像</button>
-                                <button type="button" id="avatarResetBtn" class="btn ghost sm" data-i18n="settings.avatarReset">恢复默认</button>
+                                <button
+                                    type="button"
+                                    id="avatarUploadBtn"
+                                    class="btn ghost sm"
+                                    data-i18n="settings.avatarChange"
+                                >
+                                    更换头像
+                                </button>
+                                <button
+                                    type="button"
+                                    id="avatarResetBtn"
+                                    class="btn ghost sm"
+                                    data-i18n="settings.avatarReset"
+                                >
+                                    恢复默认
+                                </button>
                             </div>
                         </div>
-                        <p class="settings-hint" data-i18n="settings.avatarHint">图片会自动裁剪为方形，仅保存在本浏览器，并同步展示给频道成员</p>
+                        <p class="settings-hint" data-i18n="settings.avatarHint">
+                            图片会自动裁剪为方形，仅保存在本浏览器，并同步展示给频道成员
+                        </p>
                         <input type="file" id="avatarFileInput" accept="image/*" class="hidden" />
                     </section>
                     <section class="settings-section">
@@ -215,13 +435,18 @@
                             <span data-i18n="settings.musicMode">高保真（音乐）模式</span>
                             <input type="checkbox" id="musicToggle" class="switch" />
                         </label>
-                        <p class="settings-hint" data-i18n="settings.musicModeHint">自动关闭下方三个处理开关，以更高码率发送立体声，适合分享音乐</p>
+                        <p class="settings-hint" data-i18n="settings.musicModeHint">
+                            自动关闭下方三个处理开关，以更高码率发送立体声，适合分享音乐
+                        </p>
                         <div class="volume-row">
                             <label for="bitrateSlider" data-i18n="settings.bitrate">码率上限</label>
                             <input type="range" id="bitrateSlider" min="24" max="256" step="8" />
                             <span id="bitrateVal" class="volume-val">64 kbps</span>
                         </div>
-                        <p class="settings-hint" data-i18n="settings.bitrateHint">发送编码的码率上限，Opus 按需取用、实际流量通常更低；语音 64kbps 已足够，分享音乐建议 128kbps 以上</p>
+                        <p class="settings-hint" data-i18n="settings.bitrateHint">
+                            发送编码的码率上限，Opus 按需取用、实际流量通常更低；语音 64kbps 已足够，分享音乐建议
+                            128kbps 以上
+                        </p>
                         <label class="switch-row">
                             <span data-i18n="settings.noiseSuppression">噪声抑制</span>
                             <input type="checkbox" id="nsToggle" class="switch" />
@@ -239,22 +464,30 @@
                             <input type="checkbox" id="pttToggle" class="switch" />
                         </label>
                         <p class="settings-hint" data-i18n="settings.pushToTalkHint">开启后默认闭麦，按住 V 键说话</p>
-                        <button type="button" id="testMicBtn" class="btn ghost sm" data-i18n="settings.testMic">测试麦克风</button>
-                        <p class="settings-hint" data-i18n="settings.micTestHint">开启后实时听到自己的声音（约延迟半秒），再次点击停止</p>
+                        <button type="button" id="testMicBtn" class="btn ghost sm" data-i18n="settings.testMic">
+                            测试麦克风
+                        </button>
+                        <p class="settings-hint" data-i18n="settings.micTestHint">
+                            开启后实时听到自己的声音（约延迟半秒），再次点击停止
+                        </p>
                     </section>
                     <section class="settings-section">
                         <h3 data-i18n="settings.spk">扬声器</h3>
                         <div class="field">
                             <label data-i18n="settings.spkDevice">输出设备</label>
                             <div id="spkDeviceSelect" class="dropdown-root"></div>
-                            <p id="sinkUnsupported" class="settings-hint hidden" data-i18n="settings.sinkUnsupported">当前浏览器不支持选择输出设备</p>
+                            <p id="sinkUnsupported" class="settings-hint hidden" data-i18n="settings.sinkUnsupported">
+                                当前浏览器不支持选择输出设备
+                            </p>
                         </div>
                         <div class="volume-row">
                             <label for="volumeSlider" data-i18n="settings.volume">音量</label>
                             <input type="range" id="volumeSlider" min="0" max="100" step="1" />
                             <span id="volumeVal" class="volume-val">100%</span>
                         </div>
-                        <button type="button" id="testSpkBtn" class="btn ghost sm" data-i18n="settings.testSpk">测试扬声器</button>
+                        <button type="button" id="testSpkBtn" class="btn ghost sm" data-i18n="settings.testSpk">
+                            测试扬声器
+                        </button>
                     </section>
                     <section class="settings-section">
                         <h3 data-i18n="settings.sounds">操作音效</h3>
@@ -268,7 +501,49 @@
                             <span id="soundVolumeVal" class="volume-val">50%</span>
                         </div>
                         <div id="soundEventList" class="sound-event-list"></div>
-                        <p class="settings-hint" data-i18n="settings.soundsHint">音效仅在本机播放；「上传自定义音效」会替换该事件的提示音，文件只保存在本浏览器，不会发送给其他人</p>
+                        <p class="settings-hint" data-i18n="settings.soundsHint">
+                            音效仅在本机播放；「上传自定义音效」会替换该事件的提示音，文件只保存在本浏览器，不会发送给其他人
+                        </p>
+                    </section>
+                    <section class="settings-section">
+                        <h3 data-i18n="settings.appearance">外观与语言</h3>
+                        <div class="field">
+                            <label data-i18n="settings.theme">主题</label>
+                            <div class="segmented" id="themeSegmented">
+                                <button
+                                    type="button"
+                                    class="segment"
+                                    data-theme-pref="dark"
+                                    data-i18n="settings.themeDark"
+                                >
+                                    深色
+                                </button>
+                                <button
+                                    type="button"
+                                    class="segment"
+                                    data-theme-pref="light"
+                                    data-i18n="settings.themeLight"
+                                >
+                                    浅色
+                                </button>
+                                <button
+                                    type="button"
+                                    class="segment"
+                                    data-theme-pref="auto"
+                                    data-i18n="settings.themeAuto"
+                                >
+                                    跟随系统
+                                </button>
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label data-i18n="settings.language">语言</label>
+                            <div class="segmented" id="langSegmented">
+                                <button type="button" class="segment" data-lang="zh">中文</button>
+                                <button type="button" class="segment" data-lang="en">English</button>
+                            </div>
+                            <p class="settings-hint" data-i18n="settings.languageHint">切换语言会重新进入频道</p>
+                        </div>
                     </section>
                     <section class="settings-section" id="notifySection">
                         <h3 data-i18n="settings.notifyTitle">通知</h3>
@@ -276,7 +551,9 @@
                             <span data-i18n="settings.notifyMentions">被 @ 提及时桌面通知</span>
                             <input type="checkbox" id="notifyToggle" class="switch" />
                         </label>
-                        <p class="settings-hint" data-i18n="settings.notifyHint">仅当页面在后台时弹出系统通知；浏览器可能要求授权</p>
+                        <p class="settings-hint" data-i18n="settings.notifyHint">
+                            仅当页面在后台时弹出系统通知；浏览器可能要求授权
+                        </p>
                     </section>
                 </div>
                 <div class="modal-actions">
@@ -290,7 +567,16 @@
         <!-- 语音链路中断横幅：自愈进行中 / 自愈失败 -->
         <div id="outageBanner" class="outage-banner hidden" role="alert">
             <span class="outage-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <svg
+                    viewBox="0 0 24 24"
+                    width="17"
+                    height="17"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
                     <line x1="2" y1="2" x2="22" y2="22" />
                     <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6" />
                     <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 1.16-.29 2.26-.8 3.22" />

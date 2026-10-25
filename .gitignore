@@ -32,3 +32,10 @@ app/src/chat_history/
 # Python
 __pycache__/
 *.pyc
+
+# runtime audit trail / scheduled backups / registry snapshots
+app/src/audit.jsonl
+app/src/audit.jsonl.1
+app/src/backups/
+app/src/channels.json.bak
+app/src/channels.json.restore
