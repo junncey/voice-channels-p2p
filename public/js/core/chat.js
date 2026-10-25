@@ -19,6 +19,25 @@ const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 // mirrors the server-side persisted-image cap — reject anything bigger on render
 const MAX_IMAGE_CHARS = 1600 * 1024;
 
+// emoji glyph runs: pictographics, skin tones, ZWJ sequences, keycaps,
+// regional-indicator pairs, variation selectors and surrounding whitespace
+const EMOJI_RUN_RE =
+    /^(?:[\p{Extended_Pictographic}\p{Emoji_Component}\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}\s])+$/u;
+const EMOJI_CORE_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{20E3}]/u;
+
+/**
+ * A message made only of a few emoji (no letters/digits) renders without the
+ * bubble chrome — a lone emoji inside a normal bubble is indistinguishable
+ * from a stray reaction chip.
+ * @param {string} text
+ */
+function isEmojiOnly(text) {
+    if (!text) return false;
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.length > 24 || !EMOJI_RUN_RE.test(trimmed)) return false;
+    return EMOJI_CORE_RE.test(trimmed);
+}
+
 /** Palette offered by the reaction picker and the composer emoji button. */
 const EMOJIS = [
     '👍',
@@ -116,6 +135,8 @@ export function initChat(
     const batches = new Map();
     /** own rows awaiting the server's authoritative ts (FIFO, see bindServerTs) */
     const pendingOwn = [];
+    /** an own row whose ack never arrived must not swallow a later ack */
+    const PENDING_ACK_TTL_MS = 10_000;
 
     // ----- back-to-bottom pill (also counts messages that arrived below the fold) -----
     let jumpPill = null;
@@ -254,7 +275,7 @@ export function initChat(
     /** Queue a locally rendered own row until the server's chatAck lands. */
     function rememberPending(row) {
         if (!row || !row.dataset?.ts) return;
-        pendingOwn.push(row);
+        pendingOwn.push({ row, at: Date.now() });
         if (pendingOwn.length > 20) pendingOwn.shift();
     }
 
@@ -265,9 +286,15 @@ export function initChat(
     function bindServerTs(ts) {
         const value = Number(ts);
         if (!Number.isFinite(value) || value <= 0) return;
+        const now = Date.now();
         while (pendingOwn.length) {
-            const row = pendingOwn.shift();
+            const { row, at } = pendingOwn.shift();
             if (!row.isConnected) continue;
+            // no ack ever comes for a message the server dropped (flood limit,
+            // rejected payload) — letting such an entry sit at the head would
+            // hand every later ack to the wrong row, so edit/recall would hit
+            // an unrelated line. Expire it and let this ack go unbound instead.
+            if (now - at > PENDING_ACK_TTL_MS) continue;
             row.dataset.ts = String(value);
             // the hover actions captured the old ts in their click closures —
             // rebuild them so edit/recall use the server-side identity
@@ -355,7 +382,11 @@ export function initChat(
 
     /** Plain-text bubble with @mention highlighting (+ edited marker). */
     function textBubble(text, edited = false) {
-        return el('div', { class: 'msg-bubble' }, textNode(text, edited));
+        const bubble = el('div', { class: 'msg-bubble' }, textNode(text, edited));
+        // the edited marker rides inside .msg-text and would blow up with the
+        // jumbo glyph, so edited messages keep the regular bubble
+        if (!edited && isEmojiOnly(text)) bubble.classList.add('emoji-only');
+        return bubble;
     }
 
     function textNode(text, edited) {
@@ -665,6 +696,9 @@ export function initChat(
         if (!bubble) return;
         const quote = row.querySelector('.msg-quote');
         const imgs = row.querySelector('.msg-images');
+        // edited rows carry the "(edited)" marker — always back to a regular
+        // bubble, never the jumbo emoji treatment
+        bubble.classList.remove('emoji-only');
         bubble.replaceChildren();
         if (quote) bubble.append(quote);
         if (imgs) bubble.append(imgs);
@@ -680,7 +714,11 @@ export function initChat(
         row.dataset.text = '';
         row.classList.add('recalled');
         const bubble = row.querySelector('.msg-bubble');
-        if (bubble) bubble.replaceChildren(el('div', { class: 'msg-text tombstone', text: deletedText }));
+        if (bubble) {
+            // the tombstone must not inherit the jumbo emoji sizing
+            bubble.classList.remove('emoji-only');
+            bubble.replaceChildren(el('div', { class: 'msg-text tombstone', text: deletedText }));
+        }
         row.querySelector('.msg-reactions')?.remove();
         row.querySelector('.msg-actions')?.remove();
     }
@@ -829,7 +867,12 @@ export function initChat(
         });
         row._deleted = deleted;
         row._reactions = reactions || undefined;
-        if (reply) bubble.prepend(quoteNode(reply));
+        if (reply) {
+            bubble.prepend(quoteNode(reply));
+            // a quoted reply keeps the bubble chrome — jumbo glyphs would
+            // dwarf the quote and leave it floating without a container
+            bubble.classList.remove('emoji-only');
+        }
         const body = el('div', { class: 'msg-body' });
         if (!self && name) body.append(el('div', { class: 'msg-name', text: name }));
         body.append(bubble);
