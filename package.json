@@ -1,6 +1,6 @@
 {
     "name": "voice-channels-p2p",
-    "version": "1.4.0",
+    "version": "1.4.1",
     "description": "Self-hosted persistent voice channels over P2P WebRTC (based on MiroTalk P2P)",
     "main": "server.js",
     "scripts": {
@@ -8,7 +8,8 @@
         "start": "node app/src/server.js",
         "dev": "node --watch app/src/server.js",
         "test": "mocha tests/*.js --exit",
-        "lint": "npx prettier --write .",
+        "lint": "eslint . && prettier --check .",
+        "format": "prettier --write .",
         "docker:build": "docker build --tag voice-channels:latest .",
         "docker:rmi": "docker images |grep '<none>' |awk '{print $3}' |xargs docker rmi",
         "docker:push": "docker push voice-channels:latest",
@@ -43,6 +44,9 @@
     ],
     "license": "AGPL-3.0",
     "homepage": "https://github.com/junncey/voice-channels-p2p",
+    "engines": {
+        "node": ">=22"
+    },
     "dependencies": {
         "colors": "^1.4.0",
         "compression": "^1.8.2",
@@ -59,6 +63,9 @@
         "socket.io": "^4.8.4"
     },
     "devDependencies": {
+        "@eslint/js": "10.0.1",
+        "eslint": "10.13.0",
+        "globals": "17.13.0",
         "mocha": "^12.0.3",
         "prettier": "3.9.10",
         "should": "^13.2.3",
