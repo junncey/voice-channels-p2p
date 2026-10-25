@@ -90,14 +90,26 @@ body="$(awk 'NR == 1 && $0 == "<!--" { skip = 1; next }
             { print }' "$TEMPLATE")"
 # 去掉模板注释下方的空行，避免正文以空行开头
 body="$(printf '%s\n' "$body" | sed '/./,$!d')"
-body="${body//'{{VERSION}}'/$VERSION}"
-body="${body//'{{PREV_VERSION}}'/$PREV_VERSION}"
-body="${body//'{{DATE}}'/$DATE}"
-body="${body//'{{DIGEST}}'/$DIGEST}"
-body="${body//'{{BUILD_ID}}'/$BUILD_ID}"
-body="${body//'{{TEST_COUNT}}'/$TEST_COUNT}"
-body="${body//'{{IMAGE_SIZE}}'/$IMAGE_SIZE}"
-body="${body//'{{CHANGES}}'/$CHANGES}"
+# 🔴 Bash 的 ${var//pat/repl} 与 sed 同源：repl 里的 & 会展开成「匹配到的模式」，
+# \ 会当转义符。CHANGES 里出现 & 时占位符会被静默换回 {{CHANGES}} 本身（1.4.1 踩过），
+# 所以替换前先转义反斜杠与与号；注意 replacement 必须不加引号，引号会让 \& 变成字面量。
+escape_repl() {
+    local s="${1//\\/\\\\}"
+    printf '%s' "${s//&/\\&}"
+}
+set_ph() {
+    local v
+    v="$(escape_repl "$2")"
+    body="${body//"{{$1}}"/$v}"
+}
+set_ph VERSION "$VERSION"
+set_ph PREV_VERSION "$PREV_VERSION"
+set_ph DATE "$DATE"
+set_ph DIGEST "$DIGEST"
+set_ph BUILD_ID "$BUILD_ID"
+set_ph TEST_COUNT "$TEST_COUNT"
+set_ph IMAGE_SIZE "$IMAGE_SIZE"
+set_ph CHANGES "$CHANGES"
 
 for ph in VERSION PREV_VERSION DATE DIGEST BUILD_ID TEST_COUNT IMAGE_SIZE CHANGES; do
     case "$body" in
