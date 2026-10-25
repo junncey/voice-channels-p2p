@@ -6,7 +6,10 @@
 
 require('should');
 const { execFileSync } = require('child_process');
-const { tarFiles } = require('../app/src/backup');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { tarFiles, createTarIterator } = require('../app/src/backup');
 
 describe('test-backup (tar writer)', () => {
     it('should produce a 512-aligned ustar archive with valid checksums', () => {
@@ -47,5 +50,29 @@ describe('test-backup (tar writer)', () => {
             return;
         }
         list.should.equal('probe.txt');
+    });
+
+    it('streaming iterator should produce bytes identical to the buffered writer', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-tar-'));
+        try {
+            const diskFile = path.join(dir, 'on-disk.bin');
+            // size deliberately unaligned with the 512 block to exercise padding
+            fs.writeFileSync(diskFile, Buffer.from('y'.repeat(1300)));
+
+            const entries = [
+                { name: 'channels.json', data: Buffer.from('{"channels":[]}') },
+                { name: 'chat_history/big.json', path: diskFile },
+            ];
+            const buffered = tarFiles(entries.map((e) => ({ ...e, data: e.data ?? fs.readFileSync(e.path) })));
+
+            const chunks = [];
+            for await (const chunk of createTarIterator(entries)) chunks.push(chunk);
+            const streamed = Buffer.concat(chunks);
+
+            Buffer.compare(buffered, streamed).should.equal(0);
+            (streamed.length % 512).should.equal(0);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

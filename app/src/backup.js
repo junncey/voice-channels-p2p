@@ -7,6 +7,8 @@
  * tar implementation understands.
  */
 
+const fs = require('fs');
+
 const BLOCK = 512;
 
 /** Octal ASCII encoding with trailing NUL/spaces (tar header fields). */
@@ -58,4 +60,31 @@ function tarFiles(files) {
     return Buffer.concat(chunks);
 }
 
-module.exports = { tarFiles };
+/**
+ * Async generator producing the same archive as tarFiles() block by block —
+ * the streaming counterpart for the HTTP backup so file payloads never sit
+ * in memory whole (each entry is read from disk in chunks, backpressure
+ * handled by stream.Readable.from on the consumer side).
+ * @param {Array<{name: string, path?: string, data?: Buffer, mtime?: number}>} files
+ *   entries with `data` are yielded as-is; entries with `path` are streamed
+ *   from disk (caller must have verified the file exists/readable).
+ */
+async function* createTarIterator(files) {
+    for (const file of files) {
+        const size = Buffer.isBuffer(file.data) ? file.data.length : fs.statSync(file.path).size;
+        const mtime = Number.isFinite(file.mtime) ? Math.floor(file.mtime / 1000) : Math.floor(Date.now() / 1000);
+        yield fileHeader(file.name, size, mtime);
+        if (Buffer.isBuffer(file.data)) {
+            yield file.data;
+        } else {
+            for await (const chunk of fs.createReadStream(file.path, { highWaterMark: 64 * 1024 })) {
+                yield chunk;
+            }
+        }
+        const pad = (BLOCK - (size % BLOCK)) % BLOCK;
+        if (pad) yield Buffer.alloc(pad);
+    }
+    yield Buffer.alloc(BLOCK * 2); // end-of-archive marker
+}
+
+module.exports = { tarFiles, createTarIterator };

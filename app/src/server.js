@@ -36,7 +36,8 @@ const Logs = require('./logs');
 const ChannelStore = require('./channelStore');
 const ChatStore = require('./chatStore');
 const Version = require('./version');
-const { tarFiles } = require('./backup');
+const { pipeline, Readable } = require('stream');
+const { createTarIterator } = require('./backup');
 const { applyEmbedHeaders } = require('./middleware/embedHeaders');
 
 const log = new Logs('server');
@@ -646,33 +647,31 @@ app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
 /**
  * One-file server backup: channels.json + every persisted chat history file
  * as a tar.gz download (restore = unpack over a fresh data directory).
+ * Streamed end-to-end (tar iterator -> gzip transform -> response), so the
+ * whole archive is never held in memory regardless of history volume.
  */
 app.get('/api/admin/backup', requireAdmin, (req, res) => {
     try {
-        const files = [];
+        const entries = [];
         const registry = path.basename(channelStore.filePath);
-        if (fs.existsSync(channelStore.filePath)) {
-            files.push({ name: registry, data: fs.readFileSync(channelStore.filePath) });
-        }
+        if (fs.existsSync(channelStore.filePath)) entries.push({ name: registry, path: channelStore.filePath });
         for (const id of chatStore.listFiles()) {
             const file = chatStore.fileFor(id);
-            if (fs.existsSync(file)) files.push({ name: `chat_history/${id}.json`, data: fs.readFileSync(file) });
+            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}.json`, path: file });
         }
-        const tar = tarFiles(files);
+        // preflight readability so failures surface as a clean 500 instead of a
+        // mid-stream abort after the download headers are already sent
+        for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
         const stamp = new Date().toISOString().slice(0, 10);
         res.set({
             'Content-Type': 'application/gzip',
             'Content-Disposition': `attachment; filename="voice-channels-backup-${stamp}.tar.gz"`,
             'Cache-Control': 'no-store',
         });
-        zlib.gzip(tar, (err, gz) => {
-            if (err) {
-                log.error('Backup gzip failed', { error: err.message });
-                return res.status(500).json({ error: 'backup failed' });
-            }
-            res.send(gz);
+        pipeline(Readable.from(createTarIterator(entries)), zlib.createGzip(), res, (err) => {
+            if (err) log.error('Backup stream failed', { files: entries.length, error: err.message });
+            else log.info('Admin backup served', { files: entries.length });
         });
-        log.info('Admin backup served', { files: files.length, bytes: tar.length });
     } catch (err) {
         log.error('Admin backup failed', { error: err.message });
         res.status(500).json({ error: 'backup failed' });
