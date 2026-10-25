@@ -19,6 +19,7 @@ import { initSoundSettings, playSound } from '/js/core/sound.js';
 import { initVersionCheck } from '/js/core/version.js';
 import { getThemePref, setThemePref } from '/js/core/theme.js';
 import { createWakeLock } from '/js/pages/channel/wakeLock.js';
+import { createShareSound } from '/js/pages/channel/share.js';
 import { installDebugHooks } from '/js/pages/channel/debug.js';
 import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
 
@@ -85,6 +86,14 @@ function opusFmtp() {
     const raw = Math.round(Number(settings.opusBitrate));
     const kbps = Math.min(BITRATE_MAX, Math.max(BITRATE_MIN, raw || 64));
     const maxaveragebitrate = kbps * 1000;
+    if (shareSound.active()) {
+        // shared music needs bandwidth and stereo. The mic's processing
+        // toggles stay untouched on purpose: on speakers, AEC is what keeps
+        // the shared audio from leaking back in through the mic. Stereo
+        // engages on the next SDP round (reverse offer / ICE restart); the
+        // bitrate half applies at once via setParameters.
+        return { maxaveragebitrate: Math.max(maxaveragebitrate, 192000), stereo: 1, usedtx: null };
+    }
     return settings.musicMode
         ? { maxaveragebitrate, stereo: 1, usedtx: null }
         : { maxaveragebitrate, usedtx: 1, stereo: null };
@@ -152,6 +161,24 @@ let disconnectToastTimer = null;
 
 const screenLock = createWakeLock({
     wanted: () => joined && !textOnly && document.visibilityState === 'visible',
+});
+
+// ----- "listen together": shared sound mixed into the outgoing voice -----
+// Holder lives in ./channel/share.js (getDisplayMedia orchestration); the
+// mixing itself is AudioHub.attachShare into the mic pipeline's destination.
+
+const shareSound = createShareSound({
+    isJoined: () => joined,
+    ensureVoice: async () => {
+        if (!localStream) await enableVoice(); // text-only member: prompt for the mic
+        return !!localStream;
+    },
+    getHub: () => hub,
+    pipelineReady: () => micProcessed && hub?.ctx?.state === 'running',
+    applyGate: () => applyMicState(),
+    broadcast: broadcastShare,
+    refreshBitrate: () => mesh?.setSendBitrate(),
+    toast,
 });
 
 // ----- host login persistence -----
@@ -617,6 +644,7 @@ function bindUi() {
     });
     $('#micBtn').addEventListener('click', onMicBtnClick);
     $('#deafenBtn').addEventListener('click', toggleDeafen);
+    $('#shareSoundBtn').addEventListener('click', () => (shareSound.active() ? shareSound.stop() : shareSound.start()));
     bindPttHoldButton();
     $('#chatForm').addEventListener('submit', onChatSubmit);
     bindChatInput();
@@ -959,6 +987,13 @@ function registerSocketHandlers() {
             if (!member) return;
             member.peer_deafen = status === true;
             const node = $(`#memberList .member[data-id="${peer_id}"] .member-deafen`);
+            if (node) node.classList.toggle('on', status === true);
+        }
+        if (element === 'share') {
+            const member = members.get(peer_id);
+            if (!member) return;
+            member.peer_share = status === true;
+            const node = $(`#memberList .member[data-id="${peer_id}"] .member-share`);
             if (node) node.classList.toggle('on', status === true);
         }
     });
@@ -1751,6 +1786,7 @@ function syncMembers(peersMap) {
             peer_presenter: !!info.peer_presenter,
             peer_audio_status: info.peer_audio_status === true,
             peer_deafen: info.peer_deafen === true,
+            peer_share: info.peer_share === true,
             joined_at: info.joined_at || existing?.joined_at || Date.now(),
             avatar,
             // remembered per-user volume; an in-session adjustment wins over the stored one
@@ -1777,6 +1813,7 @@ function ensureSelfMember() {
         peer_presenter: isPresenter,
         peer_audio_status: onAir(),
         peer_deafen: deafened,
+        peer_share: shareSound.active(),
         joined_at: 0, // self always first
         avatar: selfAvatar || undefined,
         self: true,
@@ -1851,6 +1888,18 @@ function deafenIconNode(on) {
         class: 'member-deafen' + (on ? ' on' : ''),
         title: t('channel.deafenBadge'),
         html: DEAFEN_SVG,
+    });
+}
+
+const SHARE_SVG =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+
+/** Music-note badge on a member card — that member is sharing sound into the channel. */
+function shareIconNode(on) {
+    return el('span', {
+        class: 'member-share' + (on ? ' on' : ''),
+        title: t('channel.shareBadge'),
+        html: SHARE_SVG,
     });
 }
 
@@ -1930,6 +1979,7 @@ function renderMembers() {
                             : null,
                         !info.self ? pathBadgeNode(peerId) : null,
                         deafenIconNode(!!info.peer_deafen),
+                        shareIconNode(!!info.peer_share),
                         micIconNode(info.peer_audio_status)
                     )
                 )
@@ -2089,6 +2139,21 @@ function onAir() {
     return !!localStream && micOn && (!settings.ptt || pttActive);
 }
 
+/**
+ * Push the on-air state onto the right tracks. Normally the outgoing track
+ * carries the mute gate; while a sound share runs the outgoing MIX must stay
+ * live (it carries the music) and the mic alone is gated at its raw capture.
+ */
+function applyTrackGate(live) {
+    if (!localStream) return;
+    if (micProcessed && shareSound.active()) {
+        rawMicStream?.getAudioTracks().forEach((track) => (track.enabled = live));
+        localStream.getAudioTracks().forEach((track) => (track.enabled = true));
+    } else {
+        localStream.getAudioTracks().forEach((track) => (track.enabled = live));
+    }
+}
+
 function onMicBtnClick() {
     if (textOnly || !localStream) {
         enableVoice();
@@ -2110,7 +2175,7 @@ function setMic(on) {
 /** Push the effective state to the local track / peers / UI. */
 function applyMicState() {
     const live = onAir();
-    if (localStream) localStream.getAudioTracks().forEach((track) => (track.enabled = live));
+    applyTrackGate(live);
     if (socket && joined && live !== lastOnAir) {
         lastOnAir = live;
         socket.emit('peerStatus', {
@@ -2151,6 +2216,30 @@ function applyDeafenState() {
             peer_id: selfUuid,
             element: 'deafen',
             status: deafened,
+        });
+    }
+}
+
+// ----- "listen together": shared sound state -> room + UI -----
+
+function broadcastShare(on) {
+    const self = members.get(selfUuid);
+    if (self) self.peer_share = on;
+    const node = $(`#memberList .member[data-id="${selfUuid || ''}"] .member-share`);
+    if (node) node.classList.toggle('on', on);
+    else renderMembers();
+    const btn = $('#shareSoundBtn');
+    if (btn) {
+        btn.classList.toggle('on', on);
+        btn.title = t(on ? 'channel.shareStop' : 'channel.shareSound');
+    }
+    if (socket && joined) {
+        socket.emit('peerStatus', {
+            room_id: channelId,
+            peer_name: selfName,
+            peer_id: selfUuid,
+            element: 'share',
+            status: on,
         });
     }
 }
@@ -2255,9 +2344,9 @@ function syncMicPipeline() {
     if (wantProcessed) {
         const processed = hub.attachMic(rawMicStream, settings.micVolume);
         if (!processed) return;
-        processed.getAudioTracks().forEach((track) => (track.enabled = live));
         localStream = processed;
         micProcessed = true;
+        applyTrackGate(live); // before the swap: gate the mixed stream (or the raw mic while sharing)
         mesh?.replaceAudioTrack(processed.getAudioTracks()[0], processed);
     } else {
         hub?.detachMic();
@@ -3256,6 +3345,7 @@ function teardownMedia() {
     clearPeerRecovery();
     stopPathMonitor();
     screenLock.release();
+    shareSound.stop({ silent: true }); // releases the capture + tells the room before the socket goes
     // the connecting-badge state is per-peer too — drop it with the rest
     for (const timer of connectingTimers.values()) clearTimeout(timer);
     connectingTimers.clear();
@@ -3346,5 +3436,6 @@ if (location.hash === '#debug') {
         b1Attempts,
         b1InFlight,
         webAudioPlayback,
+        shareSound,
     }));
 }

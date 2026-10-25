@@ -1810,6 +1810,21 @@ html[data-theme='light'] .msg.recalled .msg-text {
     display: inline-flex;
 }
 
+/* "listen together" sound share (voice controls + member badge) */
+#shareSoundBtn.on {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.member-share {
+    display: none;
+    color: var(--accent);
+    line-height: 0;
+}
+.member-share.on {
+    display: inline-flex;
+}
+
 /* touch push-to-talk button */
 .ptt-hold-btn {
     height: 54px;

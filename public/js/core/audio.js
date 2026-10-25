@@ -20,6 +20,8 @@ export class AudioHub {
         this.primers = new Map();
         /** local mic pipeline: { raw, src, gain, dest, stream } or null */
         this.mic = null;
+        /** "listen together" share: { raw, src, gain } mixed into the mic dest, or null */
+        this.share = null;
         this.timer = null;
     }
 
@@ -167,6 +169,9 @@ export class AudioHub {
             const dest = this.ctx.createMediaStreamDestination();
             src.connect(gain).connect(dest);
             this.mic = { raw: rawStream, src, gain, dest, stream: dest.stream };
+            // a share captured under a previous mic pipeline (or before one
+            // existed) rides the rebuilt destination — re-hook it here
+            if (this.share) this.share.src.connect(this.share.gain).connect(dest);
             return dest.stream;
         } catch {
             this.mic = null;
@@ -189,6 +194,43 @@ export class AudioHub {
         }
         this.mic.stream.getTracks().forEach((track) => track.stop());
         this.mic = null;
+    }
+
+    // ----- shared sound ("listen together": display-capture audio mixed
+    // into the outgoing mic destination — same audio m-line, no renegotiation) -----
+
+    /**
+     * Mix a captured share stream into the mic pipeline's destination. The
+     * caller owns the stream lifecycle (stops its tracks on end); a share
+     * started before the mic pipeline exists is hooked by the next attachMic.
+     * @param {MediaStream} rawStream audio track(s) from getDisplayMedia
+     * @returns {boolean} whether the graph was built
+     */
+    attachShare(rawStream) {
+        if (!this.ctx || !rawStream || !rawStream.getAudioTracks().length) return false;
+        this.detachShare();
+        try {
+            const src = this.ctx.createMediaStreamSource(rawStream);
+            const gain = this.ctx.createGain(); // unity — a handle for level control later
+            src.connect(gain);
+            this.share = { raw: rawStream, src, gain };
+            if (this.mic) gain.connect(this.mic.dest);
+            return true;
+        } catch {
+            this.share = null;
+            return false;
+        }
+    }
+
+    detachShare() {
+        if (!this.share) return;
+        try {
+            this.share.src.disconnect();
+            this.share.gain.disconnect();
+        } catch {
+            /* already disconnected */
+        }
+        this.share = null;
     }
 
     /**
@@ -234,10 +276,12 @@ export class AudioHub {
         this._stop();
         for (const key of [...this.watchers.keys()]) this.unwatch(key);
         for (const key of [...this.players.keys()]) this.stopPeer(key);
+        this.detachShare();
         this.detachMic();
         if (this.ctx) this.ctx.close().catch(() => {});
         this.ctx = null;
-    }}
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Speaker test tone — a short 660 Hz beep rendered offline into a WAV blob

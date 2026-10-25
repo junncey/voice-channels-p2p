@@ -225,6 +225,37 @@ describe('test-server (signaling integration)', function () {
             a.emit('relaySDP', { peer_id: crypto.randomUUID(), session_description: { type: 'offer', sdp: 'x' } });
             (await emitted(b, 'sessionDescription', 250)).should.be.false();
         });
+
+        it('should relay share status and hand it to later joiners', async () => {
+            const room = freshRoom('share');
+            const ua = crypto.randomUUID();
+            const ub = crypto.randomUUID();
+            const a = track(connect());
+            const b = track(connect());
+            a.emit('join', joinPayload(room, ua, 'alice'));
+            await once(a, 'serverInfo');
+            b.emit('join', joinPayload(room, ub, 'bob'));
+            await once(b, 'serverInfo');
+            await wait(100);
+
+            const got = once(b, 'peerStatus');
+            a.emit('peerStatus', { room_id: room, peer_name: 'alice', peer_id: ua, element: 'share', status: true });
+            const relayed = await got;
+            relayed.peer_id.should.equal(ua);
+            relayed.element.should.equal('share');
+            relayed.status.should.be.true();
+
+            // a member joining AFTER the flip sees the state in the peer map
+            const c = track(connect());
+            c.emit('join', joinPayload(room, crypto.randomUUID(), 'carol'));
+            const infoC = await once(c, 'serverInfo');
+            infoC.peers[ua].peer_share.should.be.true();
+            infoC.peers[ub].peer_share.should.be.false();
+
+            // unknown element never relays
+            a.emit('peerStatus', { room_id: room, peer_name: 'alice', peer_id: ua, element: 'bogus', status: true });
+            (await emitted(c, 'peerStatus', 250)).should.be.false();
+        });
     });
 
     describe('2. chat history persistence', () => {

@@ -313,6 +313,7 @@ function getRoomPeers(roomId) {
             peer_audio: !!info.peer_audio,
             peer_audio_status: !!info.peer_audio_status,
             peer_deafen: !!info.peer_deafen,
+            peer_share: !!info.peer_share,
             peer_avatar: info.peer_avatar || null,
             joined_at: info.joined_at,
         };
@@ -1507,8 +1508,10 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
-     * Relay audio/deafen status to peers. 'audio' is the mic state;
-     * 'deafen' marks a member who silenced ALL remote audio locally.
+     * Relay audio/deafen/share status to peers. 'audio' is the mic state;
+     * 'deafen' marks a member who silenced ALL remote audio locally;
+     * 'share' marks a member whose captured system/tab sound is mixed into
+     * their outgoing stream ("listen together").
      */
     socket.on('peerStatus', async (cfg) => {
         const config = checkXSS(cfg);
@@ -1524,6 +1527,7 @@ io.sockets.on('connect', async (socket) => {
 
         if (element === 'audio') peers[room_id][senderUuid]['peer_audio_status'] = status === true;
         else if (element === 'deafen') peers[room_id][senderUuid]['peer_deafen'] = status === true;
+        else if (element === 'share') peers[room_id][senderUuid]['peer_share'] = status === true;
         else return;
 
         await sendToRoom(room_id, socket.id, 'peerStatus', {

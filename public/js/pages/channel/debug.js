@@ -7,7 +7,7 @@
 
 export function installDebugHooks(getCtx) {
     window.__vcDebug = () => {
-        const { hub, micProcessed, micTest, settings, members, audioEls, connPaths, lossStreaks, peerRecovery, b1Attempts, b1InFlight, webAudioPlayback } = getCtx();
+        const { hub, micProcessed, micTest, settings, members, audioEls, connPaths, lossStreaks, peerRecovery, b1Attempts, b1InFlight, webAudioPlayback, shareSound } = getCtx();
         return {
             mode: webAudioPlayback() ? 'webaudio' : 'element',
             ctxState: hub?.ctx?.state ?? null,
@@ -18,6 +18,19 @@ export function installDebugHooks(getCtx) {
                     .map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`)
                     .join(',') ?? null,
             micProcessed,
+            micOut:
+                hub?.mic?.stream
+                    .getAudioTracks()
+                    .map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`)
+                    .join(',') ?? null,
+            share: {
+                active: shareSound ? shareSound.active() : false,
+                raw:
+                    hub?.share?.raw
+                        .getAudioTracks()
+                        .map((t) => `${t.readyState}:${t.enabled ? 'on' : 'off'}`)
+                        .join(',') ?? null,
+            },
             micTest: micTest ? { delay: micTest.delay.delayTime.value, gain: micTest.gain.gain.value } : null,
             micVolume: settings.micVolume,
             micGain: hub?.mic?.gain.gain.value ?? null,
