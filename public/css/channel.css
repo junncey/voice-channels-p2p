@@ -681,6 +681,25 @@ body.has-update-bar .outage-banner {
     color: #08281b;
 }
 
+/* bare emoji run (chat.js tags .emoji-only) — no bubble chrome, jumbo glyph;
+   a lone emoji inside a normal bubble reads like a stray reaction chip.
+   Selectors stay one step above .msg.self .msg-bubble / its ::before and are
+   declared after them, so the accent fill and tail lose in both themes. */
+.msg .msg-bubble.emoji-only {
+    background: transparent;
+    box-shadow: none;
+    padding: 0 2px;
+}
+
+.msg .msg-bubble.emoji-only::before {
+    content: none;
+}
+
+.msg .msg-bubble.emoji-only .msg-text {
+    font-size: 34px;
+    line-height: 1.25;
+}
+
 .msg.system {
     align-self: center;
     max-width: 100%;
@@ -1569,22 +1588,43 @@ html[data-theme='light'] .msg.recalled .msg-text {
 /* hover action cluster (reply / react / edit / recall) */
 .msg-actions {
     position: absolute;
-    /* floats fully above the bubble — an inset value would cover the
-       first text line of exactly the message being acted on */
-    top: -38px;
-    right: 6px;
+    /* floats fully above the bubble — an inset top value would cover the
+       first text line of exactly the message being acted on. Horizontal
+       anchor is the message column (36px avatar + 10px gap): the row itself
+       stretches to the panel width, so right:6px would strand the cluster at
+       the far edge, away from a left-aligned message. */
+    top: -36px;
+    left: 46px;
     display: none;
     gap: 2px;
-    padding: 2px;
-    border-radius: var(--radius-s);
-    background: var(--bg-2);
-    border: 1px solid var(--border-soft);
-    box-shadow: var(--shadow-1);
+    /* the wrapper's bottom edge stays FLUSH with the row's top and the
+       visible pill is drawn by ::before above it: the transparent 10px strip
+       is the hover bridge. Without it the pointer crosses dead space between
+       bubble and pill, :hover drops and the cluster snaps shut before the
+       mouse can reach it. The strip only covers the 10px inter-row gap, so
+       it never steals clicks from the row above. */
+    padding: 2px 2px 10px;
+    background: none;
+    border: 0;
+    box-shadow: none;
     z-index: 4;
 }
+
+/* the visible pill — excludes the bridge strip */
+.msg-actions::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 10px 0;
+    background: var(--bg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-s);
+    box-shadow: var(--shadow-1);
+    z-index: -1;
+}
 .msg.self .msg-actions {
-    right: auto;
-    left: 6px;
+    left: auto;
+    /* mirror: above the self bubble's top-right corner */
+    right: 46px;
 }
 .msg:hover .msg-actions,
 .msg:focus-within .msg-actions {
