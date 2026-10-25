@@ -321,6 +321,9 @@
 .stats-modal,
 .audit-modal {
     width: min(680px, 92vw);
+    /* base .modal caps max-width at 400px — without lifting it these
+       panels silently shrink and the audit row wraps per-character */
+    max-width: 92vw;
 }
 .stats-body {
     display: flex;
@@ -399,6 +402,8 @@
     color: var(--info);
 }
 .audit-fields {
+    flex: 1 1 0;
+    min-width: 0;
     color: var(--text-2);
     word-break: break-all;
 }

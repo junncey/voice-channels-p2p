@@ -582,6 +582,20 @@ body.has-update-bar .outage-banner {
     padding: 0 3px;
 }
 
+/* own text bubbles are accent-filled — an accent-colored mention would vanish
+   into the bubble, so chip it with a dark veil instead; image bubbles keep the
+   dark fill on the self side and keep the default accent color */
+.msg.self .msg-bubble:not(.img) .mention {
+    color: inherit;
+    background: rgba(0, 0, 0, 0.16);
+    border-radius: 4px;
+    padding: 0 3px;
+}
+
+.msg.self .msg-bubble:not(.img) .mention.self {
+    background: rgba(0, 0, 0, 0.28);
+}
+
 .msg.self {
     align-self: flex-end;
     flex-direction: row-reverse;
@@ -1516,10 +1530,28 @@ html[data-theme='light'] .chat-attachment-remove:hover {
     border: 1px dashed var(--border);
     box-shadow: none;
 }
+/* the tail diamond belongs to the filled bubble — on a transparent
+   tombstone it would float as a stray colored dot */
+.msg.recalled .msg-bubble::before,
+.msg.recalled .msg-bubble.img::before {
+    content: none;
+}
 .msg-text.tombstone {
     color: var(--text-3);
     font-style: italic;
     font-size: 12.5px;
+}
+/* self bubbles recolor their text for the accent fill (.msg.self .msg-text,
+   plus the light-theme white override) — the transparent tombstone must win
+   back the muted color in both themes, so re-state it at matching weight
+   and AFTER those rules */
+.msg.recalled .msg-text {
+    color: var(--text-3);
+    font-style: italic;
+    font-size: 12.5px;
+}
+html[data-theme='light'] .msg.recalled .msg-text {
+    color: var(--text-3);
 }
 .msg.recalled .msg-quote {
     opacity: 0.55;
@@ -1537,7 +1569,9 @@ html[data-theme='light'] .chat-attachment-remove:hover {
 /* hover action cluster (reply / react / edit / recall) */
 .msg-actions {
     position: absolute;
-    top: -10px;
+    /* floats fully above the bubble — an inset value would cover the
+       first text line of exactly the message being acted on */
+    top: -38px;
     right: 6px;
     display: none;
     gap: 2px;

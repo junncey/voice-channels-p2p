@@ -162,6 +162,17 @@ button.topbar-link {
     gap: 10px;
 }
 
+/* password/temp chips hug the title; the online count owns the right edge
+   (space-between alone would float a lone badge to the card's middle) */
+.channel-card-top .badge {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-3);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
 .channel-card h3 {
     font-size: 16px;
     font-weight: 700;
@@ -199,6 +210,7 @@ button.topbar-link {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    margin-left: auto;
     font-size: 12.5px;
     color: var(--text-3);
     font-variant-numeric: tabular-nums;
@@ -368,4 +380,26 @@ button.topbar-link {
 }
 .fav-btn.on svg {
     fill: var(--warn);
+}
+
+/* ---------- narrow screens: keep the topbar on one line ----------
+   the brand text was wrapping at 390px because the actions group
+   (lang + theme pill + clear link) leaves no slack; tighten the
+   paddings instead of hiding any control */
+@media (max-width: 480px) {
+    .page {
+        padding: 0 14px 60px;
+    }
+    .brand {
+        gap: 8px;
+        font-size: 15px;
+    }
+    .brand span:last-child {
+        white-space: nowrap;
+    }
+    .theme-toggle {
+        gap: 5px;
+        margin-right: 10px;
+        padding: 6px 11px;
+    }
 }
