@@ -54,8 +54,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    # 发布门禁：测试不绿就不构建镜像
+    name: Tests (gate)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create config from template
+        run: cp app/src/config.template.js app/src/config.js
+
+      - name: Lint (eslint + prettier --check)
+        run: npm run lint
+
+      - name: Run unit tests
+        run: npm test
+
   build-and-push:
     name: Build & Push Voice Channels Image
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

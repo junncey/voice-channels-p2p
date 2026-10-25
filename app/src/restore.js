@@ -17,10 +17,11 @@ const zlib = require('zlib');
 
 const Logs = require('./logs');
 const { readTar } = require('./backup');
+const limits = require('./limits');
 
 const log = new Logs('restore');
 
-const ID_PATTERN = /^[a-zA-Z0-9_-]{3,32}$/;
+const ID_PATTERN = limits.CHANNEL_ID_RE;
 const REGISTRY_NAME = 'channels.json';
 // The registry is a few hundred KB at worst; one history file is bounded by
 // the store's own 12MB disk budget. The whole-archive caps keep a hostile or
@@ -83,7 +84,7 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
                     registryRaw = data;
                     return;
                 }
-                const m = name.match(/^chat_history\/([a-zA-Z0-9_-]{3,32})\.(jsonl|json)$/);
+                const m = name.match(new RegExp(`^chat_history/(${limits.CHANNEL_ID_SOURCE})\\.(jsonl|json)$`));
                 if (!m) throw new RestoreError(`unexpected archive entry: ${name}`);
                 const id = m[1];
                 const prev = histories.get(id);
@@ -144,9 +145,20 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
     fs.writeFileSync(registryTmp, registryRaw, 'utf8');
     try {
         const parsed = channelStore.readRegistryFile(registryTmp);
+        // snapshot the live state: if the persisting save() fails, memory must
+        // keep matching the disk we still have (applySettings mutates in place,
+        // so the settings copy is a real snapshot, not a shared reference)
+        const prevChannels = channelStore.channels;
+        const prevSettings = { ...channelStore.settings };
         channelStore.channels = parsed.channels;
         channelStore.applySettings(parsed.settings);
-        channelStore.save();
+        try {
+            channelStore.save();
+        } catch (saveErr) {
+            channelStore.channels = prevChannels;
+            channelStore.settings = prevSettings;
+            throw saveErr;
+        }
     } catch (err) {
         throw new RestoreError(`registry rejected: ${err.message}`);
     } finally {

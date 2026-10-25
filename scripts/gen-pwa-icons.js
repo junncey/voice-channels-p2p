@@ -27,18 +27,6 @@ function distCapsule(px, py, x1, y1, x2, y2, r) {
     return Math.hypot(px - cx, py - cy) - r;
 }
 
-/** Signed distance to a ring segment (lower arc around cx,cy). */
-function distArc(px, py, cx, cy, radius, width, minY) {
-    const d = Math.hypot(px - cx, py - cy);
-    const ring = Math.abs(d - radius) - width;
-    if (py < minY) {
-        // outside the angular span: distance to the nearest arc endpoint
-        const end = Math.sqrt(Math.max(0, (minY - cy) * (minY - cy) - 0)); // horizontal chord at minY
-        return Math.max(ring, Math.abs(py - minY) + 1e9 * 0 + Math.max(0, d - Math.hypot(end, minY - cy)));
-    }
-    return ring;
-}
-
 /** Signed distance to a rounded rectangle centered in the canvas. */
 function distRoundedRect(px, py, size, inset, radius) {
     const half = size / 2 - inset;
@@ -81,16 +69,9 @@ function renderIcon(size, { maskable = false } = {}) {
             const cy = s(0.4) * scale + (size * (1 - scale)) / 2;
             const dMic = distCapsule(px, py, cx, cy, cx, cy, s(0.085) * scale);
             const arcR = s(0.185) * scale;
-            const arcTop = cy + s(0.02) * scale; // arc spans the lower ~70% around the mic
-            const dxn = (px - cx) / Math.max(arcR, 1e-6);
             const dyn = (py - cy) / Math.max(arcR, 1e-6);
-            const inArcSpan = dyn > -0.15 && Math.hypot(dxn, dyn) > 0.99; // rough lower arc
             const dArc = Math.abs(Math.hypot(px - cx, py - cy) - arcR) - s(0.018) * scale;
             const arcPenalty = dyn < -0.15 ? Math.abs(dyn + 0.15) * arcR + 10 : 0;
-            const dStand =
-                Math.abs(px - cx) -
-                s(0.016) * scale +
-                Math.max(0, py - s(0.615) * scale - (size * (1 - scale)) / 2, 0) * 0; // vertical stand
             const standTop = cy + arcR * 0.92;
             const dStandSeg = distCapsule(px, py, cx, standTop, cx, standTop + s(0.075) * scale, s(0.016) * scale);
             const dBase = distCapsule(

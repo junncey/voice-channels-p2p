@@ -42,8 +42,8 @@
 
     /* type */
     --font:
-        system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB',
-        'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+        system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+        'Noto Sans SC', sans-serif;
     --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
 }
 

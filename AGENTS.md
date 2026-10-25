@@ -5,8 +5,8 @@
 ## 常用命令
 
 - 启动：`npm start`（prestart 自动从 config.template.js 创建 app/src/config.js）
-- 测试：`npx mocha tests/ --exit`（当前 172 passing；含 test-server.js 信令集成测试——起真实 :3100 实例、自动备份/还原 channels.json 与 chat_history、审计重定向到临时文件；改动 channelStore/chatStore/server.js 信令/校验逻辑必须回归）
-- 格式化：`npm run lint`（prettier --write，提交前按需）
+- 测试：`npx mocha tests/ --exit`（当前 194 passing；含 test-server.js 信令集成测试——起真实 :3100 实例、自动备份/还原 channels.json 与 chat_history（`process.on('exit')` 兜底崩溃还原）、审计重定向到临时文件；改动 channelStore/chatStore/server.js 信令/校验逻辑必须回归）
+- 检查：`npm run lint` = `eslint . && prettier --check .`（只查不改，CI 同款）；格式化：`npm run format`（prettier --write）。ESLint flat config 在 `eslint.config.js`（CJS 服务端 + ESM 前端分组，rules 极简）
 - 测试实例约定：`PORT=3100 CHANNEL_ADMIN_PASSWORD=pw CHANNEL_ADMIN_JWT_SECRET=sec node app/src/server.js`
   **绝不杀 3000 端口进程——那是用户自己的实例。** 测试后删除 `app/src/channels.json` 与临时日志。
 - PWA 图标重新生成：`node scripts/gen-pwa-icons.js`（手写 PNG 编码，无图像依赖）
@@ -15,20 +15,22 @@
 
 - `app/src/server.js` — Express + socket.io 信令（join→addPeer→relaySDP/relayICE→removePeer mesh 协议）、REST API、`/c/:id` 路由。**房间成员身份 = 会话 `peer_uuid`（join 时严格校验 uuid 形状，防碰撞 lock/password 等元键）**：异常断线（VPN/加速器切换、网络抖动）先挂起为幽灵会话（15s 宽限，ping-timeout 检出者 5s；宽限常量可经 `GHOST_GRACE_MS`/`GHOST_GRACE_LATE_MS` 注入，测试用），期间不广播 removePeer；同 uuid 重连即原地 resume（addPeer 带 `rejoin:true`，双方复用既有 PC，靠 ICE-restart 恢复阶梯治愈，不重协商），宽限过期才真正移除。主动断开（leave/kick/evict/客户端 B1）仍立即广播。管理/导出 API：`/api/admin/channels` 附每频道成员名单（含 ghost 标记）、`/api/admin/kick` 远程移出、`/api/admin/backup` tar.gz 备份（tar 写入器在 `app/src/backup.js`）、`/api/admin/restore` 上传恢复（校验+全量替换逻辑在 `app/src/restore.js`）、`/api/admin/stats` 统计、`/api/admin/audit` 审计尾部、`/api/host/:id/export` 主持人 Markdown 导出。聊天生命周期事件 `chatEdit`/`chatDelete`/`chatReact`（撤回：本人或主持人；编辑：仅本人）走服务器广播（含仅文字成员），服务器是历史存储的 single writer。`/api/*` 挂全局 IP 限流（600/5min，登录端点除外），`chatPage` 每 socket 30/10s 节流。定时滚动备份：`CHANNEL_BACKUP_INTERVAL_HOURS`/`CHANNEL_BACKUP_KEEP`/`CHANNEL_BACKUP_DIR`（env 直读，不经 config.js）。TURN 支持 REST/HMAC 临时凭证（`TURN_SERVER_SECRET`，coturn use-auth-secret，半衰期重铸；未设 secret 走静态账号）
 - `app/src/audit.js` — 审计 JSONL（`audit.jsonl`，`VC_AUDIT_FILE` 可重定向）：join/leave/ghost 过期/踢人/频道增删改/备份恢复，>5MB 轮转 `.1`，内存尾部 2000 行供 admin tail
-- `app/src/channelStore.js` — 频道注册表（channels.json 原子写）+ 临时房间（仅内存）；ID 规则 `^[a-zA-Z0-9_-]{3,32}$`，空 ID 自动生成；频道字段含可选 `chatRetentionHours`（空=继承全局设置）
+- `app/src/limits.js` — 服务端共享线格式常量单一来源：频道 ID 正则（含可内嵌的 source 形式）、data-URL 图片白名单、昵称 24/正文 500/引用 80/emoji 16 上限、单图 1.6MB、头像 96KB、默认人数 8。server/chatStore/channelStore/restore 一律引这里；前端镜像常量在 `public/js/core/images.js`（`MAX_TRANSFER_CHARS`/`DATA_URL_RE`），改动须两侧同步
+- `app/src/channelStore.js` — 频道注册表（channels.json 原子写）+ 临时房间（仅内存）；ID 规则 `^[a-zA-Z0-9_-]{3,32}$`，空 ID 自动生成；频道字段含可选 `chatRetentionHours`（空=继承全局设置）。**密码全部原文哈希/比对（绝不过 checkXSS——DOMPurify 会改写含 `<`/`>`/`&` 的密钥）**；存量旧哈希经 `legacySanitize`（server.js 注入）回退兼容，`verifyPasswordCompat` 为入口。`sanitize()` 的 `includePrivate:true` 才输出 hosts 用户名（仅 admin 台使用，公共端点不泄露）
 - `app/src/chatStore.js` — 聊天历史留存（**JSONL 追加写** `chat_history/<id>.jsonl`：常规 append 一行 appendSync，O(1)；保留窗口/上限裁剪、编辑/撤回/回应、后台压缩时全量重写；旧 `<id>.json` 单文件格式首次读取自动迁移，撕裂尾行容忍跳过）。保留时长按频道解析：频道 `chatRetentionHours` 覆盖 → 全局 `settings.chatRetentionHours`，0=不保留；临时房间仅内存、随房间销毁。行结构 `{ts,name,text,imgs?,reply?,edited?,deleted?,reactions?}`（reply=回复引用摘要 `{name,text≤80,ts}`；deleted 行变墓碑保留 ts 以稳游标；reactions=emoji→昵称数组，≤8 emoji/50 人；`edit`/`remove`/`react` 按 ts+name 定位；`exportAll(id)` 供主持人导出；`reload()` 清内存缓存供恢复用）。聊天实时收发仍走 DataChannel P2P（typing 指示也走 DC，`{type:'typing'}`），仅发送端向服务器 `chat` 事件同步一份副本存储（带图片时 1 个 head 事件 + 每图 1 个事件，服务端组装，单图上限 1.6MB 字符），历史分页下发：join 时 `chatHistory` 事件只带最近 `CHAT_PAGE_SIZE`(10) 条，客户端滚到顶部经 `chatPage`（socket.io ack）按 `before` ts 游标逐页回拉，每页 2MB 字节预算、页边界不切同 ts 消息组）
 - `app/src/version.js` — 前端版本信息：package.json 版本 + `public/` 内容 sha256 指纹（启动时算，memoized），经 `GET /api/version` 下发；前端 `js/core/version.js` 每 5 分钟轮询（`CHECK_MS`，切回标签页立即查），build 变了在顶部弹软提示条（`base.css .update-banner`，可关闭，同 build 折叠）
 - `app/src/config.js` — 仅 7 个存活配置块；改配置须同步 `config.template.js` 与 `.env.template`（定时备份三个 env 直读、不经 config.js，老 config.js 无需重建）
 - `public/` — 前端全部在此：
-  - `js/core/`（api/socket 内联于页面/webrtc mesh/audio WebAudio 管线/chat 消息列表+emoji 选择器/images/dropdown/i18n 含 `setLang`/sound 操作音效/theme 三态 dark|light|auto/utils/version 版本检测）
-  - `js/pages/`（index/channel/admin 页面控制器，channel.js 是核心；`js/pages/channel/` 为其子模块：wakeLock、debug 钩子）
-  - `lang/zh.json`、`lang/en.json` 扁平键词典；`t(key, {name})` 占位符为 `{name}` 形式
-  - `manifest.webmanifest` + `images/icon-*.png` — PWA 安装（图标由 `scripts/gen-pwa-icons.js` 生成）
-- `tests/` — mocha + should（channelStore/chatStore/validate/xss/version/opusFmtp/backup 含 tar reader/restore/audit/server 信令集成）
+    - `js/core/`（api/socket 内联于页面/webrtc mesh/audio WebAudio 管线/chat 消息列表+emoji 选择器/images/dropdown/i18n 含 `setLang`/sound 操作音效/theme 三态 dark|light|auto/utils/version 版本检测）
+    - `js/pages/`（index/channel/admin 页面控制器，channel.js 是核心；`js/pages/channel/` 为其子模块：wakeLock、debug 钩子）
+    - `lang/zh.json`、`lang/en.json` 扁平键词典；`t(key, {name})` 占位符为 `{name}` 形式
+    - `manifest.webmanifest` + `images/icon-*.png` — PWA 安装（图标由 `scripts/gen-pwa-icons.js` 生成）
+- `tests/` — mocha + should（channelStore/chatStore/validate/xss/version/opusFmtp/backup 含 tar reader/restore/audit/logs/i18n 词典对齐/embedHeaders CSP/server 信令集成）。**测试文件里不得提前 require `app/src/config.js`**——config 按 env 缓存，会污染 test-server.js 的 env 预置（参见 test-embed-headers.js 的缓存自清理）
 
 ## 关键约定与坑
 
-- **XSS 防护**：全部用户文本走 `textContent`/el() 工具；图片仅允许 `data:image/` URL（regex 白名单）。新增渲染代码必须遵守。
+- **XSS 防护**：全部用户文本走 `textContent`/el() 工具；图片仅允许 `data:image/` URL（regex 白名单）。新增渲染代码必须遵守。**密码类字段例外**：绝不过 checkXSS（见 channelStore 条目）。
+- **服务器 join 加固**：`peer_name` 服务端强制 ≤24 且非空；join 处理器整体 try/catch，失败时回滚已写入的房间状态并 emit `joinError`；防爆破计数按 IP（`normalizeIp` 归一，10 次/60s 冷却）。
 - **Chromium 远端流 WebAudio 静音 bug**：远端 WebRTC 流必须挂一个 muted `<audio>` 预热元件（见 `audio.js _prime`），否则 GainNode 抽头无声；AudioContext 被挂起时播放/发送走 `<audio>` 元件回退，恢复后由 `statechange` 自动迁移（`channel.js onCtxStateChange`/`syncMicPipeline`）。
 - **localStorage 键**：`vc_nick`、`vc_audio_settings`（含音乐模式/码率滑块）、`vc_peer_volumes`（按昵称记忆）、`vc_avatar`（自定义头像 data URL）、`vc_send_key`（Enter/Ctrl+Enter 发送偏好）、`vc_sound_settings`（操作音效，可含自定义音效 data:audio/ URL，上限 512KB）、`vc_notify`（被 @ 桌面通知开关）、`vc_fav_channels`（首页收藏）、`vc_recent_channels`（首页最近访问）、`vc_lang`（语言 zh/en）、`vc_host_token_<channelId>`（主持人凭据，默认 30 天）、`vc_chan_pw_<channelId>`（记住的频道密码）；首页「清除全部」会一并清理（`vc_theme` 主题偏好刻意保留，值域 dark/light/auto）。
 - **管理后台**：未配置 `CHANNEL_ADMIN_PASSWORD`+`CHANNEL_ADMIN_JWT_SECRET` 时 /admin 与 API 全部 404（无不安全默认值）；host 登录 JWT 用 `CHANNEL_HOST_JWT_EXP`（默认 30d）。恢复备份是全量替换：备份里没有的频道其历史会被清除。

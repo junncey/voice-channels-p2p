@@ -20,27 +20,26 @@ const fs = require('fs');
 const path = require('path');
 
 const Logs = require('./logs');
+const limits = require('./limits');
 
 const log = new Logs('chatStore');
 
 // Same id space as the channel registry — ids become filenames, so this check
 // doubles as path-traversal protection.
-const ID_PATTERN = /^[a-zA-Z0-9_-]{3,32}$/;
+const { CHANNEL_ID_RE: ID_PATTERN } = limits;
 
-const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+const { IMAGE_DATA_URL_RE: DATA_URL_RE } = limits;
 const MAX_MESSAGES = 300; // per channel: stored, kept in memory and served
 const MAX_IMAGES = 9; // same cap as the client batch protocol
-// mirrors the client transfer cap (images.js MAX_TRANSFER_CHARS) — anything
-// larger was never deliverable P2P either
-const MAX_IMAGE_CHARS = 1600 * 1024;
-const NAME_MAX = 24;
-const TEXT_MAX = 500;
-const REPLY_TEXT_MAX = 80; // quote snippet shown inside the reply bubble
+const MAX_IMAGE_CHARS = limits.IMAGE_MAX_CHARS;
+const NAME_MAX = limits.PEER_NAME_MAX;
+const TEXT_MAX = limits.CHAT_TEXT_MAX;
+const REPLY_TEXT_MAX = limits.REPLY_TEXT_MAX; // quote snippet shown inside the reply bubble
 // reaction caps: distinct emoji per message, reactor names per emoji, and the
 // emoji string itself (some emoji carry several code points + modifiers)
 const REACTIONS_MAX_EMOJI = 8;
 const REACTIONS_MAX_NAMES = 50;
-const REACTION_EMOJI_MAX = 16;
+const REACTION_EMOJI_MAX = limits.REACTION_EMOJI_MAX;
 // Disk budget per channel, images included; rows drop from the oldest end
 // until a file fits (images dominate — text rows are a few hundred bytes).
 // Append-mode stops at 90% of the budget so compaction runs before it is
@@ -148,15 +147,11 @@ class ChatStore {
         }
         // no JSONL yet — migrate a legacy <id>.json on first touch
         const legacy = this.legacyFileFor(id);
+        if (!fs.existsSync(legacy)) return [];
+        let messages;
         try {
-            if (!fs.existsSync(legacy)) return [];
             const raw = JSON.parse(fs.readFileSync(legacy, 'utf8'));
-            const messages = Array.isArray(raw?.messages) ? raw.messages.filter(isPlainMessage) : [];
-            // an empty legacy history has nothing worth materializing as JSONL
-            if (messages.length) this.writeFile(id, messages);
-            fs.unlinkSync(legacy);
-            log.info('Chat history migrated to JSONL', { channel: id, messages: messages.length });
-            return messages;
+            messages = Array.isArray(raw?.messages) ? raw.messages.filter(isPlainMessage) : [];
         } catch (err) {
             // a broken history file must never take the server down — quarantine
             // it (same pattern as the channel registry) and start empty
@@ -168,6 +163,30 @@ class ChatStore {
             log.error('Chat history file unreadable, quarantined', { file: legacy, error: err.message });
             return [];
         }
+        if (messages.length) {
+            try {
+                this.writeFile(id, messages);
+            } catch (err) {
+                // the JSONL could not be written; serve the parsed rows anyway —
+                // the legacy file is untouched, so the next boot retries the
+                // migration instead of the session starting from an empty view
+                log.warn('Chat history migration could not write JSONL, serving parsed rows', {
+                    channel: id,
+                    error: err.message,
+                });
+                return messages;
+            }
+        }
+        try {
+            fs.unlinkSync(legacy);
+        } catch (err) {
+            // Windows/AV can hold the just-read file briefly (EBUSY): the JSONL
+            // is already authoritative, so a leftover legacy file beats
+            // quarantining a GOOD history. The next load prefers the JSONL.
+            log.warn('Legacy chat history file not removed after migration', { channel: id, error: err.message });
+        }
+        log.info('Chat history migrated to JSONL', { channel: id, messages: messages.length });
+        return messages;
     }
 
     /**

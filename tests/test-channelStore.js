@@ -12,7 +12,7 @@ const ChannelStore = require('../app/src/channelStore');
 const { verifyPassword, hashPassword } = require('../app/src/channelStore');
 
 const DEFAULT_SETTINGS = Object.fromEntries(
-    Object.entries(ChannelStore.SETTINGS_SCHEMA).map(([key, rule]) => [key, rule.default]),
+    Object.entries(ChannelStore.SETTINGS_SCHEMA).map(([key, rule]) => [key, rule.default])
 );
 
 function tempFile(name) {
@@ -91,7 +91,10 @@ describe('test-channelStore', () => {
             // sanitized with the temporary flag, listed separately
             store.sanitize(temp).temporary.should.be.true();
             store.sanitize(store.get('persisted')).temporary.should.be.false();
-            store.listTemps().map((ch) => ch.id).should.eql(['quick-room']);
+            store
+                .listTemps()
+                .map((ch) => ch.id)
+                .should.eql(['quick-room']);
 
             // never written to disk
             const raw = JSON.parse(fs.readFileSync(store.filePath, 'utf8'));
@@ -163,7 +166,10 @@ describe('test-channelStore', () => {
             store.create({ id: 'upd', name: 'old', hosts: [{ username: 'bob', password: 'pw2' }] });
             const res = store.update('upd', {
                 name: 'new',
-                hosts: [{ username: 'bob', password: '' }, { username: 'carol', password: 'pw3' }],
+                hosts: [
+                    { username: 'bob', password: '' },
+                    { username: 'carol', password: 'pw3' },
+                ],
             });
             res.ok.should.be.true();
             res.channel.name.should.equal('new');
@@ -184,8 +190,14 @@ describe('test-channelStore', () => {
         it('should list only public channels for the public list', () => {
             store.create({ id: 'pub1', name: 'a', public: true });
             store.create({ id: 'priv1', name: 'b', public: false });
-            store.list().map((c) => c.id).should.eql(['pub1']);
-            store.list({ includePrivate: true }).map((c) => c.id).should.eql(['pub1', 'priv1']);
+            store
+                .list()
+                .map((c) => c.id)
+                .should.eql(['pub1']);
+            store
+                .list({ includePrivate: true })
+                .map((c) => c.id)
+                .should.eql(['pub1', 'priv1']);
         });
     });
 
@@ -324,7 +336,13 @@ describe('test-channelStore', () => {
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
             const store = new ChannelStore({ filePath, autoInit: true });
             store
-                .updateSettings({ tempMaxRooms: 50, tempMaxPerIp: 1, tempCreateMax: 2, tempCreateWindowMin: 5, socketMaxChannels: 1 })
+                .updateSettings({
+                    tempMaxRooms: 50,
+                    tempMaxPerIp: 1,
+                    tempCreateMax: 2,
+                    tempCreateWindowMin: 5,
+                    socketMaxChannels: 1,
+                })
                 .ok.should.be.true();
             new ChannelStore({ filePath, autoInit: false }).getSettings().should.eql({
                 ...DEFAULT_SETTINGS,
@@ -503,7 +521,9 @@ describe('test-channelStore', () => {
             fs.existsSync(`${filePath}.bak`).should.be.true();
             JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.should.be.empty(); // pre-create state
             store.create({ id: 'two', name: 'second' });
-            JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.map((c) => c.id).should.eql(['one']);
+            JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8'))
+                .channels.map((c) => c.id)
+                .should.eql(['one']);
         });
     });
 
@@ -600,4 +620,71 @@ describe('test-channelStore', () => {
         });
     });
 
+    describe('10. Verbatim passwords + legacy sanitized-hash fallback', () => {
+        it('should hash and verify passwords containing markup characters verbatim', () => {
+            const secret = '<b>p&ss</b>"word\'';
+            const stored = hashPassword(secret);
+            verifyPassword(secret, stored).should.be.true();
+            verifyPassword('wrong', stored).should.be.false();
+            // no legacy fallback wired: verifyPasswordCompat behaves like verifyPassword
+            ChannelStore.verifyPasswordCompat(secret, stored, null).should.be.true();
+            ChannelStore.verifyPasswordCompat('wrong', stored, null).should.be.false();
+        });
+
+        it('should keep pre-fix hashes of SANITIZED passwords verifiable via the fallback', () => {
+            const checkXSS = require('../app/src/xss.js');
+            const raw = 'a<b>&c';
+            const legacyForm = checkXSS(raw);
+            legacyForm.should.not.equal(raw); // sanity: the sanitizer really rewrites it
+            // a pre-fix registry stored the hash of the SANITIZED form
+            const legacyHash = hashPassword(legacyForm);
+
+            const store = newStore('legacy-pw', { legacySanitize: (pw) => checkXSS(pw) });
+            store.create({ id: 'legacy-chan', name: 'Legacy', password: raw });
+            // raw-first verify against the NEW hash
+            store.verifyChannelPassword('legacy-chan', raw).should.be.true();
+
+            // plant the legacy hash and verify the raw password still passes
+            store.get('legacy-chan').passwordHash = legacyHash;
+            store.verifyChannelPassword('legacy-chan', raw).should.be.true();
+            store.verifyChannelPassword('legacy-chan', 'wrong').should.be.false();
+        });
+
+        it('should verify hosts verbatim and via the legacy fallback', () => {
+            const checkXSS = require('../app/src/xss.js');
+            const raw = 'h<b>ost';
+            const store = newStore('legacy-host', { legacySanitize: (pw) => checkXSS(pw) });
+            store.create({ id: 'hostchan', name: 'H', hosts: [{ username: 'alice', password: raw }] });
+            store.verifyHost('hostchan', 'alice', raw).should.eql({ username: 'alice' });
+
+            store.get('hostchan').hosts[0].passwordHash = hashPassword(checkXSS(raw));
+            store.verifyHost('hostchan', 'alice', raw).should.eql({ username: 'alice' });
+            should(store.verifyHost('hostchan', 'alice', 'wrong')).be.null();
+        });
+    });
+
+    describe('11. sanitize: host usernames are operator data', () => {
+        it('should omit hosts from the public shape and include them for admin', () => {
+            const store = newStore('hosts-gate');
+            store.create({ id: 'hosted', name: 'Hosted', hosts: [{ username: 'alice', password: 'pw1' }] });
+            const channel = store.get('hosted');
+
+            should(store.sanitize(channel).hosts).be.undefined();
+            store.sanitize(channel, { includePrivate: true }).hosts.should.eql(['alice']);
+            // create/update results feed the admin console — they carry hosts
+            store
+                .create({ id: 'hosted2', name: 'H2', hosts: [{ username: 'bob', password: 'pw2' }] })
+                .channel.hosts.should.eql(['bob']);
+        });
+
+        it('should never generate an id shadowed by a live temp room', () => {
+            const store = newStore('genid');
+            for (let i = 0; i < 50; i++) {
+                const id = store.generateId();
+                store.isTemp(id).should.be.false();
+                store.getOrCreateTemp(id);
+                store.isTemp(id).should.be.true();
+            }
+        });
+    });
 });

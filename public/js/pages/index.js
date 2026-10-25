@@ -9,7 +9,7 @@ import { api } from '/js/core/api.js';
 import { initI18n, t, getLang, setLang } from '/js/core/i18n.js';
 import { getThemePref, setThemePref } from '/js/core/theme.js';
 import { initVersionCheck } from '/js/core/version.js';
-import { $, el } from '/js/core/utils.js';
+import { $, el, toast } from '/js/core/utils.js';
 
 const POLL_MS = 15000;
 
@@ -228,12 +228,6 @@ function bindClearData() {
         toast(t('index.cleared'), 'ok');
         render();
     });
-}
-
-function toast(message, kind = '') {
-    const node = el('div', { class: `toast ${kind}`, text: message });
-    $('#toasts').append(node);
-    setTimeout(() => node.remove(), 3200);
 }
 
 function renderCard(channel) {

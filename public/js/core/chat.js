@@ -11,19 +11,23 @@
  */
 
 import { el, formatTime, formatDate, avatarColor } from './utils.js';
+import { DATA_URL_RE, MAX_TRANSFER_CHARS } from './images.js';
 
 /** Show a time separator when the gap to the previous message exceeds this. */
 const TIME_GAP_MS = 5 * 60 * 1000;
 
-const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 // mirrors the server-side persisted-image cap — reject anything bigger on render
-const MAX_IMAGE_CHARS = 1600 * 1024;
+const MAX_IMAGE_CHARS = MAX_TRANSFER_CHARS;
 
 // emoji glyph runs: pictographics, skin tones, ZWJ sequences, keycaps,
 // regional-indicator pairs, variation selectors and surrounding whitespace
+// (the astral \u{...} escapes inside the character classes are deliberate —
+// these regexes exist to match exactly those code points)
+/* eslint-disable no-misleading-character-class */
 const EMOJI_RUN_RE =
     /^(?:[\p{Extended_Pictographic}\p{Emoji_Component}\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}\s])+$/u;
 const EMOJI_CORE_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{20E3}]/u;
+/* eslint-enable no-misleading-character-class */
 
 /**
  * A message made only of a few emoji (no letters/digits) renders without the
@@ -73,8 +77,25 @@ const EMOJIS = [
 ];
 
 /** Escape a member name for the mention RegExp. */
-function escapeRegExp(text) {
+export function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Reply quote from a message payload, shape-checked and capped before
+ * rendering/storing — shared with the channel page's history and live paths.
+ */
+export function validReply(reply) {
+    if (
+        !reply ||
+        typeof reply !== 'object' ||
+        typeof reply.name !== 'string' ||
+        typeof reply.text !== 'string' ||
+        !Number.isFinite(reply.ts)
+    ) {
+        return null;
+    }
+    return { name: reply.name.slice(0, 24), text: reply.text.slice(0, 80), ts: reply.ts };
 }
 
 /**
@@ -428,20 +449,6 @@ export function initChat(
             .slice(0, 9);
     }
 
-    /** Reply quote from a message payload, shape-checked before rendering. */
-    function validReply(reply) {
-        if (
-            !reply ||
-            typeof reply !== 'object' ||
-            typeof reply.name !== 'string' ||
-            typeof reply.text !== 'string' ||
-            !Number.isFinite(reply.ts)
-        ) {
-            return null;
-        }
-        return { name: reply.name.slice(0, 24), text: reply.text.slice(0, 80), ts: reply.ts };
-    }
-
     /** Reactions map from a message payload, shape-checked before rendering. */
     function validReactions(reactions) {
         if (!reactions || typeof reactions !== 'object' || Array.isArray(reactions)) return null;
@@ -488,7 +495,6 @@ export function initChat(
             if (prevDay !== day) {
                 frag.append(el('div', { class: 'chat-time day', text: dayLabel(time) }));
                 prevDay = day;
-                prevTs = null;
             } else if (prevTs === null || ts - prevTs > TIME_GAP_MS) {
                 frag.append(timeChipNode(time));
             }

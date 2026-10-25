@@ -37,10 +37,15 @@ const ChannelStore = require('./channelStore');
 const ChatStore = require('./chatStore');
 const Version = require('./version');
 const Audit = require('./audit');
+const limits = require('./limits');
 const { pipeline, Readable } = require('stream');
 const { createTarIterator } = require('./backup');
 const { applyBackupArchive, RestoreError } = require('./restore');
 const { applyEmbedHeaders } = require('./middleware/embedHeaders');
+
+// one constant-time compare implementation for the whole server (channelStore
+// owns it — it lives next to the password hashing it was built for)
+const safeEqualStrings = ChannelStore.constantTimeEquals;
 
 const log = new Logs('server');
 
@@ -163,10 +168,14 @@ function getIceServers() {
 
 const channelsCfg = config.channels || {};
 
+// Wire the pre-fix password compatibility shim: registries written before
+// passwords were compared verbatim hold hashes of DOMPurify-sanitized secrets;
+// verifyPasswordCompat re-derives that form as a fallback (raw first).
 const channelStore = new ChannelStore({
     filePath: path.join(__dirname, 'channels.json'),
     autoInit: channelsCfg.autoInit !== false,
     defaultModerator: channelsCfg.defaultModerator,
+    legacySanitize: (pw) => checkXSS(pw),
     // env seeds the first-boot default; afterwards the admin toggle persists
     defaultSettings: { tempRooms: channelsCfg.tempRooms !== false },
 });
@@ -405,6 +414,10 @@ const staticOptions = {
 };
 app.use(express.static(dir.public, staticOptions));
 
+// CORS before the API limiter: preflight OPTIONS requests are protocol
+// overhead, not API traffic, and must not burn the rate budget
+app.use(cors(corsOptions));
+
 // REST-wide safety net (login endpoints keep their stricter limiter — order
 // matters: the specific limiter must run first, so mount this after routes…
 // except Express matches in registration order, hence the skip below)
@@ -414,7 +427,6 @@ app.use('/api', (req, res, next) => {
     return apiLimiter(req, res, next);
 });
 
-app.use(cors(corsOptions));
 app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -452,6 +464,14 @@ function sendPage(res, file, status = 200) {
     res.status(status).set('Cache-Control', 'no-cache').type('html').send(html);
 }
 
+/** 404 page with an error callback: a missing 404.html must not hang the
+ *  request (sendFile without one never ends the response on failure). */
+function sendNotFound(res) {
+    res.status(404).sendFile(views.notFound, (err) => {
+        if (err && !res.headersSent) res.status(500).type('text').send('Not found');
+    });
+}
+
 // Channel list (homepage)
 app.get('/', (req, res) => {
     sendPage(res, views.index);
@@ -463,7 +483,7 @@ app.get('/c/:channelId', (req, res) => {
     const { channelId } = req.params;
     const known = channelStore.exists(channelId) || channelStore.isTemp(channelId);
     if (!known && !(tempRoomsEnabled() && channelStore.isValidId(channelId))) {
-        return res.status(404).sendFile(views.notFound);
+        return sendNotFound(res);
     }
     sendPage(res, views.channel);
 });
@@ -475,7 +495,7 @@ app.get('/join/:roomId', (req, res) => {
 
 // Admin console (404 unless enabled via env)
 app.get('/admin', (req, res) => {
-    if (!consoleEnabled) return res.status(404).sendFile(views.notFound);
+    if (!consoleEnabled) return sendNotFound(res);
     sendPage(res, views.admin);
 });
 
@@ -504,12 +524,14 @@ app.get('/api/channels', (req, res) => {
     });
 });
 
-// Channel metadata for the channel page (works for unlisted channels too)
+// Channel metadata for the channel page (works for unlisted channels too).
+// includePrivate stays off: host usernames are operator data for the admin
+// console, not for anonymous visitors.
 app.get('/api/channels/:channelId', (req, res) => {
     const id = req.params.channelId;
     const channel = channelStore.get(id) || channelStore.getTemp(id);
     if (channel) {
-        return res.json(channelStore.sanitize(channel, { includePrivate: true, online: getPeerCount(id) }));
+        return res.json(channelStore.sanitize(channel, { online: getPeerCount(id) }));
     }
     // unknown id: with temp rooms enabled, any valid id MAY become a room the
     // moment someone joins — serve a virtual preview instead of a 404
@@ -519,8 +541,7 @@ app.get('/api/channels/:channelId', (req, res) => {
             name: id,
             description: '',
             public: true,
-            maxParticipants: 8,
-            hosts: [],
+            maxParticipants: limits.DEFAULT_MAX_PARTICIPANTS,
             hasPassword: false,
             temporary: true,
         });
@@ -535,10 +556,39 @@ app.get('/api/version', (req, res) => {
     res.json(Version.getVersionInfo(dir.public));
 });
 
+/**
+ * checkXSS minus the secret fields: passwords must reach the hasher/comparer
+ * VERBATIM — DOMPurify silently rewrites strings containing markup characters
+ * (<, >, &), which would change the effective password and cut its entropy.
+ * Everything else is sanitized as usual; the raw secrets are merged back in.
+ */
+function sanitizeExceptSecrets(raw, secretKeys) {
+    if (!raw || typeof raw !== 'object') return {};
+    const secrets = {};
+    for (const key of secretKeys) {
+        if (typeof raw[key] === 'string') secrets[key] = raw[key];
+    }
+    const safe = checkXSS({ ...raw, ...Object.fromEntries(secretKeys.map((k) => [k, undefined])) }) || {};
+    return { ...safe, ...secrets };
+}
+
+/**
+ * Admin channel create/update payload: the channel password and every host
+ * password stay raw (see sanitizeExceptSecrets); host usernames and the rest
+ * of the definition go through checkXSS as before.
+ */
+function sanitizeChannelPayload(body) {
+    const { password, hosts, ...safe } = sanitizeExceptSecrets(body, ['password']);
+    const out = { ...safe, ...(typeof password === 'string' ? { password } : {}) };
+    if (Array.isArray(hosts)) {
+        out.hosts = hosts.map((h) => (h && typeof h === 'object' ? { ...sanitizeExceptSecrets(h, ['password']) } : h));
+    }
+    return out;
+}
+
 // Host login -> JWT used as peer_token when joining the channel socket room
 app.post('/api/host/login', loginLimiter, (req, res) => {
-    const safeBody = checkXSS(req.body) || {};
-    const { channelId, username, password } = safeBody;
+    const { channelId, username, password } = sanitizeExceptSecrets(req.body, ['password']);
 
     if (!channelId || !username || !password) {
         return res.status(400).json({ error: 'Missing channelId, username or password' });
@@ -581,8 +631,9 @@ function requireAdmin(req, res, next) {
 
 app.post('/api/admin/login', loginLimiter, (req, res) => {
     if (!consoleEnabled) return res.status(404).json({ error: 'Not found' });
-    const safeBody = checkXSS(req.body) || {};
-    const { password } = safeBody;
+    // compared verbatim against the env secret — never sanitized (an env
+    // password containing markup chars was unloginable before this fix)
+    const { password } = req.body || {};
     if (!password || typeof password !== 'string') {
         return res.status(400).json({ error: 'Missing password' });
     }
@@ -607,7 +658,9 @@ function evictChannelPeers(channelId, reason) {
     for (const sock of Object.values(room)) {
         try {
             sock.emit('kickOut', { reason });
-            sock.disconnect(true);
+            // give the packet a beat to flush before the hard close (same
+            // shape as the single-member admin kick)
+            setTimeout(() => sock.disconnect(true), 100).unref?.();
             evicted++;
         } catch (err) {
             log.error('Evict peer failed', { channel: channelId, error: err.message });
@@ -670,14 +723,14 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/channels', requireAdmin, (req, res) => {
-    const result = channelStore.create(checkXSS(req.body) || {});
+    const result = channelStore.create(sanitizeChannelPayload(req.body));
     if (!result.ok) return res.status(400).json({ error: result.errors.join('; ') });
     audit.record('channelCreate', { id: result.channel.id, name: result.channel.name });
     res.status(201).json({ channel: result.channel });
 });
 
 app.put('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
-    const result = channelStore.update(req.params.channelId, checkXSS(req.body) || {});
+    const result = channelStore.update(req.params.channelId, sanitizeChannelPayload(req.body));
     if (!result.ok) {
         return result.errors[0].includes('not found')
             ? res.status(404).json({ error: result.errors[0] })
@@ -706,18 +759,28 @@ app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
  * Streamed end-to-end (tar iterator -> gzip transform -> response), so the
  * whole archive is never held in memory regardless of history volume.
  */
+/**
+ * Backup payload shared by the admin download and the scheduled backup:
+ * channels.json + every persisted chat history file as archive entries,
+ * preflighted for readability so failures surface as a clean error instead
+ * of a mid-stream abort after download headers are already sent.
+ */
+function collectBackupEntries() {
+    const entries = [];
+    if (fs.existsSync(channelStore.filePath)) {
+        entries.push({ name: path.basename(channelStore.filePath), path: channelStore.filePath });
+    }
+    for (const id of chatStore.listFiles()) {
+        const file = chatStore.existingFileFor(id);
+        if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}${path.extname(file)}`, path: file });
+    }
+    for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
+    return entries;
+}
+
 app.get('/api/admin/backup', requireAdmin, (req, res) => {
     try {
-        const entries = [];
-        const registry = path.basename(channelStore.filePath);
-        if (fs.existsSync(channelStore.filePath)) entries.push({ name: registry, path: channelStore.filePath });
-        for (const id of chatStore.listFiles()) {
-            const file = chatStore.existingFileFor(id);
-            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}${path.extname(file)}`, path: file });
-        }
-        // preflight readability so failures surface as a clean 500 instead of a
-        // mid-stream abort after the download headers are already sent
-        for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
+        const entries = collectBackupEntries();
         const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
         res.set({
             'Content-Type': 'application/gzip',
@@ -906,7 +969,7 @@ app.get('/api/v1/stats', (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.use((req, res) => {
-    res.status(404).sendFile(views.notFound);
+    sendNotFound(res);
 });
 
 app.use((err, req, res, next) => {
@@ -966,15 +1029,9 @@ function startScheduledBackup() {
 /** Build the backup archive into BACKUP_DIR; resolves with the file path. */
 function writeScheduledBackup() {
     return new Promise((resolve, reject) => {
-        const entries = [];
-        if (fs.existsSync(channelStore.filePath))
-            entries.push({ name: path.basename(channelStore.filePath), path: channelStore.filePath });
-        for (const id of chatStore.listFiles()) {
-            const file = chatStore.existingFileFor(id);
-            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}${path.extname(file)}`, path: file });
-        }
+        let entries;
         try {
-            for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
+            entries = collectBackupEntries();
             fs.mkdirSync(BACKUP_DIR, { recursive: true });
         } catch (err) {
             return reject(err);
@@ -1037,9 +1094,8 @@ io.sockets.on('connect', async (socket) => {
         }
         log.debug('[' + socket.id + '] disconnected', { reason });
         delete sockets[socket.id];
-        joinFailures.delete(socket.id); // per-socket state cleanup
-        chatSends.delete(socket.id);
-        chatPageSends.delete(socket.id);
+        isChatFlooded.forget(socket.id); // per-socket rate windows die with the socket
+        isChatPageFlooded.forget(socket.id);
         chatBatches.delete(socket.id); // pending image batches die with the sender
     });
 
@@ -1048,278 +1104,322 @@ io.sockets.on('connect', async (socket) => {
      * Presenter rights come ONLY from a valid host JWT for this channel.
      */
     socket.on('join', async (cfg) => {
-        const peer_ip = getSocketIP(socket);
-        const config = checkXSS(cfg);
+        // set once room state has been written, so the catch below can roll a
+        // half-joined socket back out (and skip rollback when a concurrent
+        // same-uuid join owns the slot instead)
+        let claimed = null;
+        const handleJoin = async () => {
+            const peer_ip = getSocketIP(socket);
+            // channel_password stays raw — it is hash-verified, and a sanitizer
+            // would silently change the effective secret (pre-fix stored hashes
+            // keep verifying via channelStore's verifyPasswordCompat fallback)
+            const config = sanitizeExceptSecrets(cfg, ['channel_password']);
 
-        if (!Validate.isValidData(config)) return;
-        // never log credentials (host JWT / room password)
-        const { peer_token, channel_password, ...joinLogData } = config;
-        log.debug('[' + socket.id + '] join', joinLogData);
+            if (!Validate.isValidData(config)) return;
+            // never log credentials (host JWT / room password)
+            const { peer_token, channel_password, ...joinLogData } = config;
+            log.debug('[' + socket.id + '] join', joinLogData);
 
-        const { channel, peer_uuid, peer_name } = config;
+            const { channel, peer_uuid } = config;
 
-        // Brute-force guard: a socket with too many consecutive failed join
-        // authentications is silently ignored for the cooldown window
-        if (isJoinThrottled(socket.id)) {
-            log.warn('[' + socket.id + '] join dropped: auth-failure cooldown', { channel });
-            return;
-        }
+            // Brute-force guard: a source with too many consecutive failed
+            // join authentications is silently ignored for the cooldown window
+            if (isJoinThrottled(peer_ip)) {
+                log.warn('[' + socket.id + '] join dropped: auth-failure cooldown', { channel });
+                return;
+            }
 
-        if (!Validate.isValidRoomName(channel) || !channelStore.isValidId(channel)) {
-            log.warn('[' + socket.id + '] invalid channel id', { channel });
-            recordJoinFailure(socket.id);
-            return socket.emit('unauthorized');
-        }
-
-        // peer_uuid becomes the room-state key for this session (resume
-        // matching, relay targets) — a strict uuid shape keeps it from ever
-        // colliding with the room meta keys or polluting object prototypes
-        if (!Validate.isValidSessionUuid(peer_uuid)) {
-            log.warn('[' + socket.id + '] invalid peer_uuid', { channel });
-            recordJoinFailure(socket.id);
-            return socket.emit('unauthorized');
-        }
-
-        if (Object.hasOwn(socket.channels, channel)) {
-            return log.debug('[' + socket.id + '] [Warning] already joined', channel);
-        }
-
-        // one page = one channel; a socket juggling several live channels at
-        // once is a scripted client, not a browser visitor (admin-tunable:
-        // settings.socketMaxChannels)
-        const socketMaxChannels = channelStore.settings.socketMaxChannels;
-        if (Object.keys(socket.channels).length >= socketMaxChannels) {
-            log.warn('[' + socket.id + '] socket channel limit reached', {
-                channel,
-                joined: Object.keys(socket.channels),
-            });
-            return socket.emit('channelLimitReached', { max: socketMaxChannels });
-        }
-
-        // Channel must be registered — or, with temporary rooms enabled, any
-        // valid id MAY become an ephemeral in-memory room. Temp creation is
-        // DEFERRED until every auth check passed so a rejected join (bad
-        // token/password) can never spawn (and later leak) an empty room.
-        let channelDef = channelStore.get(channel);
-        const wouldCreateTemp = !channelDef && tempRoomsEnabled();
-        if (!channelDef && !wouldCreateTemp) {
-            log.warn('[' + socket.id + '] channel not found in registry', { channel });
-            return socket.emit('channelNotFound');
-        }
-
-        // Presenter: valid host JWT issued for THIS channel, and the host must
-        // still be configured (token may predate a config change). Fallback
-        // tokens (via: 'default-moderator', issued by host login for channels
-        // without configured hosts) stay valid only while the channel is STILL
-        // hostless and the shared default-moderator feature is enabled.
-        let is_presenter = false;
-        if (peer_token) {
-            const payload = verifyConsoleToken(peer_token);
-            const fallbackModeratorOk =
-                payload?.via === 'default-moderator' &&
-                Boolean(channelsCfg.defaultModerator) &&
-                channelStore.isHostless(channel);
-            if (
-                payload &&
-                payload.role === 'host' &&
-                payload.channelId === channel &&
-                payload.username &&
-                (channelStore.isHost(channel, payload.username) || fallbackModeratorOk)
-            ) {
-                is_presenter = true;
-                log.debug('[' + socket.id + '] joining as host', {
-                    channel,
-                    username: payload.username,
-                    via: payload.via || 'configured',
-                });
-            } else {
-                log.warn('[' + socket.id + '] invalid host token for channel', { channel });
-                recordJoinFailure(socket.id);
+            if (!Validate.isValidRoomName(channel) || !channelStore.isValidId(channel)) {
+                log.warn('[' + socket.id + '] invalid channel id', { channel });
+                recordJoinFailure(peer_ip);
                 return socket.emit('unauthorized');
             }
-        }
 
-        // Persistent channel password (set in the admin console). Hosts
-        // authenticate with their own credentials and always pass. A pending
-        // temp room (channelDef still null) has no password yet.
-        if (
-            !is_presenter &&
-            channelDef?.passwordHash &&
-            !channelStore.verifyChannelPassword(channel, channel_password)
-        ) {
-            log.debug('[' + socket.id + '] [Warning] channel password required/invalid', { channel });
-            recordJoinFailure(socket.id);
-            return socket.emit('channelPasswordRequired');
-        }
+            // peer_uuid becomes the room-state key for this session (resume
+            // matching, relay targets) — a strict uuid shape keeps it from ever
+            // colliding with the room meta keys or polluting object prototypes
+            if (!Validate.isValidSessionUuid(peer_uuid)) {
+                log.warn('[' + socket.id + '] invalid peer_uuid', { channel });
+                recordJoinFailure(peer_ip);
+                return socket.emit('unauthorized');
+            }
 
-        // Session resume: a rejoin carrying the SAME peer_uuid is this page's
-        // session reconnecting (each join() mints a fresh uuid). While the
-        // previous socket's entry is still in its ghost grace window, REBIND
-        // it to the new socket and keep the session — the other members never
-        // saw a removePeer, their peer connections stay up and heal via ICE
-        // restart instead of a full renegotiation. A name change or a still
-        // LIVE old socket is not a resume: evict the old session and rebuild.
-        // (Never matches a second tab — it would have its own uuid.)
-        let is_rejoin = false;
-        let resumed = false;
-        let keepJoinedAt = Date.now();
-        const existingEntry = Object.hasOwn(peers, channel) ? peers[channel][peer_uuid] : null;
-        if (existingEntry && !roomMetaKeys.has(peer_uuid)) {
-            const nameMatches = existingEntry.peer_name === peer_name;
-            const oldSocket = sockets[existingEntry.socket_id];
-            if (existingEntry.ghost && nameMatches) {
-                is_rejoin = true;
-                resumed = true;
-                keepJoinedAt = existingEntry.joined_at;
-                clearTimeout(ghosts.get(ghostKey(channel, peer_uuid)));
-                ghosts.delete(ghostKey(channel, peer_uuid));
-                delete channels[channel]?.[existingEntry.socket_id];
-                if (oldSocket) delete oldSocket.channels[channel]; // dead socket bookkeeping
-                existingEntry.ghost = false;
-                existingEntry.socket_id = socket.id;
-                log.debug('[' + socket.id + '] session resumed in grace window', { channel });
-            } else {
-                is_rejoin = nameMatches; // same session returning under a live socket: capacity/lock bypass parity
-                if (oldSocket && oldSocket.connected) {
-                    await removePeerFrom(channel, oldSocket, 'reconnected');
+            // The join name rides every membership broadcast — require a real
+            // string and cap it like every other name path (peerName/peerRename
+            // cap at PEER_NAME_MAX), so a scripted join cannot push a
+            // socket-packet-sized name into room state and member cards
+            if (typeof config.peer_name !== 'string' || !config.peer_name.trim()) {
+                log.warn('[' + socket.id + '] invalid peer_name', { channel });
+                recordJoinFailure(peer_ip);
+                return socket.emit('unauthorized');
+            }
+            const peer_name = config.peer_name.slice(0, limits.PEER_NAME_MAX);
+
+            if (Object.hasOwn(socket.channels, channel)) {
+                return log.debug('[' + socket.id + '] [Warning] already joined', channel);
+            }
+
+            // one page = one channel; a socket juggling several live channels at
+            // once is a scripted client, not a browser visitor (admin-tunable:
+            // settings.socketMaxChannels)
+            const socketMaxChannels = channelStore.settings.socketMaxChannels;
+            if (Object.keys(socket.channels).length >= socketMaxChannels) {
+                log.warn('[' + socket.id + '] socket channel limit reached', {
+                    channel,
+                    joined: Object.keys(socket.channels),
+                });
+                return socket.emit('channelLimitReached', { max: socketMaxChannels });
+            }
+
+            // Channel must be registered — or, with temporary rooms enabled, any
+            // valid id MAY become an ephemeral in-memory room. Temp creation is
+            // DEFERRED until every auth check passed so a rejected join (bad
+            // token/password) can never spawn (and later leak) an empty room.
+            let channelDef = channelStore.get(channel);
+            const wouldCreateTemp = !channelDef && tempRoomsEnabled();
+            if (!channelDef && !wouldCreateTemp) {
+                log.warn('[' + socket.id + '] channel not found in registry', { channel });
+                return socket.emit('channelNotFound');
+            }
+
+            // Presenter: valid host JWT issued for THIS channel, and the host must
+            // still be configured (token may predate a config change). Fallback
+            // tokens (via: 'default-moderator', issued by host login for channels
+            // without configured hosts) stay valid only while the channel is STILL
+            // hostless and the shared default-moderator feature is enabled.
+            let is_presenter = false;
+            if (peer_token) {
+                const payload = verifyConsoleToken(peer_token);
+                const fallbackModeratorOk =
+                    payload?.via === 'default-moderator' &&
+                    Boolean(channelsCfg.defaultModerator) &&
+                    channelStore.isHostless(channel);
+                if (
+                    payload &&
+                    payload.role === 'host' &&
+                    payload.channelId === channel &&
+                    payload.username &&
+                    (channelStore.isHost(channel, payload.username) || fallbackModeratorOk)
+                ) {
+                    is_presenter = true;
+                    log.debug('[' + socket.id + '] joining as host', {
+                        channel,
+                        username: payload.username,
+                        via: payload.via || 'configured',
+                    });
                 } else {
+                    log.warn('[' + socket.id + '] invalid host token for channel', { channel });
+                    recordJoinFailure(peer_ip);
+                    return socket.emit('unauthorized');
+                }
+            }
+
+            // Persistent channel password (set in the admin console). Hosts
+            // authenticate with their own credentials and always pass. A pending
+            // temp room (channelDef still null) has no password yet.
+            if (
+                !is_presenter &&
+                channelDef?.passwordHash &&
+                !channelStore.verifyChannelPassword(channel, channel_password)
+            ) {
+                log.debug('[' + socket.id + '] [Warning] channel password required/invalid', { channel });
+                recordJoinFailure(peer_ip);
+                return socket.emit('channelPasswordRequired');
+            }
+
+            // Session resume: a rejoin carrying the SAME peer_uuid is this page's
+            // session reconnecting (each join() mints a fresh uuid). While the
+            // previous socket's entry is still in its ghost grace window, REBIND
+            // it to the new socket and keep the session — the other members never
+            // saw a removePeer, their peer connections stay up and heal via ICE
+            // restart instead of a full renegotiation. A name change or a still
+            // LIVE old socket is not a resume: evict the old session and rebuild.
+            // (Never matches a second tab — it would have its own uuid.)
+            let is_rejoin = false;
+            let resumed = false;
+            let keepJoinedAt = Date.now();
+            const existingEntry = Object.hasOwn(peers, channel) ? peers[channel][peer_uuid] : null;
+            if (existingEntry && !roomMetaKeys.has(peer_uuid)) {
+                const nameMatches = existingEntry.peer_name === peer_name;
+                if (existingEntry.ghost && nameMatches) {
+                    is_rejoin = true;
+                    resumed = true;
+                    keepJoinedAt = existingEntry.joined_at;
                     clearTimeout(ghosts.get(ghostKey(channel, peer_uuid)));
                     ghosts.delete(ghostKey(channel, peer_uuid));
-                    releaseRoomEntry(channel, peer_uuid);
-                    broadcastRemovePeer(channel, peer_uuid, existingEntry.socket_id);
-                }
-                log.debug('[' + socket.id + '] reaped stale session on rejoin', { channel, resumed: false });
-            }
-        }
-
-        // Capacity hard check (hosts may always join to manage their channel)
-        const maxParticipants = channelDef?.maxParticipants || 8;
-        if (!is_presenter && !is_rejoin && getPeerCount(channel) >= maxParticipants) {
-            log.debug('[' + socket.id + '] channel is full', {
-                channel,
-                count: getPeerCount(channel),
-                maxParticipants,
-            });
-            return socket.emit('roomIsBusy', { maxParticipants });
-        }
-
-        // Room-level locks (read before any room structure is created so a
-        // rejected join never leaves an empty room behind)
-        const roomLocked =
-            peers[channel]?.['lock'] === true && !safeEqualStrings(peers[channel]?.['password'], channel_password);
-        if (roomLocked) {
-            log.debug('[' + socket.id + '] [Warning] room is locked', { channel });
-            recordJoinFailure(socket.id);
-            return socket.emit('roomIsLocked');
-        }
-
-        const isPresenterNow = is_presenter || presenters[channel]?.[peer_uuid]?.is_presenter === true;
-
-        // Room-level join lock blocks NEW joiners only — a reconnecting
-        // member (same uuid, resumed or reaped above) was already inside.
-        const joinLocked = peers[channel]?.['joinLock'] === true && !is_rejoin && !isPresenterNow;
-        if (joinLocked) {
-            log.debug('[' + socket.id + '] [Warning] room is join-locked', { channel });
-            return socket.emit('roomIsJoinLocked');
-        }
-
-        // Auth passed — only now materialize a pending temporary room, so a
-        // rejected join never leaves one behind (getOrCreateTemp returns null
-        // at the global / per-IP caps)
-        if (!channelDef) {
-            const existingTemp = channelStore.getTemp(channel);
-            if (existingTemp) {
-                // joining a room someone already spawned: no creation, no quota
-                channelDef = existingTemp;
-            } else {
-                const quota = channelStore.checkTempQuota(peer_ip);
-                if (!quota.ok) {
-                    log.warn('[' + socket.id + '] temp room quota exceeded', { channel, reason: quota.reason });
-                    return socket.emit('tempRoomLimitReached', {
-                        reason: quota.reason,
-                        max: channelStore.settings.tempMaxPerIp,
-                    });
-                }
-                channelDef = channelStore.getOrCreateTemp(channel, { creatorIp: peer_ip });
-                if (!channelDef) {
-                    log.warn('[' + socket.id + '] temp room cap reached', { channel });
-                    return socket.emit('channelNotFound');
+                    delete channels[channel]?.[existingEntry.socket_id];
+                    if (sockets[existingEntry.socket_id]) delete sockets[existingEntry.socket_id].channels[channel]; // dead socket bookkeeping
+                    existingEntry.ghost = false;
+                    existingEntry.socket_id = socket.id;
+                    log.debug('[' + socket.id + '] session resumed in grace window', { channel });
+                } else {
+                    is_rejoin = nameMatches; // same session returning under a live socket: capacity/lock bypass parity
+                    await reapSession(channel, peer_uuid, existingEntry);
+                    log.debug('[' + socket.id + '] reaped stale session on rejoin', { channel, resumed: false });
                 }
             }
-        }
 
-        // Auth passed — safe to create the room structures now
-        if (!Object.hasOwn(channels, channel)) channels[channel] = {};
-        if (!Object.hasOwn(peers, channel)) peers[channel] = {};
-        if (!Object.hasOwn(presenters, channel)) presenters[channel] = {};
+            // Capacity hard check (hosts may always join to manage their channel)
+            const maxParticipants = channelDef?.maxParticipants || limits.DEFAULT_MAX_PARTICIPANTS;
+            if (!is_presenter && !is_rejoin && getPeerCount(channel) >= maxParticipants) {
+                log.debug('[' + socket.id + '] channel is full', {
+                    channel,
+                    count: getPeerCount(channel),
+                    maxParticipants,
+                });
+                return socket.emit('roomIsBusy', { maxParticipants });
+            }
 
-        if (is_presenter) {
-            // keyed by session uuid: the presenter role survives reconnects
-            // (the ghost grace keeps the entry) and can only ever be held by
-            // a session that presented valid host credentials at join time
-            presenters[channel][peer_uuid] = { peer_ip, peer_name, is_presenter: true };
-            log.debug('[' + socket.id + '] joining as host', {
+            // Room-level locks (read before any room structure is created so a
+            // rejected join never leaves an empty room behind). The room password
+            // is stored verbatim by roomAction and compared verbatim here.
+            const roomLocked =
+                peers[channel]?.['lock'] === true && !safeEqualStrings(peers[channel]?.['password'], channel_password);
+            if (roomLocked) {
+                log.debug('[' + socket.id + '] [Warning] room is locked', { channel });
+                recordJoinFailure(peer_ip);
+                return socket.emit('roomIsLocked');
+            }
+
+            const isPresenterNow = is_presenter || presenters[channel]?.[peer_uuid]?.is_presenter === true;
+
+            // Room-level join lock blocks NEW joiners only — a reconnecting
+            // member (same uuid, resumed or reaped above) was already inside.
+            const joinLocked = peers[channel]?.['joinLock'] === true && !is_rejoin && !isPresenterNow;
+            if (joinLocked) {
+                log.debug('[' + socket.id + '] [Warning] room is join-locked', { channel });
+                return socket.emit('roomIsJoinLocked');
+            }
+
+            // Auth passed — only now materialize a pending temporary room, so a
+            // rejected join never leaves one behind (getOrCreateTemp returns null
+            // at the global / per-IP caps)
+            if (!channelDef) {
+                if (channelStore.getTemp(channel)) {
+                    // joining a room someone already spawned: no creation, no quota
+                } else {
+                    const quota = channelStore.checkTempQuota(peer_ip);
+                    if (!quota.ok) {
+                        log.warn('[' + socket.id + '] temp room quota exceeded', { channel, reason: quota.reason });
+                        return socket.emit('tempRoomLimitReached', {
+                            reason: quota.reason,
+                            max: channelStore.settings.tempMaxPerIp,
+                        });
+                    }
+                    channelDef = channelStore.getOrCreateTemp(channel, { creatorIp: peer_ip });
+                    if (!channelDef) {
+                        log.warn('[' + socket.id + '] temp room cap reached', { channel });
+                        return socket.emit('channelNotFound');
+                    }
+                }
+            }
+
+            // Auth passed — safe to create the room structures now
+            if (!Object.hasOwn(channels, channel)) channels[channel] = {};
+            if (!Object.hasOwn(peers, channel)) peers[channel] = {};
+            if (!Object.hasOwn(presenters, channel)) presenters[channel] = {};
+
+            if (is_presenter) {
+                // keyed by session uuid: the presenter role survives reconnects
+                // (the ghost grace keeps the entry) and can only ever be held by
+                // a session that presented valid host credentials at join time
+                presenters[channel][peer_uuid] = { peer_ip, peer_name, is_presenter: true };
+                log.debug('[' + socket.id + '] joining as host', {
+                    channel,
+                    username: peer_name,
+                });
+            }
+
+            const isPresenter = isPresenterNow;
+
+            peers[channel][peer_uuid] = {
+                peer_name: peer_name,
+                peer_presenter: isPresenter,
+                peer_audio: config.peer_audio === true,
+                peer_audio_status: config.peer_audio === true,
+                joined_at: keepJoinedAt,
+                socket_id: socket.id,
+                ghost: false,
+            };
+            claimed = { channel, uuid: peer_uuid };
+
+            await addPeerTo(channel, socket, peer_uuid, { rejoin: resumed });
+
+            // Same-uuid race: a concurrent join may have claimed (or reaped and
+            // replaced) the slot while addPeerTo awaited. If the uuid no longer
+            // points at THIS socket, the other session won — stand down without
+            // touching room state. The mesh self-heals: peer connections are
+            // uuid-keyed, so the winner's addPeer supersedes ours.
+            if (peers[channel]?.[peer_uuid]?.socket_id !== socket.id) {
+                claimed = null;
+                log.warn('[' + socket.id + '] concurrent same-uuid join lost the race, standing down', { channel });
+                return socket.emit('kickOut', { peer_kicked_reason: 'session superseded' });
+            }
+
+            channels[channel][socket.id] = socket;
+            socket.channels[channel] = { uuid: peer_uuid, name: peer_name };
+
+            // info (not debug): membership is the one thing an operator must be
+            // able to reconstruct from default logs, plus the audit trail
+            log.info('[join] peer joined', {
                 channel,
-                username: peer_name,
+                name: peer_name,
+                uuid: peer_uuid,
+                presenter: isPresenter,
+                resumed,
+                peers: getPeerCount(channel),
             });
-        }
+            audit.record('join', {
+                channel,
+                name: peer_name,
+                presenter: isPresenter,
+                resumed,
+                ip: getSocketIP(socket),
+            });
 
-        const isPresenter = isPresenterNow;
+            joinFailures.delete(joinFailKey(peer_ip)); // a successful join resets the failure counter
 
-        peers[channel][peer_uuid] = {
-            peer_name: peer_name,
-            peer_presenter: isPresenter,
-            peer_audio: config.peer_audio === true,
-            peer_audio_status: config.peer_audio === true,
-            joined_at: keepJoinedAt,
-            socket_id: socket.id,
-            ghost: false,
+            // Catch the newcomer up on the persisted chat history BEFORE
+            // serverInfo, so it renders above the "you joined" line. Emitted on
+            // every (re)join — possibly empty — so the client sees exactly one
+            // block per join and can ignore the replays after reconnects. Only
+            // the newest page rides along; the client pulls older ones via
+            // 'chatPage' when it scrolls to the top. chatStore.history() applies
+            // the page-size AND payload budgets and reports hasMore.
+            const chatPage = chatStore.history(channel, { persistent: !channelStore.isTemp(channel) });
+            await sendToPeer(socket.id, sockets, 'chatHistory', chatPage);
+
+            // Send room info to the joined peer
+            await sendToPeer(socket.id, sockets, 'serverInfo', {
+                peers_count: getPeerCount(channel),
+                peers: getRoomPeers(channel),
+                is_presenter: isPresenter,
+                join_locked: peers[channel]['joinLock'] === true,
+                room_locked: peers[channel]['lock'] === true,
+                maxRoomParticipants: maxParticipants,
+            });
         };
 
-        await addPeerTo(channel, socket, peer_uuid, { rejoin: resumed });
-
-        channels[channel][socket.id] = socket;
-        socket.channels[channel] = { uuid: peer_uuid, name: peer_name };
-
-        // info (not debug): membership is the one thing an operator must be
-        // able to reconstruct from default logs, plus the audit trail
-        log.info('[join] peer joined', {
-            channel,
-            name: peer_name,
-            uuid: peer_uuid,
-            presenter: isPresenter,
-            resumed,
-            peers: getPeerCount(channel),
-        });
-        audit.record('join', {
-            channel,
-            name: peer_name,
-            presenter: isPresenter,
-            resumed,
-            ip: getSocketIP(socket),
-        });
-
-        joinFailures.delete(socket.id); // a successful join resets the failure counter
-
-        // Catch the newcomer up on the persisted chat history BEFORE
-        // serverInfo, so it renders above the "you joined" line. Emitted on
-        // every (re)join — possibly empty — so the client sees exactly one
-        // block per join and can ignore the replays after reconnects. Only
-        // the newest page rides along; the client pulls older ones via
-        // 'chatPage' when it scrolls to the top. chatStore.history() applies
-        // the page-size AND payload budgets and reports hasMore.
-        const chatPage = chatStore.history(channel, { persistent: !channelStore.isTemp(channel) });
-        await sendToPeer(socket.id, sockets, 'chatHistory', chatPage);
-
-        // Send room info to the joined peer
-        await sendToPeer(socket.id, sockets, 'serverInfo', {
-            peers_count: getPeerCount(channel),
-            peers: getRoomPeers(channel),
-            is_presenter: isPresenter,
-            join_locked: peers[channel]['joinLock'] === true,
-            room_locked: peers[channel]['lock'] === true,
-            maxRoomParticipants: maxParticipants,
-        });
+        try {
+            await handleJoin();
+        } catch (err) {
+            // a failed join must never leave half-built room state behind (the
+            // global unhandledRejection net only logs) — tell the client and
+            // roll back whatever this join had claimed
+            log.error('Join handler failed', { socket_id: socket.id, error: err.message, stack: err.stack });
+            if (
+                claimed &&
+                Object.hasOwn(peers, claimed.channel) &&
+                peers[claimed.channel][claimed.uuid]?.socket_id === socket.id
+            ) {
+                delete socket.channels[claimed.channel];
+                delete channels[claimed.channel]?.[socket.id];
+                releaseRoomEntry(claimed.channel, claimed.uuid);
+                broadcastRemovePeer(claimed.channel, claimed.uuid, socket.id);
+                log.warn('Join rolled back after handler error', { channel: claimed.channel, uuid: claimed.uuid });
+            }
+            socket.emit('joinError', { error: 'join failed' });
+        }
     });
 
     /**
@@ -1331,7 +1431,7 @@ io.sockets.on('connect', async (socket) => {
         const channel = sharedRoom(socket, peer_id);
         const target = channel && liveSessionSocket(channel, peer_id);
         if (!target) return;
-        await target.emit('iceCandidate', {
+        target.emit('iceCandidate', {
             peer_id: socket.channels[channel].uuid,
             ice_candidate: ice_candidate,
         });
@@ -1349,7 +1449,7 @@ io.sockets.on('connect', async (socket) => {
         log.debug('[' + socket.id + '] relay SessionDescription to [' + peer_id + ']', {
             type: session_description.type,
         });
-        await target.emit('sessionDescription', {
+        target.emit('sessionDescription', {
             peer_id: socket.channels[channel].uuid,
             session_description: session_description,
         });
@@ -1361,7 +1461,9 @@ io.sockets.on('connect', async (socket) => {
      * it and it let any socket probe the room password unauthenticated.)
      */
     socket.on('roomAction', async (cfg) => {
-        const config = checkXSS(cfg);
+        // the room lock password is stored/compared verbatim (memory-only, so
+        // no legacy form exists) — sanitize everything EXCEPT the secret
+        const config = sanitizeExceptSecrets(cfg, ['password']);
         if (!Validate.isValidData(config)) return;
 
         const { room_id, password, action } = config;
@@ -1410,13 +1512,17 @@ io.sockets.on('connect', async (socket) => {
      * Relay NAME to peers
      */
     socket.on('peerName', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
+        const { room_id, peer_name_old } = config;
+        // same 24-char cap as the join path (see handleJoin)
+        const peer_name_new =
+            typeof config.peer_name_new === 'string'
+                ? config.peer_name_new.slice(0, limits.PEER_NAME_MAX)
+                : config.peer_name_new;
 
-        const { room_id, peer_name_old, peer_name_new } = config;
-
-        const senderUuid = roomSessionUuid(socket, room_id);
-        const entry = senderUuid && Object.hasOwn(peers, room_id) ? peers[room_id][senderUuid] : null;
+        const entry = Object.hasOwn(peers, room_id) ? peers[room_id][senderUuid] : null;
         if (!entry) return;
 
         entry['peer_name'] = peer_name_new;
@@ -1436,22 +1542,18 @@ io.sockets.on('connect', async (socket) => {
      * same peerName broadcast as everyone else and accepts the new name.
      */
     socket.on('peerRename', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
+        const { room_id, peer_id } = config;
 
-        const { room_id, peer_id, peer_name_new } = config;
-
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) {
-            log.debug('peerRename blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
-            return;
-        }
         if (presenters[room_id]?.[senderUuid]?.is_presenter !== true) {
             log.debug('peerRename blocked: sender is not the presenter', { room_id, socket_id: socket.id });
             return;
         }
 
-        const name = typeof peer_name_new === 'string' ? peer_name_new.trim().slice(0, 24) : '';
+        const name =
+            typeof config.peer_name_new === 'string' ? config.peer_name_new.trim().slice(0, limits.PEER_NAME_MAX) : '';
         // the rename target must be a joined member of the room
         if (!name || !isPeerInRoom(room_id, peer_id)) return;
 
@@ -1465,7 +1567,7 @@ io.sockets.on('connect', async (socket) => {
         // everyone INCLUDING the host gets the update — the host's member list
         // and the chat notice must follow too (sendToRoom would skip the sender)
         for (const sock of Object.values(channels[room_id] || {})) {
-            await sock.emit('peerName', { peer_id, peer_name: name, peer_name_old: old });
+            sock.emit('peerName', { peer_id, peer_name: name, peer_name_old: old });
         }
     });
 
@@ -1476,17 +1578,16 @@ io.sockets.on('connect', async (socket) => {
      * image protocol, and is only ever rendered as an <img src>.
      */
     socket.on('peerAvatar', async (cfg) => {
-        if (!Validate.isValidData(cfg)) return;
-
-        const { room_id, avatar } = cfg;
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) return;
+        const ctx = roomSender(socket, cfg, { sanitize: false }); // data URLs never ride checkXSS
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
+        const { room_id, avatar } = config;
 
         const valid =
             typeof avatar === 'string' &&
             avatar.length > 0 &&
-            avatar.length <= 96 * 1024 &&
-            /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(avatar);
+            avatar.length <= limits.AVATAR_MAX_CHARS &&
+            limits.IMAGE_DATA_URL_RE.test(avatar);
         if (valid) {
             peers[room_id][senderUuid]['peer_avatar'] = avatar;
         } else {
@@ -1499,7 +1600,7 @@ io.sockets.on('connect', async (socket) => {
         // everyone INCLUDING the sender — the sender's own DOM is already
         // up to date, the echo just keeps the room in lockstep
         for (const sock of Object.values(channels[room_id] || {})) {
-            await sock.emit('peerAvatar', {
+            sock.emit('peerAvatar', {
                 peer_id: senderUuid,
                 peer_name,
                 avatar: valid ? avatar : null,
@@ -1514,16 +1615,10 @@ io.sockets.on('connect', async (socket) => {
      * their outgoing stream ("listen together").
      */
     socket.on('peerStatus', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
-
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
         const { room_id, element, status } = config;
-
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) {
-            log.debug('peerStatus blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
-            return;
-        }
 
         if (element === 'audio') peers[room_id][senderUuid]['peer_audio_status'] = status === true;
         else if (element === 'deafen') peers[room_id][senderUuid]['peer_deafen'] = status === true;
@@ -1549,10 +1644,10 @@ io.sockets.on('connect', async (socket) => {
      * and member-gated; contents are never logged.
      */
     socket.on('chat', async (cfg) => {
-        if (!Validate.isValidData(cfg)) return;
-        const { room_id } = cfg;
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) return;
+        const ctx = roomSender(socket, cfg, { sanitize: false }); // image payloads ride raw
+        if (!ctx) return;
+        const senderUuid = ctx.senderUuid;
+        const { room_id } = ctx.config;
 
         if (isChatFlooded(socket.id)) {
             log.debug('[' + socket.id + '] chat dropped: flood guard', { room_id });
@@ -1580,7 +1675,7 @@ io.sockets.on('connect', async (socket) => {
         // (checkXSS on the text ONLY — DOMPurify strips data: URIs, so image
         // payloads must never ride through it; same split as peerAvatar)
         const sanitized = checkXSS(typeof cfg.msg === 'string' ? cfg.msg : '');
-        const text = typeof sanitized === 'string' ? sanitized.slice(0, 500) : '';
+        const text = typeof sanitized === 'string' ? sanitized.slice(0, limits.CHAT_TEXT_MAX) : '';
         const imageCount = Number.isInteger(cfg.imgs) && cfg.imgs > 0 && cfg.imgs <= 9 ? cfg.imgs : 0;
         if (!text && !imageCount) return;
 
@@ -1625,13 +1720,12 @@ io.sockets.on('connect', async (socket) => {
      * must not be able to spin the disk.
      */
     socket.on('chatPage', (cfg, ack) => {
-        if (!Validate.isValidData(cfg)) return;
-        const { room_id } = cfg;
-        if (!roomSessionUuid(socket, room_id)) return;
+        const ctx = roomSender(socket, cfg, { sanitize: false }); // read-only: only before/count fields
+        if (!ctx) return;
         if (isChatPageFlooded(socket.id)) return;
-        const before = Number.isFinite(cfg.before) && cfg.before > 0 ? cfg.before : 0;
-        const page = chatStore.history(room_id, {
-            persistent: !channelStore.isTemp(room_id),
+        const before = Number.isFinite(ctx.config.before) && ctx.config.before > 0 ? ctx.config.before : 0;
+        const page = chatStore.history(ctx.config.room_id, {
+            persistent: !channelStore.isTemp(ctx.config.room_id),
             before,
         });
         if (typeof ack === 'function') ack(page);
@@ -1647,16 +1741,15 @@ io.sockets.on('connect', async (socket) => {
      * presenter may recall anything (moderation).
      */
     socket.on('chatEdit', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
         const { room_id } = config;
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) return;
         if (isChatFlooded(socket.id)) return;
 
         const peer_name = peers[room_id]?.[senderUuid]?.peer_name;
         const ts = Number(config.ts);
-        const text = typeof config.msg === 'string' ? config.msg.slice(0, 500) : '';
+        const text = typeof config.msg === 'string' ? config.msg.slice(0, limits.CHAT_TEXT_MAX) : '';
         if (!peer_name || !Number.isFinite(ts) || ts <= 0 || !text.trim()) return;
 
         const persistent = !channelStore.isTemp(room_id);
@@ -1666,16 +1759,15 @@ io.sockets.on('connect', async (socket) => {
     });
 
     socket.on('chatDelete', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
         const { room_id } = config;
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) return;
         if (isChatFlooded(socket.id)) return;
 
         const peer_name = peers[room_id]?.[senderUuid]?.peer_name;
         const ts = Number(config.ts);
-        const targetName = typeof config.name === 'string' ? config.name.slice(0, 24) : '';
+        const targetName = typeof config.name === 'string' ? config.name.slice(0, limits.PEER_NAME_MAX) : '';
         if (!peer_name || !Number.isFinite(ts) || ts <= 0 || !targetName) return;
         // presenters may recall anyone's message; members only their own
         const isPresenter = presenters[room_id]?.[senderUuid]?.is_presenter === true;
@@ -1691,20 +1783,19 @@ io.sockets.on('connect', async (socket) => {
     });
 
     socket.on('chatReact', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
         const { room_id } = config;
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) return;
         if (isChatFlooded(socket.id)) return;
 
         const peer_name = peers[room_id]?.[senderUuid]?.peer_name;
         const ts = Number(config.ts);
-        const targetName = typeof config.name === 'string' ? config.name.slice(0, 24) : '';
+        const targetName = typeof config.name === 'string' ? config.name.slice(0, limits.PEER_NAME_MAX) : '';
         // checkXSS never sees the emoji (DOMPurify would mangle non-ASCII
         // markup-free strings harmlessly, but keep the payload raw + capped
         // like the image/emoji paths): shape-check it directly instead
-        const emoji = typeof cfg.emoji === 'string' ? cfg.emoji.slice(0, 16) : '';
+        const emoji = typeof cfg.emoji === 'string' ? cfg.emoji.slice(0, limits.REACTION_EMOJI_MAX) : '';
         if (!peer_name || !Number.isFinite(ts) || ts <= 0 || !targetName || !emoji) return;
 
         const persistent = !channelStore.isTemp(room_id);
@@ -1728,16 +1819,10 @@ io.sockets.on('connect', async (socket) => {
      * peer_id (when targeted) is the target's session uuid.
      */
     socket.on('peerAction', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
-
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
         const { room_id, peer_id, peer_action, send_to_all } = config;
-
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid) {
-            log.debug('peerAction blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
-            return;
-        }
 
         // Only the presenter may run moderation actions
         const presenterActions = ['muteAudio', 'ejectAll'];
@@ -1756,7 +1841,7 @@ io.sockets.on('connect', async (socket) => {
             const channel = sharedRoom(socket, peer_id);
             const target = channel && liveSessionSocket(channel, peer_id);
             if (!target) return;
-            await target.emit('peerAction', data);
+            target.emit('peerAction', data);
         }
     });
 
@@ -1766,13 +1851,12 @@ io.sockets.on('connect', async (socket) => {
      * anything the client supplies.
      */
     socket.on('kickOut', async (cfg) => {
-        const config = checkXSS(cfg);
-        if (!Validate.isValidData(config)) return;
-
+        const ctx = roomSender(socket, cfg);
+        if (!ctx) return;
+        const { config, senderUuid } = ctx;
         const { room_id, peer_id, peer_kicked_reason } = config;
 
-        const senderUuid = roomSessionUuid(socket, room_id);
-        if (!senderUuid || !isPeerInRoom(room_id, peer_id)) return;
+        if (!isPeerInRoom(room_id, peer_id)) return;
 
         if (presenters[room_id]?.[senderUuid]?.is_presenter !== true) return;
 
@@ -1788,7 +1872,7 @@ io.sockets.on('connect', async (socket) => {
             target: peers[room_id][peer_id]?.peer_name,
             reason: peer_kicked_reason,
         });
-        await target.emit('kickOut', {
+        target.emit('kickOut', {
             peer_name: peers[room_id][senderUuid].peer_name,
             peer_kicked_reason: peer_kicked_reason,
         });
@@ -1810,7 +1894,7 @@ io.sockets.on('connect', async (socket) => {
             if (id === joiner.id) continue; // joiner is told about everyone below
             const memberUuid = sock.channels?.[channel]?.uuid;
             if (!memberUuid || memberUuid === joinerUuid) continue;
-            await sock.emit('addPeer', {
+            sock.emit('addPeer', {
                 peer_id: joinerUuid,
                 peers: roomPeers,
                 should_create_offer: false,
@@ -1836,7 +1920,7 @@ io.sockets.on('connect', async (socket) => {
         const room = room_id && Object.hasOwn(channels, room_id) ? channels[room_id] : {};
         for (const [peer_id, sock] of Object.entries(room)) {
             if (peer_id != socket_id) {
-                await sock.emit(msg, config);
+                sock.emit(msg, config);
             }
         }
     }
@@ -1848,7 +1932,7 @@ io.sockets.on('connect', async (socket) => {
      */
     async function broadcastToRoom(room_id, msg, config = {}) {
         for (const sock of Object.values(channels[room_id] || {})) {
-            await sock.emit(msg, config);
+            sock.emit(msg, config);
         }
     }
 
@@ -1857,7 +1941,7 @@ io.sockets.on('connect', async (socket) => {
      */
     async function sendToPeer(peer_id, sockets, msg, config = {}) {
         if (peer_id && Object.hasOwn(sockets, peer_id)) {
-            await sockets[peer_id].emit(msg, config);
+            sockets[peer_id].emit(msg, config);
         }
     }
 }); // end [io.sockets.on-connect]
@@ -1871,40 +1955,77 @@ io.sockets.on('connect', async (socket) => {
 // ---------------------------------------------------------------------------
 
 // Consecutive failed join authentications (invalid id, bad/missing host token,
-// wrong channel or room password) per socket.id. At JOIN_FAIL_LIMIT further
-// joins from that socket are ignored for JOIN_FAIL_COOLDOWN_MS — the join path
+// wrong channel or room password) per client IP. Keyed by IP, NOT socket.id:
+// a reconnecting client mints a fresh socket (and a fresh counter), which made
+// the old per-socket limit trivially bypassable. At JOIN_FAIL_LIMIT further
+// joins from that IP are ignored for JOIN_FAIL_COOLDOWN_MS — the join path
 // must not become a password brute-force oracle. The counter resets on a
-// successful join and on disconnect.
-const JOIN_FAIL_LIMIT = 5;
+// successful join; the limit sits above the old per-socket 5 so a NAT
+// household collectively mistyping one password does not lock itself out.
+const JOIN_FAIL_LIMIT = 10;
 const JOIN_FAIL_COOLDOWN_MS = 60 * 1000;
-const joinFailures = new Map(); // socket.id -> { count, ts } (ts = last failure)
+const JOIN_FAIL_SWEEP_AT = 1024;
+const joinFailures = new Map(); // normalized ip -> { count, ts } (ts = last failure)
 
-function isJoinThrottled(socketId) {
-    const entry = joinFailures.get(socketId);
+function joinFailKey(ip) {
+    // normalize so IPv6 rotation inside one /64 cannot mint fresh counters
+    return ChannelStore.normalizeIp(ip) || String(ip || '');
+}
+
+function isJoinThrottled(ip) {
+    const entry = joinFailures.get(joinFailKey(ip));
     if (!entry || entry.count < JOIN_FAIL_LIMIT) return false;
-    // the window is measured from the last failure; once it elapses the socket
+    // the window is measured from the last failure; once it elapses the source
     // gets a fresh attempt (a new failure re-arms the cooldown)
     return Date.now() - entry.ts < JOIN_FAIL_COOLDOWN_MS;
 }
 
-function recordJoinFailure(socketId) {
-    const entry = joinFailures.get(socketId) || { count: 0, ts: 0 };
+function recordJoinFailure(ip) {
+    const key = joinFailKey(ip);
+    const entry = joinFailures.get(key) || { count: 0, ts: 0 };
     entry.count++;
     entry.ts = Date.now();
-    joinFailures.set(socketId, entry);
+    joinFailures.set(key, entry);
+    // IPs that never come back must not accumulate forever
+    if (joinFailures.size > JOIN_FAIL_SWEEP_AT) {
+        const now = Date.now();
+        for (const [stale, e] of joinFailures) {
+            if (e.count < JOIN_FAIL_LIMIT || now - e.ts >= JOIN_FAIL_COOLDOWN_MS) joinFailures.delete(stale);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Chat history flood guard
 // ---------------------------------------------------------------------------
 
+/**
+ * Sliding-window rate guard: timestamps per key inside the window, true once
+ * the key is over its budget. Shared by the chat persistence and the history
+ * pagination paths — both touch disk per call, so a scripted client must not
+ * be able to spin either.
+ */
+function makeRateGuard({ max, windowMs }) {
+    const stamps = new Map(); // key -> timestamps inside the window
+    const guard = (key, now = Date.now()) => {
+        const list = (stamps.get(key) || []).filter((ts) => now - ts < windowMs);
+        if (list.length >= max) {
+            stamps.set(key, list);
+            return true;
+        }
+        list.push(now);
+        stamps.set(key, list);
+        return false;
+    };
+    guard.forget = (key) => stamps.delete(key); // socket gone: drop its window
+    return guard;
+}
+
 // Per-socket persistence rate: human typing never approaches this; a scripted
 // flood would grow (and constantly rewrite) the history files. The live P2P
 // delivery is unaffected — only the history copy is dropped. The budget must
 // cover image batches too (1 head + up to 9 image events).
-const CHAT_FLOOD_MAX = 24;
-const CHAT_FLOOD_WINDOW_MS = 10 * 1000;
-const chatSends = new Map(); // socket.id -> timestamps inside the window
+const isChatFlooded = makeRateGuard({ max: 24, windowMs: 10 * 1000 });
 
 // Pending image batches: head event received, image events still arriving.
 // Keyed per socket so ids can never collide across senders; entries flush
@@ -1913,14 +2034,23 @@ const CHAT_BATCH_TTL_MS = 30 * 1000;
 const CHAT_BATCHES_PER_SOCKET = 3;
 const chatBatches = new Map(); // socket.id -> Map(batchId -> pending)
 
-// The persisted-image whitelist — validated directly, never routed through
-// checkXSS (DOMPurify strips data: URIs). Same rules as the peerAvatar
-// handler; the size cap mirrors the client transfer cap (images.js).
-const CHAT_IMAGE_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
-const CHAT_IMAGE_MAX_CHARS = 1600 * 1024;
+// The batch TTL must also fire without new traffic: a sender whose image
+// events never completed would otherwise hold its pending batches (up to
+// 3 × ~1.6MB) in memory until it disconnects. The sweep-on-new-batch alone
+// is not enough for a socket that simply goes idle.
+setInterval(() => {
+    try {
+        chatBatchSweep();
+    } catch (err) {
+        log.error('Chat batch sweep failed', { error: err.message });
+    }
+}, 60 * 1000).unref?.();
 
 function sanitizeChatImage(url) {
-    return typeof url === 'string' && url.length > 0 && url.length <= CHAT_IMAGE_MAX_CHARS && CHAT_IMAGE_RE.test(url)
+    return typeof url === 'string' &&
+        url.length > 0 &&
+        url.length <= limits.IMAGE_MAX_CHARS &&
+        limits.IMAGE_DATA_URL_RE.test(url)
         ? url
         : '';
 }
@@ -1928,41 +2058,17 @@ function sanitizeChatImage(url) {
 /** Optional reply-quote payload on a chat event: strict shape, tiny caps. */
 function sanitizeChatReply(reply) {
     if (!reply || typeof reply !== 'object') return null;
-    const name = typeof reply.name === 'string' ? reply.name.slice(0, 24) : '';
-    const text = typeof reply.text === 'string' ? reply.text.slice(0, 80) : '';
+    const name = typeof reply.name === 'string' ? reply.name.slice(0, limits.PEER_NAME_MAX) : '';
+    const text = typeof reply.text === 'string' ? reply.text.slice(0, limits.REPLY_TEXT_MAX) : '';
     const ts = Number(reply.ts);
     if (!name || !text || !Number.isFinite(ts) || ts <= 0) return null;
     return { name, text, ts };
 }
 
-function isChatFlooded(socketId, now = Date.now()) {
-    const stamps = (chatSends.get(socketId) || []).filter((ts) => now - ts < CHAT_FLOOD_WINDOW_MS);
-    if (stamps.length >= CHAT_FLOOD_MAX) {
-        chatSends.set(socketId, stamps);
-        return true;
-    }
-    stamps.push(now);
-    chatSends.set(socketId, stamps);
-    return false;
-}
-
 // chatPage is read-only but not free (prune + per-row payload estimate per
 // call), so a member cannot spin it either. Looser than the write budget —
 // a fast scroll through history legitimately fires bursts of pages.
-const CHAT_PAGE_FLOOD_MAX = 30;
-const CHAT_PAGE_FLOOD_WINDOW_MS = 10 * 1000;
-const chatPageSends = new Map(); // socket.id -> timestamps inside the window
-
-function isChatPageFlooded(socketId, now = Date.now()) {
-    const stamps = (chatPageSends.get(socketId) || []).filter((ts) => now - ts < CHAT_PAGE_FLOOD_WINDOW_MS);
-    if (stamps.length >= CHAT_PAGE_FLOOD_MAX) {
-        chatPageSends.set(socketId, stamps);
-        return true;
-    }
-    stamps.push(now);
-    chatPageSends.set(socketId, stamps);
-    return false;
-}
+const isChatPageFlooded = makeRateGuard({ max: 30, windowMs: 10 * 1000 });
 
 /** Store a completed (or TTL-expired) batch as one history row. */
 function finalizeChatBatch(socketId, pending) {
@@ -2011,6 +2117,20 @@ function isPeerInRoom(room_id, peer_uuid) {
 function roomSessionUuid(socket, roomId) {
     const uuid = socket.channels?.[roomId]?.uuid;
     return uuid && isPeerInRoom(roomId, uuid) ? uuid : null;
+}
+
+/**
+ * Shared preamble of the room-scoped socket handlers: sanitize the payload
+ * (callers carrying fields that must stay raw — images, emoji — opt out and
+ * sanitize their text fields individually), drop malformed packets, and
+ * resolve the sender's joined-session uuid for the room the packet names.
+ * Returns null when the packet must be dropped silently.
+ */
+function roomSender(socket, raw, { sanitize = true } = {}) {
+    const config = sanitize ? checkXSS(raw) : raw;
+    if (!Validate.isValidData(config)) return null;
+    const senderUuid = roomSessionUuid(socket, config.room_id);
+    return senderUuid ? { config, senderUuid } : null;
 }
 
 /**
@@ -2107,6 +2227,25 @@ function broadcastRemovePeer(channel, uuid, socketId) {
 }
 
 /**
+ * Teardown for a session entry about to be replaced by a rejoining same-uuid
+ * socket: a LIVE old socket leaves through the normal removePeer path; a
+ * ghost (or already-dead socket) is expired on the spot. Used by the join
+ * handler's reconciliation of a pre-existing entry and of a slot claimed by
+ * a concurrent same-uuid join.
+ */
+async function reapSession(channel, uuid, entry) {
+    const oldSocket = sockets[entry.socket_id];
+    if (oldSocket && oldSocket.connected) {
+        await removePeerFrom(channel, oldSocket, 'reconnected');
+        return;
+    }
+    clearTimeout(ghosts.get(ghostKey(channel, uuid)));
+    ghosts.delete(ghostKey(channel, uuid));
+    releaseRoomEntry(channel, uuid);
+    broadcastRemovePeer(channel, uuid, entry.socket_id);
+}
+
+/**
  * Remove a socket's session from a channel: release the room entry and
  * broadcast removePeer to the room.
  * @param {string} channel channel id
@@ -2142,19 +2281,6 @@ function toJson(data) {
 }
 
 /**
- * Constant-time string comparison for secrets (room passwords, API keys).
- */
-function safeEqualStrings(a, b) {
-    const bufA = Buffer.from(String(a ?? ''));
-    const bufB = Buffer.from(String(b ?? ''));
-    if (bufA.length !== bufB.length) {
-        crypto.timingSafeEqual(bufA, bufA); // dummy compare keeps the timing profile flat
-        return false;
-    }
-    return crypto.timingSafeEqual(bufA, bufB);
-}
-
-/**
  * Get ip (honours trust proxy settings)
  */
 function getIP(req) {
@@ -2163,7 +2289,9 @@ function getIP(req) {
 
 function getSocketIP(socket) {
     if (trustProxy) {
-        const forwarded = socket.handshake.headers['x-forwarded-for'] || socket.handshake.headers['X-Forwarded-For'];
+        // Node lowercases incoming header names — the camel-case lookup was
+        // dead code
+        const forwarded = socket.handshake.headers['x-forwarded-for'];
         if (forwarded) return forwarded.split(',')[0].trim();
     }
     return socket.handshake.address;

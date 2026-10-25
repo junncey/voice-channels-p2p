@@ -4,12 +4,6 @@ const path = require('path');
 
 const checkXSS = require('./xss.js');
 
-const MAX_PASSWORD_LENGTH = 36;
-
-function isValidPassword(input) {
-    return typeof input === 'string' && input.length > 0 && input.length <= MAX_PASSWORD_LENGTH;
-}
-
 function isValidRoomName(input) {
     if (!input || typeof input !== 'string') {
         return false;
@@ -27,7 +21,9 @@ function hasPathTraversal(input) {
     try {
         decodedInput = decodeURIComponent(input);
         decodedInput = decodeURIComponent(decodedInput);
-    } catch (err) {}
+    } catch (err) {
+        /* malformed percent-encoding — analyze the raw input instead */
+    }
 
     const pathTraversalPattern = /(\.\.(\/|\\))+/;
     const excessiveDotsPattern = /(\.{4,}\/+|\.{4,}\\+)/;
@@ -64,7 +60,6 @@ function isValidSessionUuid(input) {
 }
 
 module.exports = {
-    isValidPassword,
     isValidRoomName,
     hasPathTraversal,
     isValidData,

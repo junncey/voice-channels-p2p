@@ -18,13 +18,17 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22.x'  # LTS
+          node-version: '24.x' # LTS — matches the Dockerfile runtime
+          cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Create config from template
         run: cp app/src/config.template.js app/src/config.js
+
+      - name: Lint (eslint + prettier --check)
+        run: npm run lint
 
       - name: Run unit tests
         run: npm test

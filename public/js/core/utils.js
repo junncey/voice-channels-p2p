@@ -14,7 +14,8 @@ export function el(tag, props = {}, ...children) {
         if (value === undefined || value === null) continue;
         if (key === 'class') node.className = value;
         else if (key === 'text') node.textContent = value;
-        else if (key === 'html') node.innerHTML = value; // only for trusted static markup
+        else if (key === 'html')
+            node.innerHTML = value; // only for trusted static markup
         else if (key === 'dataset') Object.assign(node.dataset, value);
         else if (key === 'style' && typeof value === 'object') Object.assign(node.style, value);
         else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value);
@@ -75,10 +76,14 @@ export async function copyText(text) {
     }
 }
 
-export function debounce(fn, ms = 300) {
-    let timer;
-    return (...args) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn(...args), ms);
-    };
+/**
+ * Transient toast notification, stacked into the page's #toasts container
+ * (shared markup across index/channel/admin) and auto-removed after a beat.
+ */
+export function toast(message, kind = '') {
+    const box = $('#toasts');
+    if (!box) return;
+    const node = el('div', { class: `toast ${kind}`, text: message });
+    box.append(node);
+    setTimeout(() => node.remove(), 3200);
 }

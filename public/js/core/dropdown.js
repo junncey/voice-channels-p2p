@@ -67,7 +67,10 @@ export function createDropdown({ getItems, getValue, onSelect }) {
                 })
             )
         );
-        activeIndex = Math.max(0, items().findIndex((item) => item.value === current));
+        activeIndex = Math.max(
+            0,
+            items().findIndex((item) => item.value === current)
+        );
         updateActive();
     }
 
@@ -133,7 +136,8 @@ export function createDropdown({ getItems, getValue, onSelect }) {
         const count = items().length;
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault();
-            activeIndex = event.key === 'ArrowDown' ? Math.min(count - 1, activeIndex + 1) : Math.max(0, activeIndex - 1);
+            activeIndex =
+                event.key === 'ArrowDown' ? Math.min(count - 1, activeIndex + 1) : Math.max(0, activeIndex - 1);
             updateActive();
         } else if (event.key === 'Enter') {
             event.preventDefault();

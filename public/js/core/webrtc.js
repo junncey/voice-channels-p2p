@@ -328,14 +328,26 @@ export class Mesh {
         this.entries.delete(peerId);
     }
 
-    /** Broadcast a JSON payload over every chat DataChannel (queued until open). */
+    /**
+     * Broadcast a JSON payload over every chat DataChannel (queued until open).
+     * @throws {Error} 'dc-send-failed' when an open channel refused the frame
+     *         (send buffer full / channel closing) — callers abort multi-frame
+     *         transfers instead of silently losing the remaining frames.
+     */
     sendChat(payload) {
         const raw = JSON.stringify(payload);
+        let failed = false;
         for (const entry of this.entries.values()) {
             if (!entry.dc) continue;
-            if (entry.dc.readyState === 'open') entry.dc.send(raw);
-            else if (entry.dc.readyState === 'connecting') entry.queue.push(raw);
+            if (entry.dc.readyState === 'open') {
+                try {
+                    entry.dc.send(raw);
+                } catch {
+                    failed = true;
+                }
+            } else if (entry.dc.readyState === 'connecting') entry.queue.push(raw);
         }
+        if (failed) throw new Error('dc-send-failed');
     }
 
     /** Close all peer connections but keep the instance usable (reconnect scenario). */

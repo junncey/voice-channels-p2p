@@ -22,8 +22,7 @@ body {
     color: var(--text-1);
     background:
         radial-gradient(1100px 420px at 18% -10%, rgba(61, 220, 151, 0.07), transparent 60%),
-        radial-gradient(900px 380px at 95% 0%, rgba(108, 178, 255, 0.05), transparent 55%),
-        var(--bg-0);
+        radial-gradient(900px 380px at 95% 0%, rgba(108, 178, 255, 0.05), transparent 55%), var(--bg-0);
     -webkit-font-smoothing: antialiased;
 }
 
@@ -417,8 +416,7 @@ select {
 html[data-theme='light'] body {
     background:
         radial-gradient(1100px 420px at 18% -10%, rgba(0, 153, 255, 0.06), transparent 60%),
-        radial-gradient(900px 380px at 95% 0%, rgba(0, 153, 255, 0.04), transparent 55%),
-        var(--bg-0);
+        radial-gradient(900px 380px at 95% 0%, rgba(0, 153, 255, 0.04), transparent 55%), var(--bg-0);
 }
 
 /* primary keeps white text on its solid blue; danger reads red-on-tint at

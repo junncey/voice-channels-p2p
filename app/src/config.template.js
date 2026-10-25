@@ -90,8 +90,8 @@ module.exports = {
     // Login throttling (admin + host login share one limiter)
     // ==========================================
     host: {
-        maxLoginAttempts: process.env.HOST_MAX_LOGIN_ATTEMPTS || 5,
-        minLoginBlockTime: process.env.HOST_MIN_LOGIN_BLOCK_TIME || 15, // in minutes
+        maxLoginAttempts: Number(process.env.HOST_MAX_LOGIN_ATTEMPTS) || 5,
+        minLoginBlockTime: Number(process.env.HOST_MIN_LOGIN_BLOCK_TIME) || 15, // in minutes
     },
 
     // ==========================================

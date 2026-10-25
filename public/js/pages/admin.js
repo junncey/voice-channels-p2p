@@ -5,7 +5,7 @@
 import { api, getAdminToken, setAdminToken } from '/js/core/api.js';
 import { initI18n, t } from '/js/core/i18n.js';
 import { initVersionCheck } from '/js/core/version.js';
-import { $, el, formatDate } from '/js/core/utils.js';
+import { $, el, formatDate, toast } from '/js/core/utils.js';
 
 const POLL_MS = 10000;
 
@@ -583,12 +583,4 @@ async function onDeleteConfirm() {
     } catch (err) {
         toast(err.message || t('common.error'), 'error');
     }
-}
-
-// ---------------------------------------------------------------------------
-
-function toast(message, kind = '') {
-    const node = el('div', { class: `toast ${kind}`, text: message });
-    $('#toasts').append(node);
-    setTimeout(() => node.remove(), 3200);
 }

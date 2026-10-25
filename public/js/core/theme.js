@@ -54,13 +54,3 @@ export function setThemePref(pref) {
     if (next === 'auto') watchSystem();
     return applyPref(next);
 }
-
-/** Legacy helpers (index page cycles through the three states). */
-export function setTheme(theme) {
-    return setThemePref(theme);
-}
-
-export function toggleTheme() {
-    const order = ['dark', 'light', 'auto'];
-    return setThemePref(order[(order.indexOf(getThemePref()) + 1) % order.length]);
-}

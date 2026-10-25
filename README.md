@@ -6,13 +6,13 @@
 
 ## 来源与版本
 
-| 项目 | 说明 |
-| --- | --- |
-| 本仓库 | [junncey/voice-channels-p2p](https://github.com/junncey/voice-channels-p2p) |
-| 上游仓库 | [miroslavpejic85/mirotalk](https://github.com/miroslavpejic85/mirotalk) — MiroTalk P2P，作者 Miroslav Pejic |
+| 项目     | 说明                                                                                                                                                           |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 本仓库   | [junncey/voice-channels-p2p](https://github.com/junncey/voice-channels-p2p)                                                                                    |
+| 上游仓库 | [miroslavpejic85/mirotalk](https://github.com/miroslavpejic85/mirotalk) — MiroTalk P2P，作者 Miroslav Pejic                                                    |
 | 分叉基线 | 上游 `master` @ [`0a496f8`](https://github.com/miroslavpejic85/mirotalk/commit/0a496f8313cc313f4d5443b14470adb64de811b5)（2026-09-28，`package.json` v2.0.30） |
-| 版本号 | 本仓库自 **v1.0.0** 起独立编号，与上游版本号无对应关系 |
-| 许可 | AGPL-3.0；原始版权归 Miroslav Pejic，衍生部分声明见 [NOTICE](NOTICE) |
+| 版本号   | 本仓库自 **v1.0.0** 起独立编号，与上游版本号无对应关系                                                                                                         |
+| 许可     | AGPL-3.0；原始版权归 Miroslav Pejic，衍生部分声明见 [NOTICE](NOTICE)                                                                                           |
 
 > 本仓库是 MiroTalk P2P 源码基础上的**衍生作品**（derivative work），并非上游官方分支。上游的 `mirotalk/p2p` 镜像与本项目无关，本项目镜像为 `b1at-public/voice-channels`（公开命名空间，匿名可拉取）。
 
@@ -61,15 +61,15 @@ npm start                  # http://localhost:3000
 
 ## 环境变量（频道相关）
 
-| 变量 | 说明 | 默认 |
-| --- | --- | --- |
-| `CHANNEL_ADMIN_PASSWORD` | 管理后台登录密码（**留空则 /admin 与 /api/admin/* 全部 404**） | 空 |
-| `CHANNEL_ADMIN_JWT_SECRET` | 管理/主持人 JWT 签名密钥（留空则后台禁用） | 空 |
-| `CHANNEL_ADMIN_JWT_EXP` | 令牌有效期 | `24h` |
-| `DEFAULT_CHANNEL_MODERATOR` | 未配置主持人的频道的共享主持人密码（留空禁用） | 空 |
-| `TURN_SERVER_SECRET` | coturn use-auth-secret 共享密钥（REST/HMAC 临时凭证，公网推荐） | 空 |
-| `TURN_CREDENTIAL_TTL_SEC` | 临时 TURN 凭证有效期（秒） | `43200` |
-| `AUTO_INIT_CHANNELS` | 首次启动自动创建空 channels.json | `true` |
+| 变量                        | 说明                                                            | 默认    |
+| --------------------------- | --------------------------------------------------------------- | ------- |
+| `CHANNEL_ADMIN_PASSWORD`    | 管理后台登录密码（_*留空则 /admin 与 /api/admin/* 全部 404_*）  | 空      |
+| `CHANNEL_ADMIN_JWT_SECRET`  | 管理/主持人 JWT 签名密钥（留空则后台禁用）                      | 空      |
+| `CHANNEL_ADMIN_JWT_EXP`     | 令牌有效期                                                      | `24h`   |
+| `DEFAULT_CHANNEL_MODERATOR` | 未配置主持人的频道的共享主持人密码（留空禁用）                  | 空      |
+| `TURN_SERVER_SECRET`        | coturn use-auth-secret 共享密钥（REST/HMAC 临时凭证，公网推荐） | 空      |
+| `TURN_CREDENTIAL_TTL_SEC`   | 临时 TURN 凭证有效期（秒）                                      | `43200` |
+| `AUTO_INIT_CHANNELS`        | 首次启动自动创建空 channels.json                                | `true`  |
 
 其余通用配置（端口、STUN/TURN、CORS、IP 白名单等）见 `.env.template`。
 
@@ -100,14 +100,14 @@ docker run -d -p 3000:3000 \
 
 ### 标签策略
 
-| 项 | 约定 |
-| --- | --- |
-| 每次发布 | 只推「版本号 + `latest`」两个标签，**不推短 SHA 标签** |
-| 版本保留 | 两边都只保留最新 **3** 个版本标签 |
-| ACR 清理 | 个人版无删除 API，**手动**在控制台删；每次发布会把待删清单写进运行摘要 |
-| GHCR 清理 | **全自动**：`prune-ghcr` 任务在构建后调用 `scripts/ghcr-prune.py --apply` 删除超出 3 个的旧版本 |
-| 部署 | 一律使用固定版本标签（如 `:1.1.0`），不用 `latest`，避免隐式升级 |
-| 本地查标签 | `ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh`（只读） |
+| 项         | 约定                                                                                            |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| 每次发布   | 只推「版本号 + `latest`」两个标签，**不推短 SHA 标签**                                          |
+| 版本保留   | 两边都只保留最新 **3** 个版本标签                                                               |
+| ACR 清理   | 个人版无删除 API，**手动**在控制台删；每次发布会把待删清单写进运行摘要                          |
+| GHCR 清理  | **全自动**：`prune-ghcr` 任务在构建后调用 `scripts/ghcr-prune.py --apply` 删除超出 3 个的旧版本 |
+| 部署       | 一律使用固定版本标签（如 `:1.1.0`），不用 `latest`，避免隐式升级                                |
+| 本地查标签 | `ACR_USER=… ACR_PASS=… ./scripts/acr-tags.sh`（只读）                                           |
 
 > ACR 个人版在**产品层面**就封了删除：Registry 的 `DELETE` 返回 `UNAUTHORIZED … Action:"delete"`，且官方《个人版与企业版实例差异化说明》明确写「**个人版不对外提供 OpenAPI 接口**」，`DeleteRepoTag` 需要企业版实例的 `InstanceId`/`RepoId`，生命周期规则同样仅企业版可用。因此 GitHub Actions 只能推送、无法删除，清理只能在控制台手动执行；发布流水线每次会把 `scripts/acr-tags.sh` 的审计结果写进运行摘要，提示该删哪几个标签。
 >
@@ -118,16 +118,16 @@ docker run -d -p 3000:3000 \
 1. **改版本号** — `package.json` 与 `package-lock.json`（两处 `version`）
 2. **本地校验** — `npm test`
 3. **打 tag 推送** — tag 形如 `v*` 会触发构建，请勿用 `git push --tags`
-   ```bash
-   git tag -a v1.0.1 -m "v1.0.1 — …" && git push origin v1.0.1
-   ```
+    ```bash
+    git tag -a v1.0.1 -m "v1.0.1 — …" && git push origin v1.0.1
+    ```
 4. **写发布说明** — 等构建完成后执行（`DIGEST` 从 GHCR 读取），再创建 Release
-   ```bash
-   CHANGES=$'- 新增…\n- 修复…' PREV_VERSION=1.0.0 \
-     ./scripts/release-notes.sh 1.0.1 > body.md
-   gh release create v1.0.1 --title "v1.0.1 — …" --notes-file body.md
-   ```
-   模板见 [`.github/release-template.md`](.github/release-template.md)。脚本自动填 `DIGEST`（GHCR 匿名读取，ACR 与 GHCR 同 digest）、`BUILD_ID`（前端内容指纹）、`TEST_COUNT`（`mocha --dry-run` 统计）；`IMAGE_SIZE` / `BUILD_ID` / `TEST_COUNT` 可用环境变量覆盖。镜像尚未推送时会提示 digest 待回填，重跑即可。
+    ```bash
+    CHANGES=$'- 新增…\n- 修复…' PREV_VERSION=1.0.0 \
+      ./scripts/release-notes.sh 1.0.1 > body.md
+    gh release create v1.0.1 --title "v1.0.1 — …" --notes-file body.md
+    ```
+    模板见 [`.github/release-template.md`](.github/release-template.md)。脚本自动填 `DIGEST`（GHCR 匿名读取，ACR 与 GHCR 同 digest）、`BUILD_ID`（前端内容指纹）、`TEST_COUNT`（`mocha --dry-run` 统计）；`IMAGE_SIZE` / `BUILD_ID` / `TEST_COUNT` 可用环境变量覆盖。镜像尚未推送时会提示 digest 待回填，重跑即可。
 5. **服务器升级** — compose 改固定版本号后 `docker compose pull && docker compose up -d`
 
 > ⚠️ 工作区有未提交改动时，脚本会告警：此时自动算出的 `BUILD_ID` 只代表当前工作区，不代表任何已发布版本。补发旧版本的说明请显式传 `BUILD_ID`，或直接取线上 `/api/version` 的值。

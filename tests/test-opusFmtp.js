@@ -63,7 +63,10 @@ describe('test-opusFmtp', () => {
     });
 
     it('should return the SDP unchanged when there is no opus track', () => {
-        const noOpus = SDP.replace('a=rtpmap:111 opus/48000/2\r\n', '').replace('a=fmtp:111 minptime=10;useinbandfec=1\r\n', '');
+        const noOpus = SDP.replace('a=rtpmap:111 opus/48000/2\r\n', '').replace(
+            'a=fmtp:111 minptime=10;useinbandfec=1\r\n',
+            ''
+        );
         mungeOpusFmtp(noOpus, { maxaveragebitrate: 64000 }).should.equal(noOpus);
     });
 });

@@ -54,6 +54,33 @@ fs.mkdirSync(backupDir, { recursive: true });
 if (hadChannelsFile) fs.copyFileSync(CHANNELS_FILE, path.join(backupDir, 'channels.json'));
 if (hadChatDir) fs.cpSync(CHAT_DIR, path.join(backupDir, 'chat_history'), { recursive: true });
 
+/**
+ * Hand the user's data files back exactly as they were. Idempotent: called
+ * from after() on a clean run AND from the process 'exit' hook below, so a
+ * hard test failure or Ctrl+C cannot leave the swapped registry behind
+ * (SIGKILL is beyond anyone's reach).
+ */
+let userDataRestored = false;
+function restoreUserData() {
+    if (userDataRestored) return;
+    userDataRestored = true;
+    if (hadChannelsFile) fs.copyFileSync(path.join(backupDir, 'channels.json'), CHANNELS_FILE);
+    else if (fs.existsSync(CHANNELS_FILE)) fs.unlinkSync(CHANNELS_FILE);
+    // sidecars: delete only what the TEST created, never a user's files
+    for (const suffix of REGISTRY_SIDEcars) {
+        const file = CHANNELS_FILE + suffix;
+        if (!preexistingSidecars.has(file) && fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    if (hadChatDir) {
+        fs.rmSync(CHAT_DIR, { recursive: true, force: true });
+        fs.cpSync(path.join(backupDir, 'chat_history'), CHAT_DIR, { recursive: true });
+    } else if (fs.existsSync(CHAT_DIR)) {
+        fs.rmSync(CHAT_DIR, { recursive: true, force: true });
+    }
+    fs.rmSync(backupDir, { recursive: true, force: true });
+}
+process.on('exit', restoreUserData);
+
 require('../app/src/server.js'); // starts listening on :3100
 
 let adminToken = '';
@@ -117,6 +144,16 @@ function freshRoom(prefix) {
 describe('test-server (signaling integration)', function () {
     this.timeout(10000);
     before(async () => {
+        // the require() above returns before the listen callback fires on a
+        // cold start — poll once for readiness instead of racing the login
+        for (let i = 0; i < 50; i++) {
+            try {
+                await fetch(URL + '/api/version');
+                break;
+            } catch {
+                await wait(100);
+            }
+        }
         const res = await fetch(URL + '/api/admin/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -142,21 +179,7 @@ describe('test-server (signaling integration)', function () {
     });
 
     after(() => {
-        // hand the data files back exactly as they were
-        if (hadChannelsFile) fs.copyFileSync(path.join(backupDir, 'channels.json'), CHANNELS_FILE);
-        else if (fs.existsSync(CHANNELS_FILE)) fs.unlinkSync(CHANNELS_FILE);
-        // sidecars: delete only what the TEST created, never a user's files
-        for (const suffix of REGISTRY_SIDEcars) {
-            const file = CHANNELS_FILE + suffix;
-            if (!preexistingSidecars.has(file) && fs.existsSync(file)) fs.unlinkSync(file);
-        }
-        if (hadChatDir) {
-            fs.rmSync(CHAT_DIR, { recursive: true, force: true });
-            fs.cpSync(path.join(backupDir, 'chat_history'), CHAT_DIR, { recursive: true });
-        } else if (fs.existsSync(CHAT_DIR)) {
-            fs.rmSync(CHAT_DIR, { recursive: true, force: true });
-        }
-        fs.rmSync(backupDir, { recursive: true, force: true });
+        restoreUserData();
     });
 
     let socketsToClose = [];
@@ -540,6 +563,80 @@ describe('test-server (signaling integration)', function () {
             });
             // troom has no hosts and no DEFAULT_CHANNEL_MODERATOR → login fails
             login.status.should.equal(401);
+        });
+    });
+
+    describe('7. hardening regressions', () => {
+        it('should cap the join name and reject an empty one', async () => {
+            const room = freshRoom('namecap');
+            const uuid = crypto.randomUUID();
+            const s = track(connect());
+            s.emit('join', joinPayload(room, uuid, 'x'.repeat(200)));
+            const info = await once(s, 'serverInfo');
+            info.peers[uuid].peer_name.should.equal('x'.repeat(24));
+
+            const s2 = track(connect());
+            s2.emit('join', { channel: room, peer_uuid: crypto.randomUUID(), peer_name: '', peer_audio: true });
+            await once(s2, 'unauthorized');
+        });
+
+        it('should leave exactly one live session when the same uuid joins repeatedly', async () => {
+            const room = freshRoom('race');
+            const uuid = crypto.randomUUID();
+            const a = track(connect());
+            a.emit('join', joinPayload(room, uuid, 'twin'));
+            await once(a, 'serverInfo');
+
+            // a second socket joining with the SAME uuid reaps the live one and
+            // takes over (last writer wins); repeated takeovers must never
+            // leave duplicate or zombie sessions behind
+            const b = track(connect());
+            const aGone = once(a, 'removePeer');
+            b.emit('join', joinPayload(room, uuid, 'twin'));
+            await once(b, 'serverInfo');
+            (await aGone).peer_id.should.equal(uuid);
+
+            const c = track(connect());
+            c.emit('join', joinPayload(room, uuid, 'twin'));
+            await once(c, 'serverInfo');
+            await wait(200);
+
+            const res = await adminApi('GET', '/api/admin/channels');
+            const data = await res.json();
+            const entry = [...data.channels, ...data.temps].find((ch) => ch.id === room);
+            if (!entry) throw new Error('room missing from admin list');
+            entry.members.length.should.equal(1);
+            entry.members[0].uuid.should.equal(uuid);
+            entry.members[0].name.should.equal('twin');
+        });
+
+        it('should join with a channel password containing markup characters', async () => {
+            const room = freshRoom('pwmark');
+            const secret = '<b>pw&"</b>';
+            const created = await adminApi('POST', '/api/admin/channels', {
+                id: room,
+                name: 'Markup Pw',
+                password: secret,
+            });
+            (await created.json()).channel.hasPassword.should.be.true();
+            const s = track(connect());
+            s.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'guest'), channel_password: secret });
+            await once(s, 'serverInfo');
+        });
+
+        it('should keep host usernames out of the public endpoints (admin-only)', async () => {
+            const room = freshRoom('hosts');
+            await adminApi('POST', '/api/admin/channels', {
+                id: room,
+                name: 'Hosted Pub',
+                hosts: [{ username: 'secret-host', password: 'pw1' }],
+            });
+            const pub = await (await fetch(URL + `/api/channels/${room}`)).json();
+            should.not.exist(pub.hosts);
+            const pubList = await (await fetch(URL + '/api/channels')).json();
+            should.not.exist(pubList.channels.find((ch) => ch.id === room).hosts);
+            const adminData = await (await adminApi('GET', '/api/admin/channels')).json();
+            adminData.channels.find((ch) => ch.id === room).hosts.should.eql(['secret-host']);
         });
     });
 });

@@ -14,11 +14,12 @@
 
 const CHUNK_CHARS = 12 * 1024; // base64 chars per frame — cross-browser safe
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // raw file picked/pasted by the user
-const MAX_TRANSFER_CHARS = 1600 * 1024; // receiver cap (~1.15 MB decoded)
+export const MAX_TRANSFER_CHARS = 1600 * 1024; // receiver cap (~1.15 MB decoded)
 const MAX_INCOMING_TRANSFERS = 8; // concurrent reassemblies — img-start flood guard
 const SAFE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
-const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+/** Shared data-URL whitelist (twin of the server's limits.IMAGE_DATA_URL_RE). */
+export const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
 /**
  * Read a picked/pasted image file into a sendable data URL.

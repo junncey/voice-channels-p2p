@@ -7,7 +7,21 @@
 
 export function installDebugHooks(getCtx) {
     window.__vcDebug = () => {
-        const { hub, micProcessed, micTest, settings, members, audioEls, connPaths, lossStreaks, peerRecovery, b1Attempts, b1InFlight, webAudioPlayback, shareSound } = getCtx();
+        const {
+            hub,
+            micProcessed,
+            micTest,
+            settings,
+            members,
+            audioEls,
+            connPaths,
+            lossStreaks,
+            peerRecovery,
+            b1Attempts,
+            b1InFlight,
+            webAudioPlayback,
+            shareSound,
+        } = getCtx();
         return {
             mode: webAudioPlayback() ? 'webaudio' : 'element',
             ctxState: hub?.ctx?.state ?? null,

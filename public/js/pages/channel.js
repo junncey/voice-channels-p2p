@@ -11,8 +11,8 @@
 import { api } from '/js/core/api.js';
 import { Mesh } from '/js/core/webrtc.js';
 import { AudioHub, getTestBeepUrl } from '/js/core/audio.js';
-import { initChat, openEmojiPicker } from '/js/core/chat.js';
-import { fileToImageMessage, sendImageData, createImageReceiver } from '/js/core/images.js';
+import { initChat, openEmojiPicker, escapeRegExp, validReply } from '/js/core/chat.js';
+import { fileToImageMessage, sendImageData, createImageReceiver, DATA_URL_RE } from '/js/core/images.js';
 import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t, getLang, setLang } from '/js/core/i18n.js';
 import { initSoundSettings, playSound } from '/js/core/sound.js';
@@ -21,7 +21,7 @@ import { getThemePref, setThemePref } from '/js/core/theme.js';
 import { createWakeLock } from '/js/pages/channel/wakeLock.js';
 import { createShareSound } from '/js/pages/channel/share.js';
 import { installDebugHooks } from '/js/pages/channel/debug.js';
-import { $, el, avatarColor, randomNick, copyText } from '/js/core/utils.js';
+import { $, el, avatarColor, randomNick, copyText, toast } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
 const HOST_TOKEN_PREFIX = 'vc_host_token_';
@@ -33,8 +33,6 @@ const AVATAR_KEY = 'vc_avatar';
 const AVATAR_MAX_CHARS = 96 * 1024; // broadcast/storage cap for the avatar data URL
 const AVATARS_MAX = 100; // hard cap on remembered peer avatars (flood guard)
 const PTT_KEY_CODE = 'KeyV';
-
-const AVATAR_DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
 const MIC_ON_SVG =
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
@@ -286,7 +284,7 @@ let notifyEnabled =
 /** true when the text contains an @mention of the local user's name */
 function mentionsMe(text) {
     if (!selfName || !text.includes('@')) return false;
-    const re = new RegExp(`@${selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u');
+    const re = new RegExp(`@${escapeRegExp(selfName)}(?![\\p{L}\\p{N}_])`, 'u');
     return re.test(text);
 }
 
@@ -704,7 +702,22 @@ function bindUi() {
 // join flow
 // ---------------------------------------------------------------------------
 
+let joining = false;
+
 async function join({ textOnly: asTextOnly }) {
+    // re-entrancy guard: Enter on the nick/password inputs can fire a second
+    // join before the first reaches setOverlayBusy (its awaits span mic setup);
+    // the first socket would be orphaned server-side as a ghost session
+    if (joining) return;
+    joining = true;
+    try {
+        await joinInner({ textOnly: asTextOnly });
+    } finally {
+        joining = false;
+    }
+}
+
+async function joinInner({ textOnly: asTextOnly }) {
     const nick = $('#nickInput').value.trim().slice(0, 24);
     if (!nick) return showJoinError(t('channel.errors.nickRequired'));
     // overlay visible = manual attempt: its input is authoritative (it may
@@ -800,14 +813,7 @@ function parseHistoryRows(messages) {
         if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
         if (!text && !imgs.length && msg.deleted !== true) continue;
         const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
-        const reply =
-            msg.reply && typeof msg.reply === 'object' && typeof msg.reply.name === 'string'
-                ? {
-                      name: msg.reply.name.slice(0, 24),
-                      text: String(msg.reply.text || '').slice(0, 80),
-                      ts: Number(msg.reply.ts) || 0,
-                  }
-                : null;
+        const reply = validReply(msg.reply);
         const deleted = msg.deleted === true;
         const reactions =
             msg.reactions && typeof msg.reactions === 'object' && !Array.isArray(msg.reactions) ? msg.reactions : null;
@@ -1042,9 +1048,7 @@ function registerSocketHandlers() {
 
     socket.on('peerAvatar', ({ peer_id, peer_name, avatar }) => {
         const url =
-            typeof avatar === 'string' && avatar.length <= AVATAR_MAX_CHARS && AVATAR_DATA_URL_RE.test(avatar)
-                ? avatar
-                : '';
+            typeof avatar === 'string' && avatar.length <= AVATAR_MAX_CHARS && DATA_URL_RE.test(avatar) ? avatar : '';
         const member = members.get(peerIdSafe(peer_id));
         if (member) member.avatar = url || undefined;
         if (peer_name) {
@@ -1118,6 +1122,12 @@ function registerSocketHandlers() {
             join({ textOnly: false });
         }
     });
+    socket.on('joinError', () => {
+        // server-side fault mid-join (the handler logs the details) — the
+        // session state was rolled back there, so start over cleanly
+        showJoinError(t('channel.errors.joinFailed'));
+        setOverlayBusy(false);
+    });
 
     socket.on('disconnect', (reason) => {
         if (!joined) return;
@@ -1183,14 +1193,7 @@ function meshHandlers() {
                 const batch = typeof data.batch === 'string' && data.batch.length <= 64 ? data.batch : '';
                 const imgs = Number(data.imgs);
                 const text = String(data.msg || '').slice(0, 500);
-                const reply =
-                    data.reply && typeof data.reply === 'object' && typeof data.reply.name === 'string'
-                        ? {
-                              name: data.reply.name.slice(0, 24),
-                              text: String(data.reply.text || '').slice(0, 80),
-                              ts: Number(data.reply.ts) || 0,
-                          }
-                        : null;
+                const reply = validReply(data.reply);
                 if (batch && Number.isInteger(imgs) && imgs > 0 && imgs <= 9) {
                     // one send of text + N images renders as ONE merged bubble
                     chat.openBatch({ batch, name, text, count: imgs, reply });
@@ -1774,7 +1777,7 @@ function syncMembers(peersMap) {
         const avatar =
             typeof info.peer_avatar === 'string' &&
             info.peer_avatar.length <= AVATAR_MAX_CHARS &&
-            AVATAR_DATA_URL_RE.test(info.peer_avatar)
+            DATA_URL_RE.test(info.peer_avatar)
                 ? info.peer_avatar
                 : existing?.avatar;
         if (avatar) {
@@ -2328,10 +2331,6 @@ function buildAudioConstraints() {
 }
 
 /**
- * Re-acquire the mic with the current settings (device switch or processing
- * toggle) and hot-swap the outgoing track — no renegotiation involved.
- */
-/**
  * Point the outgoing track at the gain-processed mic stream while the shared
  * AudioContext runs; a suspended context would emit silence, so the raw track
  * goes out instead until the context resumes (statechange re-runs this).
@@ -2358,6 +2357,10 @@ function syncMicPipeline() {
     if (hub?.ctx) hub.watch('self', localStream, localLevelCb);
 }
 
+/**
+ * Re-acquire the mic with the current settings (device switch or processing
+ * toggle) and hot-swap the outgoing track — no renegotiation involved.
+ */
 async function reacquireMic() {
     const hadStream = !!localStream;
     const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
@@ -2393,6 +2396,11 @@ async function enableVoice() {
     } catch {
         toast(t('channel.errors.micDenied'), 'warn');
     }
+}
+
+/** Settings-modal callers: re-acquire the mic, toasting the shared denial. */
+function reacquireMicOrToast() {
+    return reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
 }
 
 function updateVoiceControls() {
@@ -2486,9 +2494,8 @@ function reapplyPeerVolume(peerId) {
 }
 
 function reapplyAllVolumes() {
-    for (const peerId of members.keys()) {
-        if (peerId !== socket?.id) reapplyPeerVolume(peerId);
-    }
+    // members are keyed by session uuid — every entry is a remote peer
+    for (const peerId of members.keys()) reapplyPeerVolume(peerId);
 }
 
 /** Route remote playback to the selected output device. */
@@ -2512,7 +2519,7 @@ function bindSettingsUi() {
             settings.micDeviceId = value;
             saveAudioSettings();
             // switching device in text-only mode doubles as "enable voice"
-            if (localStream) reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
+            if (localStream) reacquireMicOrToast();
             else enableVoice();
         },
     });
@@ -2543,7 +2550,7 @@ function bindSettingsUi() {
         $(`#${id}`).addEventListener('change', (event) => {
             settings[key] = event.target.checked;
             saveAudioSettings();
-            if (localStream) reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
+            if (localStream) reacquireMicOrToast();
         });
     }
 
@@ -2558,7 +2565,7 @@ function bindSettingsUi() {
         // re-capture under the overridden processing constraints (hot-swaps the
         // outgoing track) and push the new bitrate onto live senders at once;
         // the fmtp side (stereo) lands with the next SDP round
-        if (localStream) reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
+        if (localStream) reacquireMicOrToast();
         mesh?.setSendBitrate();
     });
 
@@ -2698,7 +2705,7 @@ function deviceItems(kind) {
 }
 
 async function refreshDeviceSelects() {
-    let devices = [];
+    let devices;
     try {
         devices = await navigator.mediaDevices.enumerateDevices();
     } catch {
@@ -2937,7 +2944,7 @@ function insertChatNewline() {
     try {
         inserted = document.execCommand('insertText', false, '\n');
     } catch {
-        inserted = false;
+        /* execCommand unavailable — the setRangeText fallback below applies */
     }
     if (!inserted) input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end');
     autoGrowChatInput();
@@ -2990,7 +2997,7 @@ async function onChatSubmit(event) {
     cancelReply();
 
     if (!images.length) {
-        mesh.sendChat({ type: 'chat', from: selfName, msg: text, reply });
+        trySendChat({ type: 'chat', from: selfName, msg: text, reply });
         chat.add({ name: selfName, text, self: true, reply });
         emitChatForHistory(text, [], reply);
         return;
@@ -3008,7 +3015,7 @@ async function onChatSubmit(event) {
     }
     if (!payloads.length) {
         if (text) {
-            mesh.sendChat({ type: 'chat', from: selfName, msg: text, reply });
+            trySendChat({ type: 'chat', from: selfName, msg: text, reply });
             chat.add({ name: selfName, text, self: true, reply });
             emitChatForHistory(text, [], reply);
         }
@@ -3016,7 +3023,7 @@ async function onChatSubmit(event) {
     }
 
     const batch = crypto.randomUUID();
-    mesh.sendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length, reply });
+    if (!trySendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length, reply })) return;
     chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true, reply });
     emitChatForHistory(
         text,
@@ -3024,14 +3031,37 @@ async function onChatSubmit(event) {
         reply
     );
     for (const payload of payloads) {
-        sendImageData({
-            send: (frame) => mesh.sendChat(frame),
-            from: selfName,
-            mime: payload.mime,
-            dataUrl: payload.dataUrl,
-            batch,
-        });
+        try {
+            sendImageData({
+                send: (frame) => mesh.sendChat(frame),
+                from: selfName,
+                mime: payload.mime,
+                dataUrl: payload.dataUrl,
+                batch,
+            });
+        } catch {
+            // a DataChannel refused the frames (send buffer full / channel
+            // closing) — stop here instead of silently losing the remaining
+            // images of the batch
+            toast(t('chat.imageSendFailed'), 'warn');
+            break;
+        }
         chat.addBatchImage(batch, payload.dataUrl, t('chat.image'));
+    }
+}
+
+/**
+ * mesh.sendChat with a delivery-failure path: a DataChannel refusing frames
+ * (buffer full / closing) must not surface as an uncaught throw. Returns
+ * false — after toasting — when the frame could not be delivered.
+ */
+function trySendChat(payload) {
+    try {
+        mesh.sendChat(payload);
+        return true;
+    } catch {
+        toast(t('chat.sendFailed'), 'warn');
+        return false;
     }
 }
 
@@ -3122,7 +3152,7 @@ function bindAppearanceControls() {
 // ---------------------------------------------------------------------------
 
 function safeAvatarUrl(value) {
-    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && AVATAR_DATA_URL_RE.test(value) ? value : '';
+    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && DATA_URL_RE.test(value) ? value : '';
 }
 
 function bindAvatarUi() {
@@ -3405,16 +3435,6 @@ function showJoinFatal(message) {
     $('#joinBtn').disabled = true;
     $('#textOnlyBtn').disabled = true;
     $('#hostLoginBtn').classList.add('hidden');
-}
-
-// ---------------------------------------------------------------------------
-// toast
-// ---------------------------------------------------------------------------
-
-function toast(message, kind = '') {
-    const node = el('div', { class: `toast ${kind}`, text: message });
-    $('#toasts').append(node);
-    setTimeout(() => node.remove(), 3200);
 }
 
 // ---------------------------------------------------------------------------

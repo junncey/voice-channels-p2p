@@ -62,7 +62,7 @@ module.exports = class Logs {
 
     log(msg, op = '') {
         if (LOGS_JSON) {
-            jsonLog('log', this.appName, msg, op);
+            this.jsonLog('log', this.appName, msg, op);
         } else {
             console.log(
                 '[' + this.getDateTime() + '] [' + colors.yellow(this.appName) + '] ' + msg,

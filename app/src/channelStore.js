@@ -15,10 +15,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 const Logs = require('./logs');
+const limits = require('./limits');
 
 const log = new Logs('channelStore');
 
-const CHANNEL_ID_PATTERN = /^[a-zA-Z0-9_-]{3,32}$/;
+const CHANNEL_ID_PATTERN = limits.CHANNEL_ID_RE;
 // IDs colliding with Object.prototype properties would poison the in-memory
 // maps keyed by channel id in server.js (a bracket lookup like map['constructor']
 // resolves to the inherited value instead of our entry) — reject them outright.
@@ -101,14 +102,34 @@ function verifyPassword(password, stored) {
     }
 }
 
+/** Constant-time string comparison for secrets (shared with server.js). */
 function constantTimeEquals(a, b) {
     const bufA = Buffer.from(String(a ?? ''));
     const bufB = Buffer.from(String(b ?? ''));
     if (bufA.length !== bufB.length) {
-        crypto.timingSafeEqual(bufA, bufA);
+        crypto.timingSafeEqual(bufA, bufA); // dummy compare keeps the timing profile flat
         return false;
     }
     return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Verify a password against a stored hash, raw first, sanitized second.
+ * Passwords are hashed and compared VERBATIM — a sanitizer would silently
+ * rewrite secrets containing markup characters (<, >, &). Registries written
+ * before that rule stored hashes of SANITIZED passwords; `legacySanitize`
+ * (wired in from server.js, which owns the xss module) re-derives that form
+ * so pre-fix stored hashes keep verifying.
+ */
+function verifyPasswordCompat(password, stored, legacySanitize) {
+    if (verifyPassword(password, stored)) return true;
+    if (typeof legacySanitize === 'function' && typeof password === 'string') {
+        const legacyForm = legacySanitize(password);
+        if (typeof legacyForm === 'string' && legacyForm !== password) {
+            return verifyPassword(legacyForm, stored);
+        }
+    }
+    return false;
 }
 
 function isPlainObject(value) {
@@ -264,7 +285,9 @@ function validateDefinition(input, { partial = false } = {}) {
         } else {
             const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
             if (!Number.isInteger(n) || n < 0 || n > RETENTION_MAX) {
-                errors.push(`chatRetentionHours must be an integer between 0 and ${RETENTION_MAX} (or empty to inherit)`);
+                errors.push(
+                    `chatRetentionHours must be an integer between 0 and ${RETENTION_MAX} (or empty to inherit)`
+                );
             } else {
                 value.chatRetentionHours = n;
             }
@@ -283,12 +306,17 @@ class ChannelStore {
      *                                            configured hosts (see config.channels)
      * @param {object}  [options.defaultSettings] setting defaults seeded from env on first boot
      */
-    constructor({ filePath = path.join(__dirname, 'channels.json'), autoInit = true, defaultModerator = '', defaultSettings = {} } = {}) {
+    constructor({
+        filePath = path.join(__dirname, 'channels.json'),
+        autoInit = true,
+        defaultModerator = '',
+        defaultSettings = {},
+        legacySanitize = null,
+    } = {}) {
         this.filePath = filePath;
         this.defaultModerator = String(defaultModerator || '');
-        this.settings = Object.fromEntries(
-            Object.entries(SETTINGS_SCHEMA).map(([key, rule]) => [key, rule.default]),
-        );
+        this.legacySanitize = legacySanitize; // see verifyPasswordCompat
+        this.settings = Object.fromEntries(Object.entries(SETTINGS_SCHEMA).map(([key, rule]) => [key, rule.default]));
         // env-seeded defaults (TEMP_ROOMS_ENABLED) win over the schema defaults
         this.applySettings(defaultSettings);
         this.channels = [];
@@ -345,7 +373,10 @@ class ChannelStore {
             fs.renameSync(this.filePath, corruptPath);
             log.error('Channel registry quarantined', { from: this.filePath, to: corruptPath, error: err.message });
         } catch (quarantineErr) {
-            log.error('Channel registry could not be quarantined', { file: this.filePath, error: quarantineErr.message });
+            log.error('Channel registry could not be quarantined', {
+                file: this.filePath,
+                error: quarantineErr.message,
+            });
         }
         const backupPath = `${this.filePath}.bak`;
         try {
@@ -404,7 +435,9 @@ class ChannelStore {
             let id = '';
             const bytes = crypto.randomBytes(8);
             for (let i = 0; i < 8; i++) id += alphabet[bytes[i] % alphabet.length];
-            if (!this.exists(id)) return id;
+            // temp rooms live outside the registry — skip those ids too or the
+            // generated channel would be shadowed by the live temp room
+            if (!this.exists(id) && !this.temps.has(id)) return id;
         }
     }
 
@@ -464,7 +497,7 @@ class ChannelStore {
         }
     }
 
-    getOrCreateTemp(id, { maxParticipants = 8, creatorIp } = {}) {
+    getOrCreateTemp(id, { maxParticipants = limits.DEFAULT_MAX_PARTICIPANTS, creatorIp } = {}) {
         let channel = this.temps.get(id);
         if (!channel) {
             if (this.temps.size >= this.settings.tempMaxRooms) {
@@ -528,9 +561,10 @@ class ChannelStore {
         for (const key of SETTING_KEYS) {
             if (input[key] === undefined) continue;
             const rule = SETTINGS_SCHEMA[key];
-            const value = rule.type === 'number' && (typeof input[key] === 'string' && input[key].trim() !== '')
-                ? Number(input[key]) // accept numeric strings from HTML forms
-                : input[key];
+            const value =
+                rule.type === 'number' && typeof input[key] === 'string' && input[key].trim() !== ''
+                    ? Number(input[key]) // accept numeric strings from HTML forms
+                    : input[key];
             if (!isValidSettingValue(value, rule)) {
                 errors.push(this.describeSettingError(key, rule));
             } else {
@@ -550,9 +584,7 @@ class ChannelStore {
     }
 
     listTemps({ onlineOf = null } = {}) {
-        return [...this.temps.values()].map((ch) =>
-            this.sanitize(ch, { online: onlineOf ? onlineOf(ch.id) : null }),
-        );
+        return [...this.temps.values()].map((ch) => this.sanitize(ch, { online: onlineOf ? onlineOf(ch.id) : null }));
     }
 
     /** Raw definition (includes password hashes) — server-side use only. */
@@ -560,7 +592,11 @@ class ChannelStore {
         return this.channels.find((ch) => ch.id === id) || null;
     }
 
-    /** Sanitized copy safe to send to clients. */
+    /**
+     * Sanitized copy safe to send to clients. `includePrivate` gates operator
+     * data: host usernames ship only to the admin console, never to the
+     * anonymous public endpoints (the frontend has no use for them).
+     */
     sanitize(channel, { includePrivate = false, online = null } = {}) {
         if (!channel) return null;
         const out = {
@@ -568,14 +604,16 @@ class ChannelStore {
             name: channel.name,
             description: channel.description || '',
             public: channel.public !== false,
-            maxParticipants: channel.maxParticipants || 8,
-            hosts: Array.isArray(channel.hosts) ? channel.hosts.map((h) => h.username) : [],
+            maxParticipants: channel.maxParticipants || limits.DEFAULT_MAX_PARTICIPANTS,
             hasPassword: Boolean(channel.passwordHash),
             temporary: channel.temporary === true,
             chatRetentionHours: channel.chatRetentionHours ?? null,
             createdAt: channel.createdAt,
             updatedAt: channel.updatedAt,
         };
+        if (includePrivate) {
+            out.hosts = Array.isArray(channel.hosts) ? channel.hosts.map((h) => h.username) : [];
+        }
         if (online !== null) out.online = online;
         return out;
     }
@@ -609,7 +647,7 @@ class ChannelStore {
             name: value.name,
             description: value.description || '',
             public: value.public !== false,
-            maxParticipants: value.maxParticipants || 8,
+            maxParticipants: value.maxParticipants || limits.DEFAULT_MAX_PARTICIPANTS,
             hosts: (value.hosts || [])
                 .filter((h) => h.password)
                 .map((h) => ({ username: h.username, passwordHash: hashPassword(h.password) })),
@@ -623,7 +661,9 @@ class ChannelStore {
         this.channels.push(channel);
         this.save();
         log.info('Channel created', { id: channel.id, name: channel.name, hosts: channel.hosts.length });
-        return { ok: true, channel: this.sanitize(channel) };
+        // includePrivate: the create/update results feed the ADMIN console,
+        // which needs the host usernames
+        return { ok: true, channel: this.sanitize(channel, { includePrivate: true }) };
     }
 
     update(id, input) {
@@ -657,7 +697,8 @@ class ChannelStore {
         channel.updatedAt = new Date().toISOString();
         this.save();
         log.info('Channel updated', { id: channel.id, hosts: channel.hosts.length });
-        return { ok: true, channel: this.sanitize(channel) };
+        // admin-facing result (see create)
+        return { ok: true, channel: this.sanitize(channel, { includePrivate: true }) };
     }
 
     remove(id) {
@@ -683,7 +724,7 @@ class ChannelStore {
 
         if (Array.isArray(channel.hosts) && channel.hosts.length) {
             const host = channel.hosts.find((h) => h.username === username);
-            if (host && host.passwordHash && verifyPassword(password, host.passwordHash)) {
+            if (host && host.passwordHash && verifyPasswordCompat(password, host.passwordHash, this.legacySanitize)) {
                 return { username: host.username };
             }
             return null;
@@ -714,7 +755,7 @@ class ChannelStore {
             channel &&
             channel.passwordHash &&
             typeof password === 'string' &&
-            verifyPassword(password, channel.passwordHash)
+            verifyPasswordCompat(password, channel.passwordHash, this.legacySanitize)
         );
     }
 }
@@ -722,6 +763,8 @@ class ChannelStore {
 module.exports = ChannelStore;
 module.exports.hashPassword = hashPassword;
 module.exports.verifyPassword = verifyPassword;
+module.exports.verifyPasswordCompat = verifyPasswordCompat;
+module.exports.constantTimeEquals = constantTimeEquals;
 module.exports.validateDefinition = validateDefinition;
 module.exports.CHANNEL_ID_PATTERN = CHANNEL_ID_PATTERN;
 module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
