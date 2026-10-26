@@ -1,15 +1,21 @@
 'use strict';
 
 const util = require('util');
-const colors = require('colors');
 
 const LOGS_DEBUG = process.env.LOGS_DEBUG ? process.env.LOGS_DEBUG === 'true' : false;
 const LOGS_COLORS = process.env.LOGS_COLORS ? process.env.LOGS_COLORS === 'true' : true;
 const LOGS_JSON = process.env.LOGS_JSON ? process.env.LOGS_JSON === 'true' : false;
 const LOGS_JSON_PRETTY = process.env.LOGS_JSON_PRETTY ? process.env.LOGS_JSON_PRETTY === 'true' : false;
 
-if (LOGS_COLORS) colors.enable();
-else colors.disable();
+// Replaces the colors dependency: output is byte-identical (same SGR open code
+// + \x1b[39m default-fg close as colors@1.4); LOGS_COLORS=false makes the
+// wrappers identity functions, matching colors.disable().
+const ansi = (code) => (text) => (LOGS_COLORS ? `\x1b[${code}m${text}\x1b[39m` : String(text));
+const yellow = ansi(33);
+const green = ansi(32);
+const red = ansi(31);
+const magenta = ansi(35);
+const cyan = ansi(36);
 
 const options = {
     depth: null,
@@ -52,9 +58,9 @@ module.exports = class Logs {
             this.jsonLog('debug', this.appName, msg, op, { elapsed: this.timeElapsedMs });
         } else {
             console.debug(
-                '[' + this.getDateTime() + '] [' + colors.yellow(this.appName) + '] ' + msg,
+                '[' + this.getDateTime() + '] [' + yellow(this.appName) + '] ' + msg,
                 util.inspect(op, options),
-                colors.magenta(this.timeElapsedMs)
+                magenta(this.timeElapsedMs)
             );
         }
         this.timeStart = Date.now();
@@ -65,7 +71,7 @@ module.exports = class Logs {
             this.jsonLog('log', this.appName, msg, op);
         } else {
             console.log(
-                '[' + this.getDateTime() + '] [' + colors.yellow(this.appName) + '] ' + msg,
+                '[' + this.getDateTime() + '] [' + yellow(this.appName) + '] ' + msg,
                 util.inspect(op, options)
             );
         }
@@ -76,7 +82,7 @@ module.exports = class Logs {
             this.jsonLog('info', this.appName, msg, op);
         } else {
             console.info(
-                '[' + this.getDateTime() + '] [' + colors.yellow(this.appName) + '] ' + colors.green(msg),
+                '[' + this.getDateTime() + '] [' + yellow(this.appName) + '] ' + green(msg),
                 util.inspect(op, options)
             );
         }
@@ -87,7 +93,7 @@ module.exports = class Logs {
             this.jsonLog('warn', this.appName, msg, op);
         } else {
             console.warn(
-                '[' + this.getDateTime() + '] [' + colors.yellow(this.appName) + '] ' + colors.yellow(msg),
+                '[' + this.getDateTime() + '] [' + yellow(this.appName) + '] ' + yellow(msg),
                 util.inspect(op, options)
             );
         }
@@ -98,7 +104,7 @@ module.exports = class Logs {
             this.jsonLog('error', this.appName, msg, op);
         } else {
             console.error(
-                '[' + this.getDateTime() + '] [' + colors.yellow(this.appName) + '] ' + colors.red(msg),
+                '[' + this.getDateTime() + '] [' + yellow(this.appName) + '] ' + red(msg),
                 util.inspect(op, options)
             );
         }
@@ -109,7 +115,7 @@ module.exports = class Logs {
         const currentTime = now.toLocaleString('en-US', this.tzOptions);
         const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
         const timestamp = `${currentTime}:${milliseconds}`;
-        return color ? colors.cyan(timestamp) : timestamp;
+        return color ? cyan(timestamp) : timestamp;
     }
 
     getFormatTime(ms) {

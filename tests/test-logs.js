@@ -82,3 +82,72 @@ describe('test-logs (JSON logging)', () => {
         }
     });
 });
+
+describe('test-logs (ANSI color switch, colors-dependency replacement)', () => {
+    // LOGS_COLORS is read at module load; re-require under a pinned env (same
+    // pattern as the JSON suite above).
+    const capture = (FreshLogs, method, msg) => {
+        const logs = new FreshLogs('test');
+        const args = [];
+        const sink = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+        console.log = console.info = console.warn = console.error = (...a) => args.push(a);
+        try {
+            logs[method](msg);
+        } finally {
+            console.log = sink.log;
+            console.info = sink.info;
+            console.warn = sink.warn;
+            console.error = sink.error;
+        }
+        return String(args[0][0]);
+    };
+
+    after(() => {
+        delete require.cache[LOGS_PATH];
+        require(LOGS_PATH);
+    });
+
+    it('should emit no ANSI escapes with LOGS_COLORS=false', () => {
+        const prev = process.env.LOGS_COLORS;
+        const prevJson = process.env.LOGS_JSON;
+        process.env.LOGS_COLORS = 'false';
+        process.env.LOGS_JSON = 'false';
+        try {
+            delete require.cache[LOGS_PATH];
+            const line = capture(require(LOGS_PATH), 'error', 'boom');
+            line.should.not.containEql('\x1b');
+            line.should.containEql('boom');
+        } finally {
+            if (prev === undefined) delete process.env.LOGS_COLORS;
+            else process.env.LOGS_COLORS = prev;
+            if (prevJson === undefined) delete process.env.LOGS_JSON;
+            else process.env.LOGS_JSON = prevJson;
+            delete require.cache[LOGS_PATH];
+            require(LOGS_PATH);
+        }
+    });
+
+    it('should color output byte-identically to colors@1.4 with LOGS_COLORS=true', () => {
+        const prev = process.env.LOGS_COLORS;
+        const prevJson = process.env.LOGS_JSON;
+        process.env.LOGS_COLORS = 'true';
+        process.env.LOGS_JSON = 'false';
+        try {
+            delete require.cache[LOGS_PATH];
+            const FreshLogs = require(LOGS_PATH);
+            const line = capture(FreshLogs, 'error', 'boom');
+            // app name yellow, message red; colors@1.4 closes fg with \x1b[39m
+            line.should.containEql('\x1b[33mtest\x1b[39m');
+            line.should.containEql('\x1b[31mboom\x1b[39m');
+            const info = capture(FreshLogs, 'info', 'ok');
+            info.should.containEql('\x1b[32mok\x1b[39m');
+        } finally {
+            if (prev === undefined) delete process.env.LOGS_COLORS;
+            else process.env.LOGS_COLORS = prev;
+            if (prevJson === undefined) delete process.env.LOGS_JSON;
+            else process.env.LOGS_JSON = prevJson;
+            delete require.cache[LOGS_PATH];
+            require(LOGS_PATH);
+        }
+    });
+});

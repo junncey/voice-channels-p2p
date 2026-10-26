@@ -26,7 +26,8 @@ socket.io, the persistent stores, and the feature modules —
 require('dotenv').config();
 
 const { Server } = require('socket.io');
-const httpolyglot = require('httpolyglot');
+const http = require('http');
+const https = require('https');
 const compression = require('compression');
 const express = require('express');
 const cors = require('cors');
@@ -69,14 +70,21 @@ const trustProxy = config.server.trustProxy;
 // HTTPS / HTTP server + Socket.IO
 // ---------------------------------------------------------------------------
 
+// Two supported TLS forms (docs/self-hosting.md):
+//  - reverse proxy terminates TLS → container serves plain HTTP (default, no certs)
+//  - native HTTPS → operator mounts real certs at app/ssl/, port serves HTTPS only
 const keyPath = path.join(__dirname, '../ssl/key.pem');
 const certPath = path.join(__dirname, '../ssl/cert.pem');
-const options = {
-    key: fs.readFileSync(keyPath, 'utf-8'),
-    cert: fs.readFileSync(certPath, 'utf-8'),
-};
-
-const server = httpolyglot.createServer(options, app);
+const nativeTls = fs.existsSync(keyPath) && fs.existsSync(certPath);
+const server = nativeTls
+    ? https.createServer(
+          {
+              key: fs.readFileSync(keyPath, 'utf-8'),
+              cert: fs.readFileSync(certPath, 'utf-8'),
+          },
+          app
+      )
+    : http.createServer(app);
 
 server.on('clientError', (err, socket) => {
     err.code === 'HPE_HEADER_OVERFLOW' || err.message === 'Parse Error'
@@ -573,8 +581,10 @@ registerSignaling(io, {
 // ---------------------------------------------------------------------------
 
 server.listen(port, null, () => {
-    log.info(`Voice channel server started → http${host.includes('localhost') ? '' : 's'}://${host} (port ${port})`);
+    const shownHost = host.replace(/^\w+:\/\//, '');
+    log.info(`Voice channel server started → ${nativeTls ? 'https' : 'http'}://${shownHost} (port ${port})`);
     log.info('Server config', {
+        tls: nativeTls ? 'native (app/ssl/*.pem)' : 'off (terminate at a reverse proxy)',
         environment: config.server.environment,
         app_version: require('../../package.json').version,
         node_version: process.versions.node,

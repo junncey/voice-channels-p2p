@@ -14,6 +14,17 @@
 
 ---
 
+## TLS 与部署形态
+
+服务器启动时按证书存在性选择协议（`app/src/server.js`）：
+
+- **无证书（默认）**：端口只服务 HTTP。这是推荐形态——由反向代理（nginx / Caddy / Traefik 等）在容器前终止 TLS；`docker-compose.template.yml` 里注释掉的 Traefik + Let's Encrypt 段即为此形态的示例。`TRUST_PROXY=true` 可让 Express 信任代理头（限流按真实客户端 IP 计数）。
+- **`app/ssl/key.pem` + `app/ssl/cert.pem` 同时存在**：端口只服务 HTTPS（原生 TLS，适合不经反代直接暴露）。Docker 部署把两个证书文件挂载到 `/src/app/ssl/` 即可。
+
+注意：同一端口**不再**同时接受 HTTP 与 HTTPS（上游 `httpolyglot` 的同端口双协议行为已随该依赖移除而退役）；上游随仓库分发的演示自签名证书也已删除——需要原生 HTTPS 请挂载真实证书（生成方法见 `app/ssl/README.md`）。浏览器 `getUserMedia` 要求安全上下文：直连裸 HTTP 仅在 `localhost` 下可用麦克风，公网裸 HTTP 无法使用。
+
+---
+
 ## 备份与恢复
 
 管理后台提供三种数据操作，覆盖 `channels.json` 与 `chat_history/` 的全部持久化状态：

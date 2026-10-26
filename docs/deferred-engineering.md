@@ -2,7 +2,7 @@
 
 > 整理日期：2026-10-26。来源：2026-10-25「工程质量优化」批次（正确性修复 + 去重 + 测试补充 + ESLint/CI 工具链，194 passing）。该批次评审时识别出以下问题，**有意未在本批处理**——它们需要独立设计、基准验证或部署形态确认，不适合搭车混入行为修复。各项「现状」均已对照当时代码核实（含文件与行号）。
 
-与 `roadmap.md` 的关系：本文件聚焦**存量代码的结构/性能债**，roadmap 聚焦功能方向；第 3 项与 roadmap #13（`channel.js` 模块拆分）直接衔接，现已**一并完成**（#13 转 ✅ 全量完成）。roadmap 末尾「明确不做（边界）」中的方向**永远不会做**，本文件各项则是**认可价值、择期再做**（当前仅剩第 4 项）。
+与 `roadmap.md` 的关系：本文件聚焦**存量代码的结构/性能债**，roadmap 聚焦功能方向；第 3 项与 roadmap #13（`channel.js` 模块拆分）直接衔接，现已**一并完成**（#13 转 ✅ 全量完成）。roadmap 末尾「明确不做（边界）」中的方向**永远不会做**，本文件各项则是**认可价值、择期再做**（现已**全部完成**）。
 
 ## 总览
 
@@ -11,7 +11,7 @@
 | 1   | ✅ chatStore 写路径与 sweep 的阻塞改造（已实施，见下） | 性能     | 高   | 中大   | 设计评审 + 基准验证        |
 | 2   | ✅ scryptSync 异步化（已实施，见下）                   | 稳定性   | 中   | 小中   | 无（按 IP 节流已部分缓解） |
 | 3   | ✅ 大文件拆分 + 行数预算规则（已实施，见下）           | 可维护性 | 高   | 大     | ~~建议配合一轮功能冻结期~~ |
-| 4   | httpolyglot / colors 依赖替换                          | 依赖卫生 | 低   | 小     | 确认部署形态（#4a）        |
+| 4   | ✅ httpolyglot / colors 依赖替换（已实施，见下）        | 依赖卫生 | 低   | 小     | ~~确认部署形态（#4a）~~     |
 
 ---
 
@@ -110,7 +110,17 @@
 
 **验收**：全量回归绿；拆分前后 `git diff --stat` 证明无逻辑改动（仅移动 + import）；`#debug` 钩子可用性人工核验一次。
 
-## 4. httpolyglot / colors 依赖替换
+## 4. httpolyglot / colors 依赖替换 —— ✅ 已实施（2026-10-26）
+
+> **实施记录**：两项依赖全部移除（运行时依赖 13 → 11），全部验收项达成（214 passing，新增 2 条 ANSI 开关用例；HTTP 与 HTTPS 两种监听下页面与 websocket 升级各人工核验一次）。
+>
+> **最终设计**：
+>
+> - **#4a httpolyglot → 按证书存在性选协议**（`server.js`）：部署形态经仓库证据确认为「反代终止 TLS 为主」——`docker-compose.template.yml` 以端口直出 + 注释掉的 Traefik/Let's Encrypt 段为预期生产形态，README 与本 fork 文档均无原生 TLS 工作流。落地取原方案 (a)+(b) 合一：`app/ssl/key.pem` + `cert.pem` 同时存在 → 原生 `https.createServer`（该端口**仅 HTTPS**，不经反代直接暴露的形态）；缺失 → 纯 `http.createServer`（默认/反代形态）。启动日志新增 `tls` 字段明示当前模式，「server started」消息的协议改由实际监听协议得出（替换原先按 host 是否含 localhost 的猜测显示）。上游随仓库分发的**演示自签名证书一并删除**（仓库内提交私钥文件本身就是依赖卫生问题），使「证书存在」成为部署者的主动动作；`app/ssl/README.md` 重写、`docs/self-hosting.md` 新增「TLS 与部署形态」一节（两种形态、Docker 挂载路径 `/src/app/ssl/`、`TRUST_PROXY` 提示、getUserMedia 安全上下文提醒）。同端口 HTTP+HTTPS 双协议能力随依赖退役——文档已标注，需要双协议的场景交给反代。
+> - **#4b colors → 裸 ANSI 常量**（`logs.js`）：取零依赖取向。`ansi(code)` 工厂生成 yellow(33)/green(32)/red(31)/magenta(35)/cyan(36) 包装函数，输出与 colors@1.4 **逐字节一致**（同 SGR 开码 + `\x1b[39m` 默认前景关闭码）；`LOGS_COLORS=false` 时包装退化为恒等函数，对应原 `colors.disable()` 语义。`util.inspect` 的对象着色本就走其自带 `colors` 选项（`options.colors: LOGS_COLORS`），与 colors 库无关、行为不变。
+> - **核验**：:3100 HTTP 实例——页面 200、`/api/version` 正常、socket.io 经 websocket 传输握手成功、`tls: off`；:3101 HTTPS 实例（临时自签证书）——TLS 页面 200、websocket over TLS 握手成功、裸 HTTP 打 TLS 端口被拒（HTTPS-only 语义正确）、`tls: native`。核验后临时证书与辅助脚本均已删除。新增 `tests/test-logs.js` 第二个 describe：断言 `LOGS_COLORS=false` 时输出零 ANSI 转义、`true` 时出现与 colors@1.4 一致的 `\x1b[33m…\x1b[39m` 等着色序列（沿用既有「钉住 env 后重 require」模式）。
+
+**原始分析**（2026-10-25 评审，留档）：
 
 **现状**：两个事实上无上游维护的运行时依赖——`httpolyglot@0.1.2`（约 2017 年起无更新，仅 `server.js` 一处：同端口 HTTP+HTTPS 自适应）与 `colors@1.4.x`（仅 `app/src/logs.js` 一处：日志着色）。
 
