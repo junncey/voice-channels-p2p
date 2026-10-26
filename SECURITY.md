@@ -2,27 +2,52 @@
 
 ## Reporting a Vulnerability
 
-If you have discovered a security issue, please report it privately through [GitHub Security Advisories](https://github.com/miroslavpejic85/mirotalk/security/advisories/new).
-Please refrain from creating a public GitHub issue or disclosing the vulnerability publicly.
-We prefer a Coordinated Vulnerability Disclosure (CVD) to properly understand and fix the root cause problem.
+If you have discovered a security issue in **Voice Channels P2P**, please report it
+privately through [GitHub Security Advisories](https://github.com/junncey/voice-channels-p2p/security/advisories/new).
+Please refrain from creating a public issue or disclosing the vulnerability publicly.
 
-The advisory form guides you through the required details, so please describe the issue.
+We prefer a Coordinated Vulnerability Disclosure (CVD) so the root cause can be
+understood and fixed before details become public.
 
-A member of the security team will confirm the vulnerability, determine its impact, and develop a fix.
-The fix will be applied to the master branch, tested, and packaged in the next security release.
+When reporting, please include:
 
-Thanks in advance for your support to make our products safer!
+- affected version (`package.json` version or image tag) and commit if known;
+- deployment mode (Docker image `b1at-public/voice-channels`, or bare `node app/src/server.js`);
+- reproduction steps, and whether a TURN relay was in use;
+- any relevant server log excerpt with secrets removed.
+
+## Scope
+
+This repository is a derivative work of [MiroTalk P2P](https://github.com/miroslavpejic85/mirotalk)
+(AGPL-3.0). Video, screen sharing, whiteboard, file transfer and recording were
+removed; the signalling layer, channel store, admin API and the whole frontend were
+rewritten. In scope:
+
+- the Node.js server in `app/src/` (signalling, channel/admin API, chat persistence, audit trail);
+- the frontend in `public/`;
+- the Docker image built from this repository.
+
+If a defect is reproducible on upstream MiroTalk P2P **and** in this project because
+the code is inherited unchanged, it is good practice to also notify the upstream
+maintainers via <https://github.com/miroslavpejic85/mirotalk/security/advisories/new>.
+
+## Out of scope
+
+- Vulnerabilities in upstream code that this project no longer ships (video pipeline,
+  screen sharing, whiteboard, file transfer, recording, Whisper transcription, webhooks,
+  Kubernetes manifests).
+- Misconfiguration of a third-party TURN/coturn server operated outside this repository.
+- Findings that require a compromised host, browser extension, or physical access.
+- Reports produced solely by an automated scanner without a demonstrated impact.
+
+## Supported versions
+
+Only the latest release tag receives security fixes. Older tags are kept for
+reproducibility and rollback, not for backporting.
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
-We would like to extend our gratitude to the following individuals for their responsible disclosure of security vulnerabilities:
-
-| Name                | Contact                                                |
-| ------------------- | ------------------------------------------------------ |
-| `Vishal Shukla`     | [GitHub](https://github.com/shukla304)                 |
-| `Mutsumi Safe`      | [GitHub](https://github.com/nakasakisoyorin99-ship-it) |
-| `mansurmavlankulov` | [GitHub](https://github.com/mansurmavlankulov)         |
-
-Their dedication to security has contributed to the continuous improvement of our systems, ensuring the safety and privacy of our users and data.
+Thanks to everyone who reports issues responsibly. Reporters are credited here
+once a fix has been released, unless they prefer to stay anonymous.

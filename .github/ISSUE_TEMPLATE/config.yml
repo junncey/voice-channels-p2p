@@ -1,5 +1,8 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: "\U0001F64B Community Forum"
-    url: https://discord.gg/rgGYfeYW3N
-    about: Ask questions and get help from the community.
+  - name: "\U0001F512 Report a security vulnerability"
+    url: https://github.com/junncey/voice-channels-p2p/security/advisories/new
+    about: Report privately through GitHub Security Advisories. Do not open a public issue.
+  - name: "\U0001F4D6 Self-hosting and operations"
+    url: https://github.com/junncey/voice-channels-p2p/blob/main/docs/self-hosting.md
+    about: Deployment, reverse proxy, TURN and channel administration notes.

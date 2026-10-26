@@ -1,26 +1,29 @@
 name: "\U0001F680 Feature request"
-description: Suggest an idea for MiroTalk P2P
+description: Suggest an idea for Voice Channels P2P
 labels: ["feature-request"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for suggesting an idea to make MiroTalk P2P better.
+        Thanks for taking the time to suggest an improvement.
 
-        **Note**: the ultimate decision for implementing features lies on the MiroTalk team, not all feature requests shall be accepted.
+        **Note**: this is a personal fork maintained by one person. Feature requests are
+        weighed against the project scope — a persistent, audio-first channel service.
+        Video, screen sharing, whiteboard and file transfer were removed on purpose and
+        will not be reintroduced.
   - type: textarea
     attributes:
       label: Feature request
-      description: A clear and concise description of the feature request.
+      description: A clear and concise description of what you want.
     validations:
       required: true
   - type: textarea
     attributes:
-      label: Pros
-      description: A clear and concise description of the feature request pros.
+      label: Why it fits the scope
+      description: Who benefits, and why the existing behaviour is insufficient.
     validations:
       required: true
   - type: textarea
     attributes:
       label: Additional context
-      description: Add any other context about the feature request here.
+      description: Mockups, prior art, or links to related issues.
