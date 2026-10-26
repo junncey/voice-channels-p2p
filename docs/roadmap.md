@@ -1,6 +1,6 @@
 # 优化与新功能方向（Roadmap）
 
-> 整理日期：2026-10-24（最后同步 2026-10-25，第二轮评估：1–13 全部完成，新增 14–23）。各项「现状」在整理时均已核实当时代码中**不存在**对应实现；已完成项的「现状」段落保留原始核实记录，实现摘录附于标题上方。
+> 整理日期：2026-10-24（最后同步 2026-10-26：第二轮评估 1–13 全部完成、新增 14–23；15、17–20 已按拆分后代码复核现状并细化方案）。各项「现状」在整理时均已核实当时代码中**不存在**对应实现；已完成项的「现状」段落保留原始核实记录，实现摘录附于标题上方。
 >
 > 存量代码的结构/性能债（chatStore 写路径阻塞、scryptSync 异步化、大文件拆分、依赖替换）另见 `deferred-engineering.md`——那些是认可价值、择期再做，与本文件末尾「明确不做（边界）」不同。
 
@@ -157,15 +157,16 @@
 
 ### 15. 触屏消息操作条（缺陷修复）
 
-**现状**：回复/表情/编辑/撤回操作条由 `.msg:hover .msg-actions` 显示（`channel.css` 约 1629 行），而 `@media (pointer: coarse)` 块（约 1835 行）只覆盖了成员卡片（点按展开）；触屏设备上 hover 不可靠，这四个操作在移动端基本不可用。
+**现状**（2026-10-26 复核，CSS 拆分后原引用行号已迁移）：回复/表情/编辑/撤回操作条由 `.msg:hover .msg-actions, .msg:focus-within .msg-actions` 显示（`channel-messages.css` 约 105 行）；`:focus-within` 在触屏救不了场——操作条按钮本身 `display:none` 不可聚焦，多数消息行内没有可聚焦元素（唯一例外：带回应胶囊的行点胶囊会经焦点偶然唤出，非设计路径）。`@media (pointer: coarse)` 块（同文件约 326 行）只覆盖成员卡（`.member.open` 手风琴，`members.js` 点按切换、同列表互斥收起）。触屏上这四个消息操作基本不可用。
 
 **方案**：
 
-- 仿成员卡的 `open` 模式：`pointer: coarse` 下点按消息行切换 `.msg-actions` 显隐（或常驻一个「⋯」按钮）。
-- 可选长按唤出（`pointerdown` 计时 / `contextmenu`），注意与页面滚动手势区分（移动阈值取消）。
-- 点按目标区域需避开引用块点击跳转等既有行为。
+- 仿成员卡 open 模式：`pointer: coarse` 下常驻一个「⋯」小按钮，点按展开/收起操作条（整行点按会与引用块点击跳转、回应胶囊点击冲突，常驻小按钮更稳）；操作条由 `chat.js rowActionsNode()` 生成，展开逻辑在 buildMessage 一侧挂。
+- 展开态互斥（同时只开一条）+ 点空白收起，照抄成员卡既有行为。
+- 可选长按唤出（`pointerdown` 计时 + 移动阈值取消以区分滚动手势；`contextmenu` 在 Android 长按可用、iOS 需 preventDefault）。
+- 桌面 hover 路径不变：CSS 经 `@media (pointer: coarse)` 隔离，或 JS `matchMedia('(pointer: coarse)')` 分支绑定。
 
-**涉及**：`public/css/channel.css`、`public/js/core/chat.js`（事件绑定）、词典（如需提示文案）。
+**涉及**：`public/css/channel-messages.css`、`public/js/core/chat.js`（操作条与事件绑定）、词典（如需提示文案）。
 
 ### 16. 服务端全量消息搜索
 
@@ -181,38 +182,41 @@
 
 ### 17. 频道置顶/公告消息
 
-**现状**：chatStore/channelStore 均无 pin/公告概念（全库无对应字段）。
+**现状**（2026-10-26 复核）：channelStore/chatStore 仍无 pin/公告概念（全库无对应字段）。
 
 **方案**：
 
-- `channelStore` 频道字段加 `pinnedChat: { ts, name, text }`（主持人经 host API 设置/取消；也可做独立公告字符串，二选一）。
-- join 时随频道元数据或 `chatHistory` 事件下发，聊天面板顶部常驻一条可点击的置顶条，点击滚动定位原消息。
-- 被置顶消息被撤回/删除时置顶同步失效清空。
+- `channelStore` 频道字段加 `pinnedChat: { ts, name, text }`，接入照抄 `chatRetentionHours` 的全套模式（validateDefinition 校验、sanitize 透出、admin 编辑器）。设置/取消走 host REST `POST /api/host/:channelId/pin`（body 为消息定位 `{ts,name}` 或 null 清除；host JWT + verifyHost 资格复核，同 export 端点模式，`adminApi.js`）。
+- 下发：join 时随 `serverInfo` 顺带当前 pin（`signaling.js`，侵入最小）；变更后经 rooms 的频道 socket 表向房间广播 `chatPin` 实时同步（adminApi 已注入 rooms）。
+- 客户端聊天面板顶部常驻可点击置顶条：消息已加载则滚动定位（复用回复引用的定位+闪烁），未加载先经 `chatPage` 回拉到该 ts 再定位。
+- 失效联动：撤回命中所置顶行时同步清空并广播（`chatGateway` 的 chatDelete 处理器已注入 channelStore，顺带判定即可）；保留期裁剪把置顶行裁掉后 pin 悬空——点击回拉到头仍未命中则提示「原消息已删除」并自动解绑。
 
-**涉及**：`app/src/channelStore.js`、`app/src/server.js`、`public/js/pages/channel.js`、`public/js/core/chat.js`、`public/css/channel.css`、词典。
+**涉及**：`app/src/channelStore.js`（+回归测试）、`app/src/adminApi.js`、`app/src/signaling.js`、`app/src/chatGateway.js`（撤回联动）、`public/js/pages/channel.js`/`socketEvents.js`、`public/js/core/chat.js`、`public/css/channel-messages.css`、词典。
 
 ### 18. 成员进出系统消息（可开关）
 
-**现状**：成员进出只有音效与审计留痕（`audit.js`），聊天内无任何系统行；服务器是历史存储的 single writer，具备广播系统行的天然位置。
+**现状**（2026-10-26 复核）：进出仍只有音效与审计留痕（`audit.js` 的 join/leave/ghost 过期/踢人行）；拆分后广播点在 `signaling.js`（join 成功、主动 leave）与 `rooms.js`（`broadcastRemovePeer` 是 ghost 过期与踢出的统一出口）。服务器是历史存储 single writer，但系统行应刻意**不入 chat_history**（临时性信息，新进成员回看不重放——不持久化即天然满足）。
 
 **方案**：
 
-- 服务端在 join/leave（含 ghost 过期、踢出）向频道广播 `chatSystem` 行；**不写 chat_history**（临时性系统信息，新进成员回看历史时不重放），客户端渲染居中灰色小字。
-- 频道页设置加开关（默认关，防高频频道刷屏），存 `localStorage`。
+- 与 removePeer 广播同点 emit `chatSystem` `{ kind, name }`：join（`signaling.js`，chatHistory 下发之后）、主动 leave/kick、ghost 宽限过期（`rooms.js`）。
+- 关键坑：**挂点必须在「真正移除」的判定处**——ghost 宽限期内同 uuid resume 本就不广播 removePeer，挂对了 resume 天然不发「离开」；挂到断线事件上则会误发。
+- 客户端 `socketEvents.js` 监听 → `chat.js` 新增居中灰色小字系统行（纯本地渲染，不进消息数据结构、不占分页游标）。
+- 频道页设置开关（默认关，防高频频道刷屏），localStorage 新键（记得同步 AGENTS.md 键清单）。
 
-**涉及**：`app/src/server.js`、`public/js/core/chat.js`、`public/js/pages/channel.js`、词典。
+**涉及**：`app/src/signaling.js`、`app/src/rooms.js`、`public/js/pages/channel/socketEvents.js`、`public/js/core/chat.js`、`public/js/pages/channel/settings.js`、词典。
 
 ### 19. @全体成员（仅主持人）
 
-**现状**：@提及仅支持在线成员昵称补全，无「全体」概念（全库无 everyone/全体匹配）。
+**现状**（2026-10-26 复核）：提及高亮按在线成员名单（`chat.js mentionSegments` + 控制器注入的 `mentionNames`），@补全菜单在 `channel/composer.js`；`channel/notify.js` 按文本匹配自身昵称触发桌面通知/title 计数。无「全体」概念（词典亦无对应文案）。
 
 **方案**：
 
-- 主持人输入 @ 时补全列表追加「全体成员」项；渲染为特殊高亮样式。
-- 命中 @全体 时对全员触发桌面通知/提示音（复用 `vc_notify` 与提及命中路径）。
-- 防滥用：服务端 `chat` 校验时仅 host JWT 身份允许携带全体标记，游客发了按普通文本渲染。
+- 主持人输入 @ 时补全列表追加「全体成员」项（主持人身份前端自知：成员状态含 `peer_presenter`），渲染为区别于普通 mention 的高亮样式。
+- 防滥用的正确门控在**接收端**：实时消息走 DataChannel P2P，服务器碰不到实时文本——接收端按发送者的 `peer_presenter`（getRoomPeers 已随 serverInfo/addPeer 下发，按昵称在成员表反查，与提及高亮同套解析）门控渲染，非主持人发的 @全体按普通文本显示。服务端只在**存储路径**同步校验（chat 事件的发送者是否在 `presenters` 表，同 chatDelete 的判定方式），保证历史回放渲染一致，并供第 21 项 Web Push 的服务端 @ 检测复用。
+- 命中 @全体 时对全员触发桌面通知/提示音（`notify.js` 的 mentionsMe 扩展全体分支）。
 
-**涉及**：`public/js/pages/channel.js`、`public/js/core/chat.js`、`app/src/server.js`（校验）、词典。
+**涉及**：`public/js/pages/channel/composer.js`（补全）、`public/js/core/chat.js`（渲染门控）、`public/js/pages/channel/notify.js`、`app/src/chatGateway.js`（存储校验）、词典。
 
 ---
 
@@ -273,15 +277,16 @@
 
 ### 20. 主持人清空本频道聊天记录
 
-**现状**：只能整频道删除（admin）或逐条撤回；`chatStore` 已具备全量重写路径（保留裁剪/压缩时整文件重写），补一个清空 API 即可。
+**现状**（2026-10-26 复核）：只能整频道删除（admin）或逐条撤回；chatStore 全量重写已收敛到唯一入口 `save()`（tmp+rename，单文件 bind-mount 走内容拷贝），`reload()` 清内存缓存与 sweepState，restore 全量替换是现成先例——缺的只是面向单频道的清空方法与入口。
 
 **方案**：
 
-- host API `POST /api/host/:id/clear-chat`（host JWT + 主持人资格复核，同 export 模式），chatStore 全量重写为空（`reload()` 清内存缓存）。
-- 广播 `chatClear` 事件，在线成员清空视图并显示「主持人清空了聊天记录」提示行；审计留痕。
-- 前端入口在频道页主持人菜单，二次确认。
+- `chatStore.clear(id)`：清空行列表后过 `save()` 全量重写 + `reload()`；回归测试覆盖持久/临时房间、清空后再 append、与备份/恢复的先后交互。
+- REST：`POST /api/host/:channelId/clear-chat`（`adminApi.js`，host JWT + verifyHost 资格复核，同 export 模式）。
+- 广播 `chatClear`（adminApi 已注入 rooms 的频道 socket 表，直接向房间 emit）：在线成员清空消息视图与本地分页游标，显示「主持人清空了聊天记录」提示行（可与 18 的系统行渲染复用）。
+- 审计留痕（谁/何时/哪个频道，`audit.record`）；前端入口在频道页主持人区（「导出聊天」旁，`#exportChatBtn` 同款按主持人显隐），二次确认。
 
-**涉及**：`app/src/chatStore.js`（+回归测试）、`app/src/server.js`、`public/js/pages/channel.js`、词典。
+**涉及**：`app/src/chatStore.js`（+回归测试）、`app/src/adminApi.js`、`public/js/pages/channel.js`/`socketEvents.js`、词典。
 
 ---
 
