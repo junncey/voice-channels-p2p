@@ -301,8 +301,6 @@ class ChatStore {
             // whole history expired, first row ever, or unknown disk state
             // (e.g. a failed migration): one canonical write settles it
             this.save(id, entry);
-            entry.pendingDrop = 0;
-            entry.pendingDropTs = undefined;
             return message;
         }
         // O(1) path: pending prefix-drops ride as one replayable marker line,
@@ -343,6 +341,7 @@ class ChatStore {
      * every dropped row into entry.pendingDrop so the next drop marker (or
      * full rewrite) keeps the disk replay equal to memory — including drops
      * that happened on read paths (history/export), which never write.
+     * save() settles the accounting on every successful full rewrite.
      */
     trimEntry(entry, id, now = Date.now()) {
         const { dropped, lastTs } = this.prune(entry.messages, now, id);
@@ -564,6 +563,8 @@ class ChatStore {
                     }
                 }
                 entry.fileSize = 0;
+                entry.pendingDrop = 0;
+                entry.pendingDropTs = undefined;
                 return;
             }
             // shrink from the oldest end until the file fits its disk budget.
@@ -578,6 +579,10 @@ class ChatStore {
             }
             this.writeFile(id, entry.messages, lines);
             entry.fileSize = bytes;
+            // the file now mirrors memory, so any pending prefix-drop
+            // accounting is settled — every full rewrite must go through here
+            entry.pendingDrop = 0;
+            entry.pendingDropTs = undefined;
         } catch (err) {
             log.error('Chat history save failed', { channel: id, error: err.message });
         }
@@ -627,9 +632,7 @@ class ChatStore {
         const entry = this.channels.get(id); // peek only — never lazy-load here
         if (!entry) return;
         this.trimEntry(entry, id);
-        this.save(id, entry);
-        entry.pendingDrop = 0;
-        entry.pendingDropTs = undefined;
+        this.save(id, entry); // settles pendingDrop — disk mirrors memory now
     }
 
     /** Forget a channel entirely (room destroyed / admin delete / restore). */
@@ -681,9 +684,7 @@ class ChatStore {
                 continue;
             }
             if (!entry.messages.length || !(entry.fileSize > 0)) {
-                this.save(id, entry);
-                entry.pendingDrop = 0;
-                entry.pendingDropTs = undefined;
+                this.save(id, entry); // settles pendingDrop — disk mirrors memory now
             } else {
                 this.emitDropMarker(id, entry);
             }

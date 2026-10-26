@@ -183,6 +183,29 @@ describe('test-channelStore', () => {
             (await store.create({ id: 'ok-id3', name: 'n', maxParticipants: 1 })).ok.should.be.false();
         });
 
+        it('should not double-register on concurrent same-id creates (async scrypt window)', async () => {
+            const race = newStore('race');
+            // passwords force the async scrypt await: both calls pass the
+            // pre-checks before either pushes — only one may land
+            const [a, b] = await Promise.all([
+                race.create({ id: 'race', name: 'a', password: 'pw-a' }),
+                race.create({ id: 'race', name: 'b', password: 'pw-b' }),
+            ]);
+            [a, b].filter((r) => r.ok).length.should.equal(1);
+            race.exists('race').should.be.true();
+            const raw = JSON.parse(fs.readFileSync(race.filePath, 'utf8'));
+            raw.channels.filter((c) => c.id === 'race').length.should.equal(1);
+        });
+
+        it('should refuse update when the channel was removed mid-await', async () => {
+            const gone = newStore('upd-gone');
+            await gone.create({ id: 'mid', name: 'old', password: 'pw' });
+            const pending = gone.update('mid', { name: 'new', password: 'pw2' });
+            gone.remove('mid'); // lands while the update is still hashing
+            (await pending).ok.should.be.false();
+            gone.exists('mid').should.be.false();
+        });
+
         it('should update fields and keep blank-password hosts', async () => {
             await store.create({ id: 'upd', name: 'old', hosts: [{ username: 'bob', password: 'pw2' }] });
             const res = await store.update('upd', {

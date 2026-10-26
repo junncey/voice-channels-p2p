@@ -75,7 +75,19 @@ const trustProxy = config.server.trustProxy;
 //  - native HTTPS → operator mounts real certs at app/ssl/, port serves HTTPS only
 const keyPath = path.join(__dirname, '../ssl/key.pem');
 const certPath = path.join(__dirname, '../ssl/cert.pem');
-const nativeTls = fs.existsSync(keyPath) && fs.existsSync(certPath);
+const keyExists = fs.existsSync(keyPath);
+const certExists = fs.existsSync(certPath);
+if (keyExists !== certExists) {
+    // half-mounted certs are a misconfiguration, not the plain-HTTP default:
+    // silently serving HTTP would strand an HTTPS-expecting proxy upstream
+    log.error(
+        `Native TLS needs both app/ssl/key.pem and app/ssl/cert.pem — only ${
+            keyExists ? 'key.pem' : 'cert.pem'
+        } is present. Mount both for native HTTPS, or remove both to serve plain HTTP behind a TLS-terminating reverse proxy.`
+    );
+    process.exit(1);
+}
+const nativeTls = keyExists && certExists;
 const server = nativeTls
     ? https.createServer(
           {

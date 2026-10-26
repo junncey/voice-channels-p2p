@@ -655,14 +655,21 @@ class ChannelStore {
             return { ok: false, errors: [`channel id already exists: ${id}`] };
         }
 
-        // Hash every secret FIRST (async scrypt); the mutation + save below
-        // stays synchronous so concurrent API calls can never interleave
-        // between validation and persistence.
+        // Hash every secret FIRST (async scrypt) so the mutation + save below
+        // stays one synchronous section. The await yields the event loop, so
+        // the guards above must be re-checked before pushing — a double submit
+        // or retried request can slip an identical id past the pre-checks.
         const hostsInput = value.hosts || [];
         const [hostHashes, passwordHash] = await Promise.all([
             Promise.all(hostsInput.map((h) => (h.password ? hashPassword(h.password) : null))),
             value.password ? hashPassword(value.password) : null,
         ]);
+        if (this.channels.length >= MAX_CHANNELS) {
+            return { ok: false, errors: [`registry full (max ${MAX_CHANNELS} channels)`] };
+        }
+        if (this.exists(id)) {
+            return { ok: false, errors: [`channel id already exists: ${id}`] };
+        }
 
         const now = new Date().toISOString();
         const channel = {
@@ -704,6 +711,12 @@ class ChannelStore {
                 : null,
             value.password ? hashPassword(value.password) : null,
         ]);
+
+        // the await above yields the event loop — bail if a concurrent
+        // remove()/restore already dropped this channel from the registry
+        if (!this.channels.includes(channel)) {
+            return { ok: false, errors: [`channel not found: ${id}`] };
+        }
 
         if (value.name !== undefined) channel.name = value.name;
         if (value.description !== undefined) channel.description = value.description;

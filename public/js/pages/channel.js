@@ -52,9 +52,9 @@ const AVATAR_MAX_CHARS = 96 * 1024; // broadcast/storage cap for the avatar data
 const AVATARS_MAX = 100; // hard cap on remembered peer avatars (flood guard)
 
 const LOCK_SVG =
-    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
 const UNLOCK_SVG =
-    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.9-.7"/></svg>';
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>';
 
 // ---------------------------------------------------------------------------
 // shared state
@@ -456,6 +456,7 @@ Object.assign(x, {
     enableVoice: voice.enableVoice,
     reacquireMicOrToast: voice.reacquireMicOrToast,
     applySpeaker: voice.applySpeaker,
+    reapplyAllVolumes: voice.reapplyAllVolumes,
     applySink: settingsUi.applySink,
     refreshDeviceSelects: settingsUi.refreshDeviceSelects,
     savePeerVolume: settingsUi.savePeerVolume,
@@ -746,6 +747,7 @@ async function joinInner({ textOnly: asTextOnly }) {
     setOverlayBusy(true);
     micOn = !textOnly && !!localStream;
     voice.applyMicState(); // no socket yet — just refresh buttons; peer_audio goes in the join payload
+    voice.seedLastOnAir(); // baseline must match that payload, else the first mute toggle would not broadcast
 }
 
 function localLevelCb({ level }) {

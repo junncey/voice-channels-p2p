@@ -77,6 +77,11 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         mem.updateMicIconNode(s.selfUuid, live); // in-place: full re-renders kill a mid-drag volume slider
     }
 
+    /** Align the broadcast dedup baseline with the join payload's peer_audio — no emit. */
+    function seedLastOnAir() {
+        lastOnAir = onAir();
+    }
+
     // ----- self-deafen: mute every remote member at once (own mic unaffected) -----
 
     function toggleDeafen() {
@@ -403,6 +408,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         onMicBtnClick,
         setMic,
         applyMicState,
+        seedLastOnAir,
         resetPtt,
         toggleDeafen,
         applyDeafenState,

@@ -8,6 +8,8 @@ The server picks its protocol by certificate presence at startup:
   reverse proxy (nginx / caddy / traefik …) terminates TLS in front of the server.
 - **`app/ssl/key.pem` + `app/ssl/cert.pem` both present** — the port serves
   **HTTPS only** (native TLS, e.g. direct exposure without a proxy).
+- **Only one of the two files present** — startup fails fast with an error: a
+  half-mounted pair is a misconfiguration, not the plain-HTTP default.
 
 The demo self-signed certificate that upstream shipped here has been removed —
 generate or mount real certificates for the native-HTTPS form:
