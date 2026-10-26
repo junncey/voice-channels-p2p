@@ -8,7 +8,7 @@
         "start": "node app/src/server.js",
         "dev": "node --watch app/src/server.js",
         "test": "mocha tests/*.js --exit",
-        "lint": "eslint . && prettier --check .",
+        "lint": "eslint . && prettier --check . && node scripts/check-file-size.js",
         "format": "prettier --write .",
         "docker:build": "docker build --tag voice-channels:latest .",
         "docker:rmi": "docker images |grep '<none>' |awk '{print $3}' |xargs docker rmi",

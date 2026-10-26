@@ -1,0 +1,378 @@
+/* ============================================================
+   Channel page, part 3 — message lifecycle (edit / recall /
+   reactions), day separators, back-to-bottom pill, typing bar,
+   chat search, emoji picker, self-deafen, touch PTT, segmented
+   controls
+   ============================================================ */
+
+/* ============================================================
+   New: message lifecycle (edit / recall / reactions), day
+   separators, back-to-bottom pill, typing bar, chat search,
+   emoji picker, self-deafen, touch PTT, segmented controls
+   ============================================================ */
+
+/* day separator — a calendar line instead of a time chip */
+.chat-time.day {
+    font-weight: 600;
+    color: var(--text-2);
+    padding: 2px 10px;
+    letter-spacing: 0.04em;
+}
+
+/* recalled message tombstone */
+.msg.recalled .msg-bubble {
+    background: transparent;
+    border: 1px dashed var(--border);
+    box-shadow: none;
+}
+/* the tail diamond belongs to the filled bubble — on a transparent
+   tombstone it would float as a stray colored dot */
+.msg.recalled .msg-bubble::before,
+.msg.recalled .msg-bubble.img::before {
+    content: none;
+}
+.msg-text.tombstone {
+    color: var(--text-3);
+    font-style: italic;
+    font-size: 12.5px;
+}
+/* self bubbles recolor their text for the accent fill (.msg.self .msg-text,
+   plus the light-theme white override) — the transparent tombstone must win
+   back the muted color in both themes, so re-state it at matching weight
+   and AFTER those rules */
+.msg.recalled .msg-text {
+    color: var(--text-3);
+    font-style: italic;
+    font-size: 12.5px;
+}
+html[data-theme='light'] .msg.recalled .msg-text {
+    color: var(--text-3);
+}
+.msg.recalled .msg-quote {
+    opacity: 0.55;
+}
+
+/* "(edited)" marker after the text */
+.msg-edited {
+    margin-left: 6px;
+    font-size: 11px;
+    color: var(--text-3);
+    font-style: italic;
+    white-space: nowrap;
+}
+
+/* hover action cluster (reply / react / edit / recall) */
+.msg-actions {
+    position: absolute;
+    /* floats fully above the bubble — an inset top value would cover the
+       first text line of exactly the message being acted on. Horizontal
+       anchor is the message column (36px avatar + 10px gap): the row itself
+       stretches to the panel width, so right:6px would strand the cluster at
+       the far edge, away from a left-aligned message. */
+    top: -36px;
+    left: 46px;
+    display: none;
+    gap: 2px;
+    /* the wrapper's bottom edge stays FLUSH with the row's top and the
+       visible pill is drawn by ::before above it: the transparent 10px strip
+       is the hover bridge. Without it the pointer crosses dead space between
+       bubble and pill, :hover drops and the cluster snaps shut before the
+       mouse can reach it. The strip only covers the 10px inter-row gap, so
+       it never steals clicks from the row above. */
+    padding: 2px 2px 10px;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    z-index: 4;
+}
+
+/* the visible pill — excludes the bridge strip */
+.msg-actions::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 10px 0;
+    background: var(--bg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-s);
+    box-shadow: var(--shadow-1);
+    z-index: -1;
+}
+.msg.self .msg-actions {
+    left: auto;
+    /* mirror: above the self bubble's top-right corner */
+    right: 46px;
+}
+.msg:hover .msg-actions,
+.msg:focus-within .msg-actions {
+    display: inline-flex;
+}
+.msg-action-btn {
+    min-width: 24px;
+    height: 24px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+.msg-action-btn:hover {
+    background: var(--bg-3);
+    color: var(--text-1);
+}
+.msg-action-btn.danger:hover {
+    background: var(--danger-dim);
+    color: var(--danger);
+}
+
+/* reaction chips under a bubble */
+.msg-reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+}
+.msg-reaction {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    font-size: 12.5px;
+    color: var(--text-2);
+    cursor: pointer;
+    line-height: 1.4;
+}
+.msg-reaction:hover {
+    border-color: var(--accent);
+}
+.msg-reaction.mine {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+    color: var(--text-1);
+}
+.msg-reaction-count {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.msg.self .msg-reactions {
+    justify-content: flex-end;
+}
+
+/* back-to-bottom pill (hosted inside the composer, floats above it) */
+#chatComposer {
+    position: relative;
+}
+.chat-jump {
+    position: absolute;
+    bottom: 100%;
+    right: 16px;
+    margin-bottom: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--text-1);
+    font-size: 12px;
+    box-shadow: var(--shadow-1);
+    cursor: pointer;
+    z-index: 5;
+}
+.chat-jump:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* typing indicator above the composer */
+.typing-bar {
+    padding: 2px 4px 4px;
+    font-size: 12px;
+    color: var(--text-3);
+    min-height: 18px;
+}
+.typing-bar .dot {
+    animation: typingPulse 1.2s infinite ease-in-out;
+}
+@keyframes typingPulse {
+    0%,
+    100% {
+        opacity: 0.35;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
+/* edit bar rides the reply-bar styling with a neutral accent */
+.reply-bar.edit .reply-label {
+    color: var(--info);
+}
+
+/* chat search (panel head) */
+.chat-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.chat-search-input {
+    width: 180px;
+    padding: 5px 10px;
+    font-size: 12.5px;
+}
+.chat-search-count {
+    font-size: 11.5px;
+    color: var(--text-3);
+    white-space: nowrap;
+}
+.chat-search-btn.active {
+    color: var(--accent);
+}
+/* search filter: non-matching rows (and separators) hide */
+.chat-messages.searching .msg.miss,
+.chat-messages.searching .chat-time.miss {
+    display: none;
+}
+.chat-messages.searching .msg.hit .msg-bubble {
+    border-color: var(--accent-dim);
+}
+
+/* emoji picker popover */
+.emoji-picker {
+    position: fixed;
+    z-index: 60;
+    display: grid;
+    grid-template-columns: repeat(6, 34px);
+    gap: 2px;
+    padding: 8px;
+    border-radius: var(--radius-m);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-1);
+}
+.emoji-picker-item {
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    font-size: 19px;
+    line-height: 1;
+    cursor: pointer;
+}
+.emoji-picker-item:hover {
+    background: var(--bg-3);
+}
+
+/* self-deafen (voice controls + member badge) */
+#deafenBtn.on {
+    background: var(--danger-dim);
+    color: var(--danger);
+    border-color: var(--danger);
+}
+.member-deafen {
+    display: none;
+    color: var(--warn);
+    line-height: 0;
+}
+.member-deafen.on {
+    display: inline-flex;
+}
+
+/* "listen together" sound share (voice controls + member badge) */
+#shareSoundBtn.on {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.member-share {
+    display: none;
+    color: var(--accent);
+    line-height: 0;
+}
+.member-share.on {
+    display: inline-flex;
+}
+
+/* touch push-to-talk button */
+.ptt-hold-btn {
+    height: 54px;
+    border-radius: var(--radius-m);
+    border: 1px solid var(--accent);
+    background: var(--bg-2);
+    color: var(--text-1);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+.ptt-hold-btn.active {
+    background: var(--accent);
+    color: #08281b;
+    box-shadow: 0 0 0 4px var(--accent-dim);
+}
+
+/* touch fallback: a tapped member card reveals the hover-only controls */
+@media (pointer: coarse) {
+    .member {
+        cursor: pointer;
+    }
+    .member.open .member-actions,
+    .member.open .member-volume {
+        display: flex;
+    }
+    .member-actions {
+        flex: 1 0 100%;
+    }
+}
+
+/* continuous speaking ring — the avatar glow breathes with --lvl (0..1) */
+.member {
+    --lvl: 0;
+}
+.member.speaking .member-avatar {
+    box-shadow:
+        0 0 0 2px var(--bg-1),
+        0 0 0 calc(3px + var(--lvl, 0) * 3px) var(--accent),
+        0 0 calc(10px + var(--lvl, 0) * 22px) var(--accent-glow);
+}
+
+/* segmented control (settings: theme + language) */
+.segmented {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+}
+.segment {
+    padding: 6px 14px;
+    border: 0;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition:
+        background var(--speed) var(--ease),
+        color var(--speed) var(--ease);
+}
+.segment + .segment {
+    border-left: 1px solid var(--border-soft);
+}
+.segment:hover {
+    color: var(--text-1);
+}
+.segment.active {
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-weight: 600;
+}

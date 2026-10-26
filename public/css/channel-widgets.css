@@ -1,0 +1,653 @@
+/* ============================================================
+   Channel page, part 2 — settings modal (audio / devices /
+   appearance / avatar), custom dropdowns, operation sounds,
+   join overlay, responsive breakpoints, light theme overrides,
+   reply composer bar + @mention autocomplete
+   ============================================================ */
+
+/* ---------- audio settings modal ---------- */
+
+.settings-modal {
+    max-width: 520px;
+    max-height: min(680px, 92dvh);
+    display: flex;
+    flex-direction: column;
+}
+
+.settings-body {
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-right: 4px;
+}
+
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-m);
+    background: var(--bg-2);
+}
+
+.settings-section > h3 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-2);
+}
+
+.settings-section .field {
+    margin-bottom: 0;
+}
+
+.settings-section .btn {
+    align-self: flex-start;
+}
+
+/* custom avatar picker row (settings modal) */
+.avatar-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.avatar-preview {
+    width: 48px;
+    height: 48px;
+    flex: 0 0 auto;
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 18px;
+    color: #fff;
+    border: 1px solid var(--border);
+}
+
+.avatar-preview .member-avatar {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+}
+
+.avatar-preview img.member-avatar {
+    border-radius: 12px;
+}
+
+.avatar-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.level-meter {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-3);
+    overflow: hidden;
+}
+
+#settingsMicBar {
+    height: 100%;
+    width: 0%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+    transition: width 0.1s linear;
+}
+
+.switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13.5px;
+    cursor: pointer;
+}
+
+.switch {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    width: 40px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    position: relative;
+    cursor: pointer;
+    transition:
+        background var(--speed) var(--ease),
+        border-color var(--speed) var(--ease);
+    margin: 0;
+}
+
+.switch::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-2);
+    transition:
+        transform var(--speed) var(--ease),
+        background var(--speed) var(--ease);
+}
+
+.switch:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.switch:checked::after {
+    transform: translateX(18px);
+    background: #08281b;
+}
+
+/* disabled by music mode — the mode owns the underlying capture constraint */
+.switch:disabled,
+.switch-row:has(.switch:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.settings-hint {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+/* ---------- custom dropdown (device pickers) ---------- */
+
+.dropdown-root {
+    display: flex;
+}
+
+.dropdown-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--text-1);
+    text-align: left;
+    font-size: 14px;
+    transition: border-color var(--speed) var(--ease);
+}
+
+.dropdown-trigger:hover:not(:disabled),
+.dropdown-trigger[aria-expanded='true'] {
+    border-color: var(--accent);
+}
+
+.dropdown-trigger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.dropdown-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dropdown-chevron {
+    flex: 0 0 auto;
+    display: inline-flex;
+    color: var(--text-3);
+    transition: transform var(--speed) var(--ease);
+}
+
+.dropdown-trigger[aria-expanded='true'] .dropdown-chevron {
+    transform: rotate(180deg);
+}
+
+.dropdown-menu {
+    position: fixed;
+    z-index: 260;
+    margin: 0;
+    padding: 6px;
+    list-style: none;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow-1);
+    max-height: 262px;
+    overflow-y: auto;
+    animation: fade-in 0.12s var(--ease);
+}
+
+.dropdown-option {
+    padding: 8px 12px;
+    border-radius: var(--radius-s);
+    font-size: 13.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dropdown-option:hover,
+.dropdown-option.active {
+    background: var(--bg-3);
+}
+
+.dropdown-option.selected {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.volume-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13.5px;
+}
+
+.volume-row input[type='range'] {
+    flex: 1;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.volume-val {
+    flex: 0 0 auto;
+    min-width: 40px;
+    text-align: right;
+    font-size: 12.5px;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+}
+
+#testMicBtn.recording {
+    border-color: var(--danger);
+    color: var(--danger);
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* ---------- operation sounds (settings modal) ---------- */
+
+/* one shared grid for all event rows (row wrappers are display:contents) so
+   every row's dropdown starts at the same x and spans the same width whatever
+   the label lengths; the name column floors at the widest label, the pick
+   column is what compresses on narrow screens (down to 96px, 210px cap) */
+.sound-event-list {
+    display: grid;
+    grid-template-columns: auto minmax(min-content, 1fr) minmax(96px, 210px) auto;
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 8px;
+}
+
+.sound-event {
+    display: contents;
+}
+
+.sound-event-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13.5px;
+}
+
+.sound-event.off > .sound-event-name,
+.sound-event.off > .sound-event-pick,
+.sound-event.off > .sound-preview-btn {
+    opacity: 0.45;
+}
+
+.sound-preview-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+}
+
+.sound-event-pick {
+    min-width: 0;
+    display: flex;
+}
+
+.sound-event-pick .dropdown-trigger {
+    padding: 6px 10px;
+    font-size: 13px;
+}
+
+/* ---------- join overlay ---------- */
+
+.join-card {
+    text-align: center;
+}
+
+.join-channel-name {
+    color: var(--text-2);
+    margin-bottom: 14px;
+    font-size: 13px;
+}
+
+.join-card .field {
+    text-align: left;
+}
+
+.join-error {
+    min-height: 18px;
+    font-size: 12.5px;
+    color: var(--danger);
+    margin-bottom: 10px;
+}
+
+.join-btn {
+    width: 100%;
+    padding: 11px;
+    font-size: 15px;
+}
+
+.join-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.join-alt {
+    flex: 1;
+    font-size: 12.5px;
+    padding: 7px;
+}
+
+#hostReadyHint {
+    margin: 0 0 12px;
+}
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 860px) {
+    .channel-layout {
+        flex-direction: column;
+        padding: 10px;
+        gap: 10px;
+    }
+
+    .voice-panel {
+        flex: 0 0 auto;
+        max-height: 42vh;
+    }
+
+    .member-list {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        align-content: start;
+    }
+
+    .channel-titles p {
+        display: none;
+    }
+
+    .channel-actions #copyLinkBtn span {
+        display: none;
+    }
+
+    .msg {
+        max-width: 96%;
+    }
+}
+
+/* pending image thumbnails live INSIDE the composer box, above the input line */
+.chat-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 4px 2px 2px;
+}
+
+.chat-attachment {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-s);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+}
+
+.chat-attachment img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.chat-attachment-remove {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 18px;
+    height: 18px;
+    font-size: 11px;
+    line-height: 18px;
+    text-align: center;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 0 0 0 var(--radius-s);
+}
+
+.chat-attachment-remove:hover {
+    background: var(--danger);
+    color: #2b0a09;
+}
+
+/* send button split (QQ style): 发送 + caret opening the send-key menu */
+
+.send-btn-wrap {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.send-btn-group {
+    display: flex;
+}
+
+.send-btn-wrap .send-btn {
+    border-radius: var(--radius-s) 0 0 var(--radius-s);
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+.send-caret-btn {
+    border-radius: 0 var(--radius-s) var(--radius-s) 0;
+    padding: 0 5px;
+    border-left: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+.send-caret-btn svg {
+    transition: transform var(--speed) var(--ease);
+    transform: rotate(180deg);
+}
+
+.send-caret-btn.open svg {
+    transform: none;
+}
+
+/* send-key options floating above the button */
+
+.send-key-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    min-width: 220px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    z-index: 40;
+}
+
+.send-key-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius-s);
+    font-size: 13px;
+    color: var(--text-1);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.send-key-option:hover {
+    background: var(--bg-3);
+}
+
+.send-key-option input {
+    display: none;
+}
+
+.option-check {
+    flex: 0 0 16px;
+    text-align: center;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 14px;
+}
+
+.send-key-option input:checked + .option-check::before {
+    content: '✓';
+}
+
+/* ---------- light theme overrides ---------- */
+
+/* frosted header follows the light panel color */
+html[data-theme='light'] .channel-header {
+    background: rgba(255, 255, 255, 0.85);
+}
+
+/* self bubbles are QQ blue with white text; the image-bubble variant keeps
+   its own (higher-specificity) text-1 rule and needs no change */
+html[data-theme='light'] .msg.self .msg-text {
+    color: #fff;
+}
+
+html[data-theme='light'] .switch:checked::after {
+    background: #fff;
+}
+
+html[data-theme='light'] .chat-attachment-remove:hover {
+    color: #fff;
+}
+
+/* ---------- reply composer bar + @mention autocomplete menu ---------- */
+
+.composer-wrap {
+    position: relative;
+}
+
+/* active reply context pinned above the input (QQ style) */
+.reply-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    margin-bottom: 6px;
+    border-left: 3px solid var(--accent);
+    background: rgba(127, 127, 127, 0.12);
+    border-radius: 4px;
+    font-size: 12.5px;
+    min-width: 0;
+}
+
+.reply-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.reply-label {
+    color: var(--accent);
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.reply-text {
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.reply-cancel {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-3);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    flex: 0 0 auto;
+}
+
+.reply-cancel:hover {
+    color: var(--danger);
+}
+
+/* member autocomplete, anchored above the composer */
+.mention-menu {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    min-width: 180px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: 4px;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+}
+
+.mention-item {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-1);
+    text-align: left;
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.mention-item.active {
+    background: var(--accent-dim);
+    color: var(--accent);
+}
+
+.mention-at {
+    color: var(--accent);
+    font-weight: 700;
+}

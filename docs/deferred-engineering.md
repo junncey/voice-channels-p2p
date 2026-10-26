@@ -2,7 +2,7 @@
 
 > 整理日期：2026-10-26。来源：2026-10-25「工程质量优化」批次（正确性修复 + 去重 + 测试补充 + ESLint/CI 工具链，194 passing）。该批次评审时识别出以下问题，**有意未在本批处理**——它们需要独立设计、基准验证或部署形态确认，不适合搭车混入行为修复。各项「现状」均已对照当时代码核实（含文件与行号）。
 
-与 `roadmap.md` 的关系：本文件聚焦**存量代码的结构/性能债**，roadmap 聚焦功能方向；第 3 项与 roadmap #13（`channel.js` 模块拆分，部分完成）直接衔接。roadmap 末尾「明确不做（边界）」中的方向**永远不会做**，本文件各项则是**认可价值、择期再做**。
+与 `roadmap.md` 的关系：本文件聚焦**存量代码的结构/性能债**，roadmap 聚焦功能方向；第 3 项与 roadmap #13（`channel.js` 模块拆分）直接衔接，现已**一并完成**（#13 转 ✅ 全量完成）。roadmap 末尾「明确不做（边界）」中的方向**永远不会做**，本文件各项则是**认可价值、择期再做**（当前仅剩第 4 项）。
 
 ## 总览
 
@@ -10,7 +10,7 @@
 | --- | ------------------------------------------------------ | -------- | ---- | ------ | -------------------------- |
 | 1   | ✅ chatStore 写路径与 sweep 的阻塞改造（已实施，见下） | 性能     | 高   | 中大   | 设计评审 + 基准验证        |
 | 2   | ✅ scryptSync 异步化（已实施，见下）                   | 稳定性   | 中   | 小中   | 无（按 IP 节流已部分缓解） |
-| 3   | server.js / channel.js 大文件拆分                      | 可维护性 | 中   | 大     | 建议配合一轮功能冻结期     |
+| 3   | ✅ 大文件拆分 + 行数预算规则（已实施，见下）           | 可维护性 | 高   | 大     | ~~建议配合一轮功能冻结期~~ |
 | 4   | httpolyglot / colors 依赖替换                          | 依赖卫生 | 低   | 小     | 确认部署形态（#4a）        |
 
 ---
@@ -80,7 +80,21 @@
 
 **验收**：全量回归绿；新增压力用例——并发 N 个错误密码 join 期间，`/api/version` 仍能在阈值内响应（证明校验不再独占事件循环）。
 
-## 3. server.js / channel.js 大文件拆分
+## 3. 大文件拆分 + 行数预算规则 —— ✅ 已实施（2026-10-26）
+
+> **实施记录**：范围在原方案（server.js / channel.js）基础上扩大为**全部超预算源文件**（用户指令），并新增**行数预算规则**防止回弹。全部验收项达成（212 passing、lint 三件套绿、`#debug` 钩子浏览器实测可用）。
+>
+> **最终形态**：
+>
+> - **规则（防回弹）**：所有 JS 文件 ≤1000 行（ESLint `max-lines`，`eslint.config.js`，CI 同款 `npm run lint` 强制）；所有 CSS 文件 ≤1000 行（`scripts/check-file-size.js`，并入 `npm run lint`）。超预算必须拆分，CSS 拆分须按段落切、以 `<link>` 顺序保持级联次序。
+> - **server.js 2319 → 620 行**，按域拆为 5 个模块：`rooms.js`（房间状态 + 会话/幽灵生命周期 + 房间收发助手，工厂注入 stores）、`chatGateway.js`（chat/chatPage/chatEdit/chatDelete/chatReact 五处理器 + 限流守卫 + 图片批次组装，即原方案首选切口）、`signaling.js`（join/addPeer/relaySDP/relayICE/roomAction/peer* 协议处理器 + join 防爆破）、`adminApi.js`（/api/admin/* + /api/host/* REST + 备份/恢复 + 定时备份，即原方案次选切口）、`payload.js`（sanitizeExceptSecrets/sanitizeChannelPayload/toJson 共享工具）。server.js 只留装配：express/io/TURN/stores/中间件/页面路由/公共 API。
+> - **channel.js 3461 → 932 行**，按 roadmap #13 既定方向拆出 8 个 `js/pages/channel/` 子模块：`recovery.js`（恢复阶梯 + path monitor + 丢包徽章 + relay upgrade + 断连横幅，五张 per-peer Map 与清理点收敛为 `forgetPeer`/`resetForTeardown`）、`members.js`（成员列表 UI + 名册同步 + 主持人操作）、`voice.js`（麦克风/PTT/增益管线/远端播放）、`settings.js`（设置弹窗 + 设备 + 外观 + 头像）、`composer.js`（回复/编辑/typing/@补全/发送/图片托盘/搜索）、`notify.js`（未读角标 + 桌面通知）、`hostAuth.js`（主持人登录 + 频道密码持久化）、`socketEvents.js`（socket 事件装配 + 历史分页）。控制器只留共享状态与装配；`#debug` 钩子保持在入口文件尾（快照字段与 debug.js 完全对齐）。
+> - **联动拆分**：`chat.js` 1115 → 996 行（emoji 调色板/正则/选择器 → `core/emoji.js`）；`channel.css` 1902 → 883 + 653 + 378 行（`channel.css` / `channel-widgets.css` / `channel-messages.css`，**连续段落切分**保证级联次序与单文件时代完全一致，channel.html 按序引用）。
+> - **拆分模式（前端）**：子模块工厂 + 两件共享件——`s`（对控制器可重赋值 `let` 的 get/set 存取器，消除闭包快照失效）与 `x`（晚绑定跨模块调用面，装配完成后统一 `Object.assign` 填充，天然解模块间环）。移动纪律：函数体逐字保留，仅把共享 `let` 改为 `s.*`、跨模块调用改为 `x.*`/`mem.*`/`rec.*` 属性访问；ESLint `no-undef` 兜底抓漏改的裸引用（`x.*`/`s.*` 属性名由人工核对 + 浏览器 smoke 覆盖）。
+>
+> **回归与核验**：mocha 212 passing（含 test-server 信令集成，拆分零行为差异）；`npm run lint`（eslint max-lines + prettier + CSS 预算）全绿；全部新模块过 `.mjs` 语法检查；:3100 实例浏览器 smoke——页面渲染/自动加入/成员卡、`requestSubmit` 发消息、设置弹窗（4 滑杆/12 开关/设备下拉）、刷新后历史回落（socketEvents + chatStore 端到端）、`__vcDebug()`/`__vcStats()` 探针含 recovery 状态全部实测通过。
+
+**原始分析**（2026-10-25 评审，留档）：
 
 **现状**：`app/src/server.js` 2317 行、`public/js/pages/channel.js` 3461 行，两者约占全部 JS+CSS 的 38%。2026-10-25 批次做了**内部**收敛（`limits.js` 常量单一来源、`roomSender` 公共前导、`makeRateGuard` 限流工厂、`collectBackupEntries` 备份条目、前端 `toast`/`validReply`/`DATA_URL_RE` 去重），但文件量级未变。`channel.js` 的前一轮拆分（roadmap #13）只移出了 wakeLock 与 debug 钩子。
 

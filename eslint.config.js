@@ -10,10 +10,13 @@ const js = require('@eslint/js');
 const globals = require('globals');
 
 // shared rule set: recommended + a strict unused check (dead exports and
-// leftovers are exactly what crept in before this config existed)
+// leftovers are exactly what crept in before this config existed) + a file
+// size budget so the codebase cannot regrow thousand-line monoliths
+// (stylesheets have the same budget via scripts/check-file-size.js)
 const rules = {
     ...js.configs.recommended.rules,
     'no-unused-vars': ['error', { args: 'none', caughtErrors: 'none' }],
+    'max-lines': ['error', { max: 1000, skipBlankLines: false, skipComments: false }],
 };
 
 module.exports = [

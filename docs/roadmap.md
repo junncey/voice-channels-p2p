@@ -20,7 +20,7 @@
 | 10  | 一键备份 / 聊天记录导出          | 运维管理 | 中   | 小     | ✅ 2026-10-25         |
 | 11  | 每频道聊天保留时长               | 运维管理 | 中   | 小     | ✅ 2026-10-25         |
 | 12  | 信令层集成测试                   | 工程质量 | 高   | 中     | ✅ 2026-10-25         |
-| 13  | `channel.js` 模块拆分            | 工程质量 | 中   | 中     | ✅ 2026-10-25（部分） |
+| 13  | `channel.js` 模块拆分            | 工程质量 | 中   | 中     | ✅ 2026-10-26（全量） |
 | 14  | 「一起听」分享系统声音           | 语音功能 | 高   | 中     | ✅ 2026-10-25         |
 | 15  | 触屏消息操作条（缺陷修复）       | 移动端   | 高   | 小     | —                     |
 | 16  | 服务端全量消息搜索               | 聊天体验 | 高   | 中     | —                     |
@@ -306,9 +306,11 @@
 
 **涉及**：`tests/test-server.js`（新）、`app/src/server.js`（可能需要把宽限时常量提为可注入）。
 
-### 13. `channel.js` 模块拆分 ✅ 2026-10-25 部分完成
+### 13. `channel.js` 模块拆分 ✅ 2026-10-26 全量完成
 
-**实现**：新建 public/js/pages/channel/ 子目录，wake lock（createWakeLock，含 visibilitychange 自管理）与 #debug 检查钩子（installDebugHooks + 活快照 getter）各成独立 ES Module；channel.js 从 3140 行降至约 2970 行。信令恢复/成员 UI/音频管线仍在主文件——继续拆分随功能开发逐步推进。
+**实现**：新建 public/js/pages/channel/ 子目录，wake lock（createWakeLock，含 visibilitychange 自管理）与 #debug 检查钩子（installDebugHooks + 活快照 getter）各成独立 ES Module；channel.js 从 3140 行降至约 2970 行。
+
+**全量完成（2026-10-26）**：channel.js 3461 → 932 行，信令恢复状态机（recovery.js）、成员列表（members.js）、语音控制（voice.js）、设置面板（settings.js）、聊天输入区（composer.js）、通知（notify.js）、主持人登录（hostAuth.js）、socket 事件装配（socketEvents.js）全部成子模块；控制器只留共享状态（经 `s` 存取器暴露）与装配（跨模块调用经晚绑定 `x` 面）。详见 `docs/deferred-engineering.md` 第 3 项实施记录（含 server.js 同批拆分与 ≤1000 行预算规则）。
 
 **现状**：`public/js/pages/channel.js` 已达约 2700 行，信令恢复、UI 渲染、音频管线、聊天逻辑、调试钩子全部在一个文件里，每次加功能都在加剧。
 

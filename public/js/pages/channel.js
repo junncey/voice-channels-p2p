@@ -1,17 +1,30 @@
-/**
- * Channel page controller — voice (left) + text chat (right).
- *
- * Audio settings (gear button): mic/speaker device pickers, browser audio
- * processing toggles, push-to-talk (hold V), mic level meter, speaker volume
- * and mic/speaker test, operation sound effects (public/js/core/sound.js).
- * Images travel over the chat DataChannel in chunks (public/js/core/images.js)
- * and can be pasted straight from the clipboard.
- */
+/*
+Channel page controller — assembly + shared state.
+
+Holds the page-wide mutable state (socket/mesh/hub/chat, session identity,
+streams — exposed to the submodules via the `s` accessor object) and the
+late-bound cross-module surface `x`, then wires the submodules of
+js/pages/channel/ together:
+
+  recovery.js      media/signaling self-healing ladder + path monitor
+  members.js       member list UI + roster sync + host moderation
+  voice.js         mic/deafen/PTT controls + audio pipeline + playback
+  settings.js      settings modal (devices/volumes/appearance/avatar)
+  composer.js      chat composer (reply/edit/typing/mention/images)
+  notify.js        unread title badge + @mention notifications
+  hostAuth.js      host login + channel-password persistence
+  socketEvents.js  socket.io event wiring + chat history pagination
+
+The controller keeps the join flow, the mesh callbacks, page lifecycle
+(leave/teardown/overlays) and the #debug probes (installed at the file
+tail, per project convention).
+*/
 
 import { api } from '/js/core/api.js';
 import { Mesh } from '/js/core/webrtc.js';
 import { AudioHub, getTestBeepUrl } from '/js/core/audio.js';
-import { initChat, openEmojiPicker, escapeRegExp, validReply } from '/js/core/chat.js';
+import { initChat, escapeRegExp, validReply } from '/js/core/chat.js';
+import { openEmojiPicker } from '/js/core/emoji.js';
 import { fileToImageMessage, sendImageData, createImageReceiver, DATA_URL_RE } from '/js/core/images.js';
 import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t, getLang, setLang } from '/js/core/i18n.js';
@@ -21,32 +34,30 @@ import { getThemePref, setThemePref } from '/js/core/theme.js';
 import { createWakeLock } from '/js/pages/channel/wakeLock.js';
 import { createShareSound } from '/js/pages/channel/share.js';
 import { installDebugHooks } from '/js/pages/channel/debug.js';
+import { createRecovery } from '/js/pages/channel/recovery.js';
+import { createMembers } from '/js/pages/channel/members.js';
+import { createVoice } from '/js/pages/channel/voice.js';
+import { createSettings } from '/js/pages/channel/settings.js';
+import { createComposer } from '/js/pages/channel/composer.js';
+import { createNotify } from '/js/pages/channel/notify.js';
+import { createHostAuth, loadHostToken, loadChannelPw } from '/js/pages/channel/hostAuth.js';
+import { createSocketEvents } from '/js/pages/channel/socketEvents.js';
 import { $, el, avatarColor, randomNick, copyText, toast } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
-const HOST_TOKEN_PREFIX = 'vc_host_token_';
-const CHANNEL_PW_PREFIX = 'vc_chan_pw_';
-const SEND_KEY_STORE = 'vc_send_key'; // 'enter' (default) | 'ctrlEnter'
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
 const PEER_VOLUMES_KEY = 'vc_peer_volumes';
 const AVATAR_KEY = 'vc_avatar';
 const AVATAR_MAX_CHARS = 96 * 1024; // broadcast/storage cap for the avatar data URL
 const AVATARS_MAX = 100; // hard cap on remembered peer avatars (flood guard)
-const PTT_KEY_CODE = 'KeyV';
 
-const MIC_ON_SVG =
-    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
-const MIC_OFF_SVG =
-    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 1.16-.29 2.26-.8 3.22"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
 const LOCK_SVG =
-    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
 const UNLOCK_SVG =
-    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>';
-const VOL_SVG =
-    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.9-.7"/></svg>';
 
 // ---------------------------------------------------------------------------
-// state
+// shared state
 // ---------------------------------------------------------------------------
 
 const channelId = (() => {
@@ -78,6 +89,31 @@ const defaultAudioSettings = {
 // the mode's default (192 / 64), after which it stays hand-tunable.
 const BITRATE_MIN = 24;
 const BITRATE_MAX = 256;
+
+function loadAudioSettings() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY) || '{}');
+        const merged = { ...defaultAudioSettings, ...stored };
+        // pre-slider music-mode users never stored a bitrate — keep their 192k
+        // ceiling instead of silently dropping them to the voice default
+        if (stored.opusBitrate === undefined && merged.musicMode) merged.opusBitrate = 192;
+        return merged;
+    } catch {
+        return { ...defaultAudioSettings };
+    }
+}
+
+// per-user volumes, keyed by display name so they survive reconnects,
+// page reloads and follow the same person into other channels
+function loadPeerVolumes() {
+    try {
+        return JSON.parse(localStorage.getItem(PEER_VOLUMES_KEY)) || {};
+    } catch {
+        return {};
+    }
+}
+
+const peerVolumes = loadPeerVolumes();
 
 /** Opus caps for the mesh (passed as getOpusFmtp — read at every SDP round). */
 function opusFmtp() {
@@ -112,46 +148,146 @@ let joined = false;
 let intentionalUnload = false;
 let textOnly = false;
 let micOn = false;
-let pttActive = false;
 let deafened = false; // self-deafen: silence every remote member locally
-let lastOnAir = false; // last peerStatus(audio) we broadcast
-let lastDeafenSent = null; // last peerStatus(deafen) we broadcast
 let isPresenter = false;
 let joinLockOn = false;
 let localStream = null;
 let rawMicStream = null; // straight from getUserMedia, before the input gain
-let micProcessed = false; // outgoing track comes from the gain pipeline
-let hostToken = loadHostToken();
+let hostToken = loadHostToken(channelId);
 // channel join password: pre-filled from storage for the auto-join path,
 // otherwise taken from the overlay input at join time
 let channelPassword = '';
-// composer send key preference (QQ style): Enter or Ctrl+Enter sends, the
-// other combinations insert a newline
-let sendKey = localStorage.getItem(SEND_KEY_STORE) === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
-// the server replays the persisted chat history on EVERY join (reconnects
-// included) — only the first block of a page load is ever rendered
-let chatHistorySeen = false;
-// scroll-up pagination for that history: cursor = ts of the oldest row we
-// already have, hasMore mirrors the server's report, loading guards the
-// single in-flight chatPage request
-let historyCursor = null;
-let historyHasMore = false;
-let historyLoading = false;
-// mirror of chat.js nearBottom(): fetch one page before hitting the top
-const CHAT_LOAD_THRESHOLD = 80;
 
-// ----- media self-healing (see the recovery engine section below) -----
-const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated }
-let recoveryScanTimer = null;
-let b1Attempts = 0; // automatic signaling reconnects since the last stable period
-let b1InFlight = false;
-let b1Timer = null;
-let b1ResetTimer = null;
-let selfReconnecting = false; // suppress the "disconnected" toast on our own B1 reconnect
-// transport-level drops (VPN switch, network flap) usually reconnect within a
-// couple of seconds — hold the "disconnected" toast until it sticks
-const DISCONNECT_TOAST_MS = 3000;
-let disconnectToastTimer = null;
+/** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
+const members = new Map();
+const audioEls = new Map(); // peerId -> HTMLAudioElement (fallback playback path)
+/** display name -> custom avatar data URL (validated) */
+const avatars = new Map();
+let selfAvatar = safeAvatarUrl(localStorage.getItem(AVATAR_KEY));
+
+// Live view of the shared `let` state for the submodules: closures capture
+// bindings, property reads stay fresh across reassignments.
+const s = {
+    get channelMeta() {
+        return channelMeta;
+    },
+    set channelMeta(v) {
+        channelMeta = v;
+    },
+    get socket() {
+        return socket;
+    },
+    set socket(v) {
+        socket = v;
+    },
+    get mesh() {
+        return mesh;
+    },
+    set mesh(v) {
+        mesh = v;
+    },
+    get hub() {
+        return hub;
+    },
+    set hub(v) {
+        hub = v;
+    },
+    get chat() {
+        return chat;
+    },
+    set chat(v) {
+        chat = v;
+    },
+    get selfName() {
+        return selfName;
+    },
+    set selfName(v) {
+        selfName = v;
+    },
+    get selfUuid() {
+        return selfUuid;
+    },
+    set selfUuid(v) {
+        selfUuid = v;
+    },
+    get joined() {
+        return joined;
+    },
+    set joined(v) {
+        joined = v;
+    },
+    get intentionalUnload() {
+        return intentionalUnload;
+    },
+    set intentionalUnload(v) {
+        intentionalUnload = v;
+    },
+    get textOnly() {
+        return textOnly;
+    },
+    set textOnly(v) {
+        textOnly = v;
+    },
+    get micOn() {
+        return micOn;
+    },
+    set micOn(v) {
+        micOn = v;
+    },
+    get deafened() {
+        return deafened;
+    },
+    set deafened(v) {
+        deafened = v;
+    },
+    get isPresenter() {
+        return isPresenter;
+    },
+    set isPresenter(v) {
+        isPresenter = v;
+    },
+    get joinLockOn() {
+        return joinLockOn;
+    },
+    set joinLockOn(v) {
+        joinLockOn = v;
+    },
+    get localStream() {
+        return localStream;
+    },
+    set localStream(v) {
+        localStream = v;
+    },
+    get rawMicStream() {
+        return rawMicStream;
+    },
+    set rawMicStream(v) {
+        rawMicStream = v;
+    },
+    get hostToken() {
+        return hostToken;
+    },
+    set hostToken(v) {
+        hostToken = v;
+    },
+    get channelPassword() {
+        return channelPassword;
+    },
+    set channelPassword(v) {
+        channelPassword = v;
+    },
+    get selfAvatar() {
+        return selfAvatar;
+    },
+    set selfAvatar(v) {
+        selfAvatar = v;
+    },
+};
+
+// Late-bound cross-module surface: filled once every factory below has run
+// (event handlers only ever fire after that), so submodules can call each
+// other and the controller without import cycles.
+const x = {};
 
 // ----- screen wake lock (mobile: a locked screen kills the voice session) -----
 // Holder lives in ./channel/wakeLock.js; it re-arms itself on visibility
@@ -168,88 +304,16 @@ const screenLock = createWakeLock({
 const shareSound = createShareSound({
     isJoined: () => joined,
     ensureVoice: async () => {
-        if (!localStream) await enableVoice(); // text-only member: prompt for the mic
+        if (!localStream) await x.enableVoice(); // text-only member: prompt for the mic
         return !!localStream;
     },
     getHub: () => hub,
-    pipelineReady: () => micProcessed && hub?.ctx?.state === 'running',
-    applyGate: () => applyMicState(),
-    broadcast: broadcastShare,
+    pipelineReady: () => voice.micProcessed && hub?.ctx?.state === 'running',
+    applyGate: () => x.applyMicState(),
+    broadcast: (on) => x.broadcastShare(on),
     refreshBitrate: () => mesh?.setSendBitrate(),
     toast,
 });
-
-// ----- host login persistence -----
-// The host token lives in localStorage so the login survives browser restarts
-// (the server re-grants presenter status on every join). Tokens stored in
-// sessionStorage by older versions are promoted on sight; expired ones are
-// dropped locally so the join never has to fail because of them.
-
-function hostTokenKey() {
-    return HOST_TOKEN_PREFIX + channelId;
-}
-
-function jwtExpiresAt(token) {
-    try {
-        const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-        return typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
-    } catch {
-        return 0;
-    }
-}
-
-function loadHostToken() {
-    const key = hostTokenKey();
-    let token = localStorage.getItem(key) || sessionStorage.getItem(key);
-    sessionStorage.removeItem(key);
-    if (token && jwtExpiresAt(token) <= Date.now()) {
-        localStorage.removeItem(key);
-        token = null;
-    }
-    if (token) localStorage.setItem(key, token);
-    return token || '';
-}
-
-function saveHostToken(token) {
-    localStorage.setItem(hostTokenKey(), token);
-}
-
-function clearHostToken() {
-    localStorage.removeItem(hostTokenKey());
-    sessionStorage.removeItem(hostTokenKey());
-}
-
-// ----- channel password persistence -----
-// Remembered per channel so returning visitors keep the auto-join flow; the
-// server still validates it on every join (a stale value just re-opens the
-// overlay). Hosts never need it (their JWT bypasses the channel password).
-
-function channelPwKey() {
-    return CHANNEL_PW_PREFIX + channelId;
-}
-
-function loadChannelPw() {
-    return localStorage.getItem(channelPwKey()) || '';
-}
-
-function saveChannelPw(password) {
-    localStorage.setItem(channelPwKey(), password);
-}
-
-function clearChannelPw() {
-    localStorage.removeItem(channelPwKey());
-}
-
-/** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self } */
-const members = new Map();
-const audioEls = new Map(); // peerId -> HTMLAudioElement (fallback playback path)
-/** display name -> custom avatar data URL (validated) */
-const avatars = new Map();
-let selfAvatar = safeAvatarUrl(localStorage.getItem(AVATAR_KEY));
-let micDevices = [];
-let spkDevices = [];
-let micDropdown = null;
-let spkDropdown = null;
 
 const imageReceiver = createImageReceiver({
     onDone: ({ from, dataUrl, batch, peerId }) => {
@@ -261,7 +325,7 @@ const imageReceiver = createImageReceiver({
             const name = members.get(peerId)?.peer_name || from || '?';
             chat.addImage({ name, src: dataUrl, alt: t('chat.image') });
             playSound('message');
-            noteIncomingMessage(name, '');
+            notify.noteIncomingMessage(name, '');
         }
     },
     onFail: (reason, batch) => {
@@ -271,241 +335,137 @@ const imageReceiver = createImageReceiver({
 });
 
 // ---------------------------------------------------------------------------
-// unread badge + desktop notifications + reply composer + @mention autocomplete
+// submodule wiring
 // ---------------------------------------------------------------------------
 
-let baseTitle = '';
-let unreadCount = 0;
-const NOTIFY_KEY = 'vc_notify';
-const notifySupported = typeof window !== 'undefined' && 'Notification' in window;
-let notifyEnabled =
-    notifySupported && localStorage.getItem(NOTIFY_KEY) === '1' && Notification.permission === 'granted';
-
-/** true when the text contains an @mention of the local user's name */
-function mentionsMe(text) {
-    if (!selfName || !text.includes('@')) return false;
-    const re = new RegExp(`@${escapeRegExp(selfName)}(?![\\p{L}\\p{N}_])`, 'u');
-    return re.test(text);
-}
-
-/** A message from someone else arrived: bump the background-tab counter and,
- *  when it mentions us, fire a desktop notification (if enabled). */
-function noteIncomingMessage(name, text) {
-    if (name === selfName || !document.hidden) return;
-    unreadCount += 1;
-    document.title = `(${unreadCount}) ${baseTitle}`;
-    if (notifyEnabled && mentionsMe(text)) {
-        try {
-            const n = new Notification(`@${name} · ${channelMeta?.name || channelId}`, {
-                body: (text || t('chat.image')).slice(0, 80),
-                tag: 'vc-mention',
-                silent: true, // the message chime already played
-            });
-            n.onclick = () => {
-                window.focus();
-                n.close();
-            };
-        } catch {
-            /* some platforms throw on construction — the title badge still works */
-        }
-    }
-}
-
-document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && unreadCount) {
-        unreadCount = 0;
-        document.title = baseTitle;
-    }
+const rec = createRecovery({ s, x, members, $, el, t });
+const mem = createMembers({
+    s,
+    x,
+    rec,
+    members,
+    avatars,
+    audioEls,
+    channelId,
+    peerVolumes,
+    shareSound,
+    avatarColor,
+    AVATAR_MAX_CHARS,
+    AVATARS_MAX,
+    DATA_URL_RE,
+    $,
+    el,
+    t,
+});
+const voice = createVoice({ s, x, mem, members, audioEls, settings, channelId, screenLock, playSound, t, $, el });
+const notify = createNotify({ s, x, channelId, escapeRegExp, toast, t });
+const composer = createComposer({
+    s,
+    x,
+    members,
+    channelId,
+    openEmojiPicker,
+    fileToImageMessage,
+    sendImageData,
+    toast,
+    t,
+    $,
+    el,
+});
+const hostAuth = createHostAuth({ s, x, channelId, api, t, $ });
+const se = createSocketEvents({
+    s,
+    x,
+    rec,
+    mem,
+    members,
+    avatars,
+    peerVolumes,
+    channelId,
+    NICK_KEY,
+    AVATAR_MAX_CHARS,
+    DATA_URL_RE,
+    validReply,
+    screenLock,
+    playSound,
+    toast,
+    t,
+    $,
+});
+const settingsUi = createSettings({
+    s,
+    x,
+    mem,
+    members,
+    avatars,
+    settings,
+    channelId,
+    AVATAR_KEY,
+    AUDIO_SETTINGS_KEY,
+    PEER_VOLUMES_KEY,
+    defaultAudioSettings,
+    sinkSupported,
+    safeAvatarUrl,
+    DATA_URL_RE,
+    createDropdown,
+    initSoundSettings,
+    getTestBeepUrl,
+    getThemePref,
+    setThemePref,
+    getLang,
+    setLang,
+    toast,
+    t,
+    $,
+    el,
 });
 
-// ----- reply composer -----
-
-let replyTo = null; // {name, text, ts} of the row being answered
-
-function startReply({ name, text, ts }) {
-    replyTo = { name: name || '?', text: (text || t('chat.image')).slice(0, 80), ts: ts || 0 };
-    $('#replyBar').classList.remove('hidden');
-    $('#replyPreview').replaceChildren(
-        el('span', { class: 'reply-label', text: t('chat.replyTo', { name: replyTo.name }) }),
-        el('span', { class: 'reply-text', text: replyTo.text })
-    );
-    $('#chatInput').focus();
-}
-
-function cancelReply() {
-    replyTo = null;
-    $('#replyBar').classList.add('hidden');
-}
-
-/** Payload for the outgoing message/history event; null when not replying. */
-function replyPayload() {
-    if (!replyTo) return null;
-    return { name: replyTo.name, text: replyTo.text.slice(0, 80), ts: replyTo.ts };
-}
-
-// ----- edit composer (one's own already-sent text message) -----
-
-let editing = null; // {name, ts} of the row being edited
-
-function startEdit({ name, text, ts }) {
-    cancelReply();
-    editing = { name, ts };
-    const input = $('#chatInput');
-    input.value = text;
-    autoGrowChatInput();
-    $('#editBar').classList.remove('hidden');
-    $('#editPreview').replaceChildren(
-        el('span', { class: 'reply-label', text: t('chat.editing') }),
-        el('span', { class: 'reply-text', text: text.slice(0, 60) })
-    );
-    input.focus();
-}
-
-function cancelEdit() {
-    if (!editing) return;
-    editing = null;
-    $('#editBar').classList.add('hidden');
-    const input = $('#chatInput');
-    input.value = '';
-    autoGrowChatInput();
-    input.focus();
-}
-
-// ----- typing indicator (DataChannel broadcast, nothing touches the server) -----
-
-const TYPING_SEND_MS = 3000; // re-announce cadence while composing
-const TYPING_TIMEOUT_MS = 6000; // peer silence assumption
-let typingSentAt = 0;
-const typingPeers = new Map(); // display name -> expiry timer
-
-function maybeSendTyping() {
-    if (!joined || !mesh) return;
-    const now = Date.now();
-    if (now - typingSentAt < TYPING_SEND_MS) return;
-    typingSentAt = now;
-    mesh.sendChat({ type: 'typing', from: selfName });
-}
-
-function notePeerTyping(name) {
-    if (!name || name === selfName) return;
-    clearTimeout(typingPeers.get(name));
-    typingPeers.set(
-        name,
-        setTimeout(() => {
-            typingPeers.delete(name);
-            renderTyping();
-        }, TYPING_TIMEOUT_MS)
-    );
-    renderTyping();
-}
-
-function renderTyping() {
-    const bar = $('#typingBar');
-    const names = [...typingPeers.keys()];
-    if (!names.length) {
-        bar.classList.add('hidden');
-        return;
-    }
-    const label =
-        names.length === 1
-            ? t('chat.typing', { name: names[0] })
-            : names.length === 2
-              ? t('chat.typingTwo', { a: names[0], b: names[1] })
-              : t('chat.typingMany', { n: names.length });
-    $('#typingText').textContent = label;
-    bar.classList.remove('hidden');
-}
-
-function clearTyping() {
-    for (const timer of typingPeers.values()) clearTimeout(timer);
-    typingPeers.clear();
-    renderTyping();
-}
-
-// ----- @mention autocomplete (menu above the composer) -----
-
-let mention = null; // { items, index, at } — at = index of the '@' in the input
-
-function memberNamesForMention() {
-    return [
-        ...new Set(
-            [...members.values()]
-                .filter((m) => !m.self)
-                .map((m) => m.peer_name)
-                .filter(Boolean)
-        ),
-    ];
-}
-
-function updateMentionMenu() {
-    const input = $('#chatInput');
-    if (!joined || document.activeElement !== input) return closeMentionMenu();
-    const caret = input.selectionStart ?? input.value.length;
-    const before = input.value.slice(0, caret);
-    const m = before.match(/(?:^|\s)@([^\s@]{0,24})$/);
-    if (!m) return closeMentionMenu();
-    const at = caret - m[1].length - 1; // position of the '@'
-    const frag = m[1].toLowerCase();
-    const items = memberNamesForMention()
-        .filter((name) => name.toLowerCase().startsWith(frag))
-        .slice(0, 6);
-    if (!items.length) return closeMentionMenu();
-    mention = { items, index: 0, at };
-
-    const menu = $('#mentionMenu');
-    menu.replaceChildren(
-        ...items.map((name, i) =>
-            el(
-                'button',
-                {
-                    type: 'button',
-                    class: 'mention-item' + (i === 0 ? ' active' : ''),
-                    onclick: () => completeMention(name),
-                },
-                el('span', { class: 'mention-at', text: '@' }),
-                name
-            )
-        )
-    );
-    menu.classList.remove('hidden');
-}
-
-function closeMentionMenu() {
-    mention = null;
-    $('#mentionMenu').classList.add('hidden');
-}
-
-function completeMention(name) {
-    const input = $('#chatInput');
-    if (!mention) return;
-    input.setRangeText(`@${name} `, mention.at, input.selectionStart ?? mention.at, 'end');
-    closeMentionMenu();
-    input.focus();
-    autoGrowChatInput();
-}
-
-/** Key handling while the mention menu is open; returns true when consumed. */
-function mentionMenuKeydown(event) {
-    if (!mention) return false;
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault();
-        mention.index =
-            (mention.index + (event.key === 'ArrowDown' ? 1 : mention.items.length - 1)) % mention.items.length;
-        [...$('#mentionMenu').children].forEach((child, i) => child.classList.toggle('active', i === mention.index));
-        return true;
-    }
-    if (event.key === 'Tab' || (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.shiftKey)) {
-        event.preventDefault();
-        completeMention(mention.items[mention.index]);
-        return true;
-    }
-    if (event.key === 'Escape') {
-        event.preventDefault();
-        closeMentionMenu();
-        return true;
-    }
-    return false;
-}
+Object.assign(x, {
+    // controller surface
+    join,
+    leave,
+    teardown,
+    teardownMedia,
+    showJoinError,
+    showJoinFatal,
+    setOverlayBusy,
+    updateHeaderActions,
+    localLevelCb,
+    opusFmtp,
+    toast,
+    shareSound,
+    peerVolumes,
+    // submodules
+    rec,
+    mem,
+    voice,
+    notify,
+    composer,
+    hostAuth,
+    se,
+    settings: settingsUi,
+    // frequently reached functions, flat for brevity in the submodules
+    dropPeer: mem.dropPeer,
+    onAir: voice.onAir,
+    setMic: voice.setMic,
+    applyMicState: voice.applyMicState,
+    resetPtt: voice.resetPtt,
+    syncPttHoldButton: voice.syncPttHoldButton,
+    applyDeafenState: voice.applyDeafenState,
+    broadcastShare: voice.broadcastShare,
+    enableVoice: voice.enableVoice,
+    reacquireMicOrToast: voice.reacquireMicOrToast,
+    applySpeaker: voice.applySpeaker,
+    applySink: settingsUi.applySink,
+    refreshDeviceSelects: settingsUi.refreshDeviceSelects,
+    savePeerVolume: settingsUi.savePeerVolume,
+    saveChannelPw: hostAuth.saveChannelPw,
+    clearChannelPw: hostAuth.clearChannelPw,
+    clearHostToken: hostAuth.clearHostToken,
+    onNotifyToggle: notify.onNotifyToggle,
+    isNotifyEnabled: notify.isNotifyEnabled,
+    notifySupported: notify.notifySupported,
+});
 
 // ---------------------------------------------------------------------------
 // boot
@@ -539,8 +499,8 @@ async function boot() {
         mentionNames: () => [...members.values()].map((m) => m.peer_name),
         selfName: () => selfName,
         isHost: () => isPresenter,
-        onReply: startReply,
-        onEdit: startEdit,
+        onReply: composer.startReply,
+        onEdit: composer.startEdit,
         onDelete: ({ name, ts }) => {
             if (!socket || !joined) return;
             socket.emit('chatDelete', { room_id: channelId, ts, name });
@@ -552,9 +512,9 @@ async function boot() {
         jumpNewText: (n) => t('chat.jumpNew', { n }),
         jumpText: t('chat.jumpBottom'),
     });
-    bindHistoryPaging($('#chatMessages'));
+    se.bindHistoryPaging($('#chatMessages'));
     bindUi();
-    bindPttKeys();
+    voice.bindPttKeys();
 
     try {
         channelMeta = await api.getChannel(channelId);
@@ -567,8 +527,7 @@ async function boot() {
     $('#channelDesc').textContent = channelMeta.description || '';
     $('#tempBadge').classList.toggle('hidden', !channelMeta.temporary);
     $('#joinChannelName').textContent = `# ${channelMeta.name || channelId}`;
-    baseTitle = `${channelMeta.name || channelId} · ${t('app.name')}`;
-    document.title = baseTitle;
+    notify.setBaseTitle(`${channelMeta.name || channelId} · ${t('app.name')}`);
 
     const presetName = new URLSearchParams(location.search).get('name');
     const savedNick = presetName || localStorage.getItem(NICK_KEY) || '';
@@ -580,7 +539,7 @@ async function boot() {
     const pwFieldVisible = !!channelMeta.hasPassword && !hostToken;
     $('#joinPasswordField').classList.toggle('hidden', !pwFieldVisible);
     if (pwFieldVisible) {
-        channelPassword = loadChannelPw();
+        channelPassword = loadChannelPw(channelId);
         // pre-fill so the join() override below and the auto-join path agree
         $('#channelPwInput').value = channelPassword;
     }
@@ -607,15 +566,15 @@ function bindUi() {
     $('#joinBtn').addEventListener('click', () => join({ textOnly: false }));
     $('#textOnlyBtn').addEventListener('click', () => join({ textOnly: true }));
 
-    $('#hostLoginBtn').addEventListener('click', openHostModal);
-    $('#hostLoginEntryBtn').addEventListener('click', openHostModal);
-    $('#hostCancelBtn').addEventListener('click', closeHostModal);
-    $('#hostLoginForm').addEventListener('submit', onHostLoginSubmit);
+    $('#hostLoginBtn').addEventListener('click', hostAuth.openHostModal);
+    $('#hostLoginEntryBtn').addEventListener('click', hostAuth.openHostModal);
+    $('#hostCancelBtn').addEventListener('click', hostAuth.closeHostModal);
+    $('#hostLoginForm').addEventListener('submit', hostAuth.onHostLoginSubmit);
 
-    $('#renameCancelBtn').addEventListener('click', closeRenameModal);
-    $('#renameForm').addEventListener('submit', onRenameSubmit);
+    $('#renameCancelBtn').addEventListener('click', mem.closeRenameModal);
+    $('#renameForm').addEventListener('submit', mem.onRenameSubmit);
     $('#renameModal').addEventListener('click', (event) => {
-        if (event.target === $('#renameModal')) closeRenameModal();
+        if (event.target === $('#renameModal')) mem.closeRenameModal();
     });
 
     $('#copyLinkBtn').addEventListener('click', async () => {
@@ -638,19 +597,19 @@ function bindUi() {
         if ($('#outageBanner').dataset.mode === 'failed') {
             intentionalUnload = true;
             location.reload();
-        } else attemptSignalingReconnect({ manual: true });
+        } else rec.attemptSignalingReconnect({ manual: true });
     });
-    $('#micBtn').addEventListener('click', onMicBtnClick);
-    $('#deafenBtn').addEventListener('click', toggleDeafen);
+    $('#micBtn').addEventListener('click', voice.onMicBtnClick);
+    $('#deafenBtn').addEventListener('click', voice.toggleDeafen);
     $('#shareSoundBtn').addEventListener('click', () => (shareSound.active() ? shareSound.stop() : shareSound.start()));
-    bindPttHoldButton();
-    $('#chatForm').addEventListener('submit', onChatSubmit);
-    bindChatInput();
-    bindChatSearch();
-    bindAppearanceControls();
+    voice.bindPttHoldButton();
+    $('#chatForm').addEventListener('submit', composer.onChatSubmit);
+    composer.bindChatInput();
+    composer.bindChatSearch();
+    settingsUi.bindAppearanceControls();
 
-    bindImageUi();
-    bindSettingsUi();
+    composer.bindImageUi();
+    settingsUi.bindSettingsUi();
 
     $('#lockBtn').addEventListener('click', () => {
         if (!socket || !joined || !isPresenter) return;
@@ -729,7 +688,7 @@ async function joinInner({ textOnly: asTextOnly }) {
     // release anything a previous attempt left behind (e.g. the stale-token
     // retry after 'unauthorized' joins a second time)
     teardownMedia();
-    for (const peerId of [...members.keys()]) dropPeer(peerId, { silent: true });
+    for (const peerId of [...members.keys()]) mem.dropPeer(peerId, { silent: true });
 
     selfName = nick;
     selfUuid = crypto.randomUUID();
@@ -738,7 +697,7 @@ async function joinInner({ textOnly: asTextOnly }) {
 
     if (!textOnly) {
         try {
-            rawMicStream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
+            rawMicStream = await navigator.mediaDevices.getUserMedia(voice.buildAudioConstraints());
         } catch {
             textOnly = true;
             toast(t('channel.errors.micDenied'), 'warn');
@@ -757,14 +716,14 @@ async function joinInner({ textOnly: asTextOnly }) {
         // the context may start suspended (autoplay policy — e.g. auto-join on
         // page load with no user gesture): peers play through <audio> elements
         // until the first interaction resumes it, then upgrade to the gain path
-        hub.ctx.addEventListener('statechange', onCtxStateChange);
+        hub.ctx.addEventListener('statechange', voice.onCtxStateChange);
         const resume = () => hub?.ctx?.resume().catch(() => {});
         window.addEventListener('pointerdown', resume, { once: true });
         window.addEventListener('keydown', resume, { once: true });
     }
-    syncMicPipeline(); // may swap localStream to the gain-processed stream
+    voice.syncMicPipeline(); // may swap localStream to the gain-processed stream
     if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);
-    applySpeaker(); // route Web Audio playback to the chosen output from the start
+    voice.applySpeaker(); // route Web Audio playback to the chosen output from the start
 
     // Faster reconnect cadence than the socket.io defaults (1000..5000ms with
     // 0.5 jitter): a VPN/accelerator switch kills the websocket for a few
@@ -782,385 +741,17 @@ async function joinInner({ textOnly: asTextOnly }) {
     mesh = new Mesh({ signaling: socket, handlers: meshHandlers(), getOpusFmtp: opusFmtp });
     if (localStream) mesh.setLocalStream(localStream);
 
-    registerSocketHandlers();
+    se.registerSocketHandlers();
 
     setOverlayBusy(true);
     micOn = !textOnly && !!localStream;
-    applyMicState(); // no socket yet — just refresh buttons; peer_audio goes in the join payload
-    lastOnAir = onAir();
+    voice.applyMicState(); // no socket yet — just refresh buttons; peer_audio goes in the join payload
 }
 
 function localLevelCb({ level }) {
     const pct = `${Math.min(100, Math.round(level * 220))}%`;
     $('#micLevelBar').style.width = pct;
     $('#settingsMicBar').style.width = pct;
-}
-
-// ----- scroll-up pagination for the persisted chat history -----
-// Lives at module scope (not inside registerSocketHandlers): boot() binds the
-// scroll listener before the socket handlers are wired.
-
-/** Server history rows -> renderable rows (shared by join + paging). */
-function parseHistoryRows(messages) {
-    const rows = [];
-    for (const msg of messages) {
-        if (!msg || typeof msg !== 'object') continue;
-        const name = String(msg.name || '?').slice(0, 24);
-        let text = typeof msg.text === 'string' ? msg.text : '';
-        const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // prependHistory re-validates each URL
-        // legacy rows (≤ voice.21) kept only the image count — show it as a placeholder
-        const legacyCount = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
-        if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
-        if (!text && !imgs.length && msg.deleted !== true) continue;
-        const ts = typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : 0;
-        const reply = validReply(msg.reply);
-        const deleted = msg.deleted === true;
-        const reactions =
-            msg.reactions && typeof msg.reactions === 'object' && !Array.isArray(msg.reactions) ? msg.reactions : null;
-        rows.push({
-            name,
-            text,
-            imgs: deleted ? [] : imgs,
-            reply,
-            deleted,
-            edited: msg.edited === true,
-            reactions,
-            self: name === selfName,
-            time: ts ? new Date(ts) : new Date(),
-        });
-    }
-    return rows;
-}
-
-function bindHistoryPaging(box) {
-    box.addEventListener('scroll', maybeLoadOlder, { passive: true });
-}
-
-/** Fire a page fetch whenever the list is scrolled near its top. */
-function maybeLoadOlder() {
-    if (!socket || !historyHasMore || historyLoading) return;
-    const box = $('#chatMessages');
-    if (!box || box.scrollTop > CHAT_LOAD_THRESHOLD) return;
-    loadOlderPage();
-}
-
-function loadOlderPage() {
-    if (historyLoading || !historyHasMore) return;
-    historyLoading = true;
-    chat.setHistoryFooter('loading');
-    // ack keeps request and response paired; the timeout un-sticks the
-    // flag when the answer never comes so a later scroll can retry
-    socket.timeout(8000).emit('chatPage', { room_id: channelId, before: historyCursor ?? 0 }, (err, res) => {
-        historyLoading = false;
-        chat.setHistoryFooter(null);
-        if (err) return;
-        const messages = Array.isArray(res?.messages) ? res.messages : [];
-        historyHasMore = res?.hasMore === true;
-        if (messages.length) {
-            const first = messages[0]; // oldest of the page, again
-            if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
-            chat.prependHistory(parseHistoryRows(messages), { imageAlt: t('chat.image') });
-        }
-        if (historyHasMore)
-            maybeLoadOlder(); // viewport may still not be full
-        else chat.setHistoryFooter('end');
-    });
-}
-
-function registerSocketHandlers() {
-    socket.on('connect', () => {
-        // back within the flap window — the "disconnected" toast never fired
-        clearTimeout(disconnectToastTimer);
-        disconnectToastTimer = null;
-        emitJoin();
-    });
-
-    socket.on('serverInfo', (cfg) => {
-        // a successful (re)join resolves any pending self-reconnect
-        b1InFlight = false;
-        selfReconnecting = false;
-        clearTimeout(b1Timer);
-        if (!joined) {
-            joined = true;
-            startRecoveryScan();
-            startPathMonitor();
-            screenLock.sync();
-            isPresenter = !!cfg.is_presenter;
-            joinLockOn = !!cfg.join_locked;
-            $('#joinOverlay').classList.add('hidden');
-            updateHeaderActions();
-            syncMembers(cfg.peers || {});
-            chat.add({ text: t('chat.joined', { name: selfName }), system: true, self: true });
-            syncPttHoldButton();
-            applyDeafenState(); // reflects the (session-local) state on the fresh member card
-            // password accepted — keep it for the next auto-join
-            if (channelPassword) saveChannelPw(channelPassword);
-            // tell everyone in the room which avatar we carry (peers list only
-            // flows joiner <- room, this is the joiner -> room direction)
-            if (selfAvatar) socket.emit('peerAvatar', { room_id: channelId, avatar: selfAvatar });
-        } else {
-            isPresenter = !!cfg.is_presenter;
-            joinLockOn = !!cfg.join_locked;
-            updateHeaderActions();
-        }
-        updateOnlineCount();
-    });
-
-    socket.on('chatAck', ({ ts } = {}) => {
-        // server-assigned timestamp for the row we rendered optimistically —
-        // without it edit/recall/reaction would look up a ts nobody else has
-        chat.bindServerTs(ts);
-    });
-
-    socket.on('chatHistory', (cfg) => {
-        // reconnect replays are ignored: the live DOM already holds the
-        // recent context, rendering again would duplicate every row
-        if (chatHistorySeen) return;
-        chatHistorySeen = true;
-        // newest page of the persisted history; older pages are pulled on
-        // demand when the user scrolls to the top
-        historyHasMore = cfg?.hasMore === true;
-        const messages = Array.isArray(cfg?.messages) ? cfg.messages : [];
-        const first = messages[0]; // server sends oldest first
-        if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
-        const rows = parseHistoryRows(messages);
-        if (!rows.length) return;
-        chat.addHistory(rows, { dividerText: t('chat.historyDivider'), imageAlt: t('chat.image') });
-        maybeLoadOlder(); // keep going while the viewport isn't filled yet
-    });
-
-    socket.on('addPeer', (cfg) => {
-        const known = mesh.entries.has(cfg.peer_id);
-        mesh.addPeer(cfg.peer_id, cfg.should_create_offer, cfg.iceServers || []);
-        syncMembers(cfg.peers || {});
-        // should_create_offer=false means: WE are the old member and someone
-        // else just joined — announce them (the joiner gets one event per
-        // existing member and must not re-announce everyone). rejoin=true is
-        // a resumed session coming back from a network flap: its card never
-        // left, no announcement, no sound.
-        if (joined && cfg.should_create_offer === false && !cfg.rejoin) {
-            const name = members.get(cfg.peer_id)?.peer_name || '';
-            if (name) chat.add({ text: t('chat.joined', { name }), system: true });
-            playSound('peerJoin');
-        }
-        // resumed session with an existing (possibly broken) link: the mesh
-        // entry was reused so NO offer went out — put the recovery ladder on
-        // it now instead of waiting for the next 10s scan
-        if (known && cfg.should_create_offer === true) {
-            const state = mesh.entries.get(cfg.peer_id)?.pc.connectionState;
-            if (state && state !== 'connected' && state !== 'closed') notePeerState(cfg.peer_id, state);
-        }
-        updateOnlineCount();
-    });
-
-    socket.on('removePeer', ({ peer_id }) => {
-        const name = members.get(peer_id)?.peer_name || '';
-        dropPeer(peerIdSafe(peer_id));
-        if (joined && name) {
-            chat.add({ text: t('chat.left', { name }), system: true });
-            playSound('peerLeave');
-        }
-        updateOnlineCount();
-    });
-
-    socket.on('iceCandidate', (cfg) => mesh.handleIceCandidate(cfg));
-    socket.on('sessionDescription', (cfg) => mesh.handleSessionDescription(cfg));
-
-    // message lifecycle — the server broadcasts the persisted result to
-    // everyone (sender included), so the DOM follows the store
-    socket.on('chatEdit', (cfg) => {
-        if (Number.isFinite(cfg?.ts))
-            chat.editMessage({ name: String(cfg.name || '').slice(0, 24), ts: cfg.ts, text: String(cfg.text || '') });
-    });
-    socket.on('chatDelete', (cfg) => {
-        if (Number.isFinite(cfg?.ts)) chat.deleteMessage({ name: String(cfg.name || '').slice(0, 24), ts: cfg.ts });
-    });
-    socket.on('chatReact', (cfg) => {
-        if (Number.isFinite(cfg?.ts))
-            chat.reactMessage({ name: String(cfg.name || '').slice(0, 24), ts: cfg.ts, reactions: cfg.reactions });
-    });
-
-    socket.on('peerStatus', ({ peer_id, element, status }) => {
-        if (element === 'audio') {
-            const member = members.get(peer_id);
-            if (!member) return;
-            member.peer_audio_status = status === true;
-            updateMicIconNode(peer_id, status === true);
-            return;
-        }
-        if (element === 'deafen') {
-            const member = members.get(peer_id);
-            if (!member) return;
-            member.peer_deafen = status === true;
-            const node = $(`#memberList .member[data-id="${peer_id}"] .member-deafen`);
-            if (node) node.classList.toggle('on', status === true);
-        }
-        if (element === 'share') {
-            const member = members.get(peer_id);
-            if (!member) return;
-            member.peer_share = status === true;
-            const node = $(`#memberList .member[data-id="${peer_id}"] .member-share`);
-            if (node) node.classList.toggle('on', status === true);
-        }
-    });
-
-    socket.on('peerName', ({ peer_id, peer_name: rawName, peer_name_old }) => {
-        // host-supplied: cap like the join/rename inputs so a hostile host
-        // can't push an oversized string into state or localStorage
-        const peer_name = String(rawName || '').slice(0, 24);
-        if (!peer_name) return;
-        const member = members.get(peer_id);
-        const old = member?.peer_name;
-        if (member && old && old !== peer_name) {
-            // per-user volume memory is keyed by display name — follow the rename
-            if (peerVolumes[old] !== undefined && peerVolumes[old] !== 1) {
-                savePeerVolume(peer_name, peerVolumes[old]);
-            }
-            savePeerVolume(old, 1); // drop the stale key
-            // avatar lookup is keyed by name too — move it along
-            const avatar = avatars.get(old);
-            if (avatar) {
-                avatars.set(peer_name, avatar);
-                avatars.delete(old);
-            }
-            chat.renamePeer(old, peer_name);
-            member.peer_name = peer_name;
-            if (peerVolumes[peer_name] !== undefined) member.volume = peerVolumes[peer_name];
-        } else if (member) {
-            member.peer_name = peer_name;
-        }
-        if (peer_id === selfUuid) {
-            // the host renamed ME — accept it and persist for the next visit
-            selfName = peer_name;
-            localStorage.setItem(NICK_KEY, peer_name);
-            if (selfAvatar) avatars.set(selfName, selfAvatar);
-            chat.setAvatar(selfName, selfAvatar);
-            $('#nickInput').value = peer_name;
-            toast(t('channel.renamedYou', { name: peer_name }), 'ok');
-        } else if (joined && member && (peer_name_old || old)) {
-            chat.add({
-                text: t('chat.renamed', { old: peer_name_old || old, name: peer_name }),
-                system: true,
-            });
-        }
-        renderMembers();
-    });
-
-    socket.on('peerAvatar', ({ peer_id, peer_name, avatar }) => {
-        const url =
-            typeof avatar === 'string' && avatar.length <= AVATAR_MAX_CHARS && DATA_URL_RE.test(avatar) ? avatar : '';
-        const member = members.get(peerIdSafe(peer_id));
-        if (member) member.avatar = url || undefined;
-        if (peer_name) {
-            if (url) {
-                avatars.set(peer_name, url);
-                capAvatars();
-            } else avatars.delete(peer_name);
-            chat.setAvatar(peer_name, url);
-        }
-        renderMembers();
-    });
-
-    socket.on('peerAction', ({ peer_id, peer_action }) => {
-        if (peer_id === selfUuid && peer_action === 'muteAudio') {
-            setMic(false);
-            toast(t('channel.mutedByHost'), 'warn');
-        }
-    });
-
-    socket.on('roomAction', ({ peer_name, action }) => {
-        if (action === 'joinLockOn') {
-            joinLockOn = true;
-            chat.add({ text: t('channel.joinLockOn', { name: peer_name }), system: true });
-        } else if (action === 'joinLockOff') {
-            joinLockOn = false;
-            chat.add({ text: t('channel.joinLockOff', { name: peer_name }), system: true });
-        }
-        updateHeaderActions();
-    });
-
-    socket.on('kickOut', (cfg) => {
-        teardown();
-        // host ejection vs. the admin deleting the room under our feet
-        showJoinFatal(cfg?.reason === 'channelDeleted' ? t('channel.channelDeleted') : t('channel.kicked'));
-    });
-
-    socket.on('channelNotFound', () => showJoinFatal(t('channel.errors.channelNotFound')));
-    socket.on('roomIsBusy', (cfg) => showJoinError(t('channel.errors.roomIsBusy', { n: cfg?.maxParticipants || 0 })));
-    socket.on('roomIsJoinLocked', () => showJoinError(t('channel.errors.roomIsJoinLocked')));
-    socket.on('roomIsLocked', () => showJoinError(t('channel.errors.roomIsLocked')));
-    socket.on('tempRoomLimitReached', (cfg) =>
-        showJoinError(
-            cfg?.reason === 'rate-limit'
-                ? t('channel.errors.tempRateLimit')
-                : t('channel.errors.tempIpLimit', { n: cfg?.max || 0 })
-        )
-    );
-    socket.on('channelLimitReached', (cfg) => showJoinError(t('channel.errors.channelLimit', { n: cfg?.max || 0 })));
-    socket.on('channelPasswordRequired', () => {
-        // wrong or missing channel password — drop the stale remembered value
-        // so the overlay stays up until a correct one is entered
-        clearChannelPw();
-        channelPassword = '';
-        showJoinError(t('channel.errors.passwordRequired'));
-        $('#joinPasswordField').classList.remove('hidden');
-        $('#channelPwInput').value = '';
-        $('#channelPwInput').focus();
-    });
-    socket.on('unauthorized', () => {
-        if (!hostToken) return showJoinError(t('channel.errors.unauthorized'));
-        // persisted token no longer accepted (expired or the host was removed
-        // from the channel config) — drop it and carry on as a guest
-        clearHostToken();
-        hostToken = '';
-        $('#hostReadyHint').classList.add('hidden');
-        toast(t('channel.hostTokenExpired'), 'warn');
-        if (joined)
-            emitJoin(); // reconnect of an established session: rejoin without the token
-        else {
-            socket.disconnect();
-            join({ textOnly: false });
-        }
-    });
-    socket.on('joinError', () => {
-        // server-side fault mid-join (the handler logs the details) — the
-        // session state was rolled back there, so start over cleanly
-        showJoinError(t('channel.errors.joinFailed'));
-        setOverlayBusy(false);
-    });
-
-    socket.on('disconnect', (reason) => {
-        if (!joined) return;
-        // The mesh and member list SURVIVE the disconnect: the server parks
-        // our session as a ghost, this socket re-joins with the same
-        // peer_uuid and the existing peer connections resume — they heal via
-        // the ICE-restart recovery ladder instead of a full renegotiation.
-        // Intentional exits (leave, kick, our own B1 rebuild, join errors)
-        // tear the state down themselves before disconnecting.
-        if (reason === 'io client disconnect' || selfReconnecting) return;
-        // brief transport flaps (VPN/accelerator switch) usually reconnect
-        // within a couple of seconds — don't cry "disconnected" until it sticks
-        clearTimeout(disconnectToastTimer);
-        disconnectToastTimer = setTimeout(() => {
-            disconnectToastTimer = null;
-            if (!socket?.connected && joined) toast(t('channel.errors.disconnected'), 'warn');
-        }, DISCONNECT_TOAST_MS);
-    });
-}
-
-function emitJoin() {
-    socket.emit('join', {
-        channel: channelId,
-        peer_uuid: selfUuid,
-        peer_name: selfName,
-        peer_token: hostToken || undefined,
-        channel_password: channelPassword || undefined,
-        peer_audio: onAir(),
-    });
-}
-
-function peerIdSafe(id) {
-    return typeof id === 'string' ? id : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,7 +761,7 @@ function peerIdSafe(id) {
 function meshHandlers() {
     return {
         onRemoteStream(peerId, stream) {
-            attachRemoteAudio(peerId, stream);
+            voice.attachRemoteAudio(peerId, stream);
             if (hub?.ctx) {
                 hub.watch(peerId, stream, ({ level, speaking }) => {
                     const node = $(`#memberList .member[data-id="${peerId}"]`);
@@ -1185,7 +776,7 @@ function meshHandlers() {
             if (!data || typeof data !== 'object') return;
             if (data.type === 'typing') {
                 // the sender's identity is the DataChannel peer, not `from`
-                notePeerTyping(members.get(peerId)?.peer_name || String(data.from || '').slice(0, 24));
+                composer.notePeerTyping(members.get(peerId)?.peer_name || String(data.from || '').slice(0, 24));
                 return;
             }
             if (data.type === 'chat') {
@@ -1201,7 +792,7 @@ function meshHandlers() {
                     chat.add({ name, text, reply });
                 }
                 playSound('message');
-                noteIncomingMessage(name, text);
+                notify.noteIncomingMessage(name, text);
                 return;
             }
             if (data.type === 'img-start' || data.type === 'img-chunk' || data.type === 'img-end') {
@@ -1211,910 +802,16 @@ function meshHandlers() {
         onPeerState(peerId, state) {
             const node = $(`#memberList .member[data-id="${peerId}"]`);
             if (node) node.classList.toggle('bad', state === 'failed' || state === 'disconnected');
-            notePeerState(peerId, state);
+            rec.notePeerState(peerId, state);
             // first path read right after the link settles; the poll keeps it fresh
-            if (state === 'connected') checkPeerPath(peerId, PATH_FIRST_CHECK_MS);
+            if (state === 'connected') rec.checkPeerPath(peerId, rec.PATH_FIRST_CHECK_MS);
         },
     };
 }
 
 // ---------------------------------------------------------------------------
-// media self-healing — a coturn restart destroys every TURN allocation while
-// signaling stays up, so links die without the app noticing. Recovery runs
-// per peer (a mesh can be half-broken):
-//   disconnected → 5s grace (ICE often self-heals; acting sooner breaks it)
-//   failed       → act at once
-//   → up to 3 ICE-restart rounds (3/6/12s backoff, lower session id initiates
-//     so both sides never re-offer at once) → signaling reconnect (rebuilds
-//     every link) → after 2 silent reconnects: visible "reload" prompt.
-// A 10s scan re-checks every connectionState in case a webview swallows the
-// connectionstatechange event.
-// The same ladder heals links after a SIGNALING drop (VPN/accelerator switch):
-// the server parks the session as a ghost, this side keeps its peer
-// connections, the resume addPeer reuses them, and ICE restarts re-punch the
-// new network path — no renegotiation, the DataChannel survives.
+// header actions (host badge / export / join lock)
 // ---------------------------------------------------------------------------
-
-const RECOVERY_GRACE_MS = 5000;
-const RECOVERY_ROUND_DELAYS = [3000, 6000, 12000];
-const RECOVERY_TOTAL_MS = 20000; // per-peer window before the signaling reconnect (round3 +12s = 21s)
-const RECOVERY_MAX_B1 = 2; // automatic signaling reconnects before asking the user
-const RECOVERY_SCAN_MS = 10000;
-const RECOVERY_B1_RESET_MS = 60000; // stable for this long → the B1 budget refills
-
-function notePeerState(peerId, state) {
-    const rec = peerRecovery.get(peerId);
-    if (rec && rec.lastState === state) return;
-
-    if (state === 'connected' || state === 'closed') {
-        if (state === 'connected') {
-            hideOutageBanner();
-            armB1Reset();
-        }
-        clearConnectingBadge(peerId);
-        cancelPeerRecovery(peerId);
-        // 🔴 Nothing may reset the relay-upgrade budget here: the 10s recovery
-        // scan re-reports 'connected' for every healthy peer, so a cancel in this
-        // branch kills the 12s grace timer before it can ever fire (1.1.5 shipped
-        // with exactly that bug — the upgrade never ran). A real break clears the
-        // budget through peerRecovery instead; see noteRelayUpgrade.
-        return;
-    }
-    if (state !== 'disconnected' && state !== 'failed') return; // new/checking/connecting
-    if (!mesh?.entries.has(peerId)) {
-        cancelPeerRecovery(peerId);
-        return;
-    }
-
-    if (!rec) {
-        clearTimeout(b1ResetTimer); // instability: don't refill the B1 budget
-        peerRecovery.set(peerId, {
-            timer: null,
-            attempts: 0,
-            lastState: state,
-            brokenAt: Date.now(),
-            escalated: false,
-        });
-        scheduleRecoveryTick(peerId, state === 'failed' ? 0 : RECOVERY_GRACE_MS);
-        updatePeerCardRecovery(peerId);
-        return;
-    }
-    rec.lastState = state;
-    // disconnected degraded to failed while still in the grace window — skip the wait
-    if (state === 'failed' && rec.attempts === 0 && rec.timer) scheduleRecoveryTick(peerId, 0);
-}
-
-function scheduleRecoveryTick(peerId, delay) {
-    const rec = peerRecovery.get(peerId);
-    if (!rec) return;
-    clearTimeout(rec.timer);
-    rec.timer = setTimeout(() => recoveryTick(peerId), delay);
-}
-
-function recoveryTick(peerId) {
-    const rec = peerRecovery.get(peerId);
-    if (!rec) return;
-    rec.timer = null;
-    const state = mesh?.entries.get(peerId)?.pc.connectionState;
-    if (!mesh?.entries.has(peerId) || state === 'connected' || state === 'closed') {
-        cancelPeerRecovery(peerId);
-        return;
-    }
-    if (Date.now() - rec.brokenAt >= RECOVERY_TOTAL_MS) {
-        escalatePeerRecovery(peerId);
-        return;
-    }
-    if (state === 'disconnected' || state === 'failed') {
-        if (rec.attempts < RECOVERY_ROUND_DELAYS.length) {
-            rec.attempts += 1;
-            // glare arbitration: with both sides broken, only the lower
-            // session id re-offers; the other just answers
-            if (selfUuid < peerId) {
-                mesh.restartIce(peerId).catch(() => {});
-            } else {
-                console.log('[mesh] recovery: waiting for peer re-offer', peerId);
-            }
-            scheduleRecoveryTick(peerId, RECOVERY_ROUND_DELAYS[rec.attempts - 1]);
-            return;
-        }
-        // rounds spent but the window isn't over: keep watching the link
-        scheduleRecoveryTick(peerId, RECOVERY_ROUND_DELAYS[RECOVERY_ROUND_DELAYS.length - 1]);
-        return;
-    }
-    // transitional (new/checking/connecting): a restart is being evaluated —
-    // re-check shortly without burning another round
-    scheduleRecoveryTick(peerId, 3000);
-}
-
-function escalatePeerRecovery(peerId) {
-    const rec = peerRecovery.get(peerId);
-    if (!rec || rec.escalated) return;
-    rec.escalated = true;
-    console.warn('[mesh] recovery: ICE restarts exhausted, falling back to signaling reconnect', peerId);
-    showOutageBanner('recovering');
-    attemptSignalingReconnect();
-}
-
-/** Drop every remote peer + mesh entry locally (before intentional
- *  disconnects: the B1 full rebuild and join-error resets — the transport
- *  'disconnect' handler deliberately KEEPS state so a resume can heal it). */
-function resetLocalMesh() {
-    mesh?.clear();
-    for (const peerId of [...members.keys()]) {
-        if (peerId !== selfUuid) dropPeer(peerId, { silent: true });
-    }
-}
-
-/** Last-resort fallback: rebuild the whole session over fresh signaling. */
-function attemptSignalingReconnect({ manual = false } = {}) {
-    if (!socket || !joined) return;
-    if (b1InFlight) return;
-    if (!manual && b1Attempts >= RECOVERY_MAX_B1) {
-        showOutageBanner('failed');
-        return;
-    }
-    b1Attempts += 1;
-    b1InFlight = true;
-    selfReconnecting = true;
-    console.warn('[mesh] recovery: signaling reconnect', { manual, attempt: b1Attempts });
-    // B1 is a FULL rebuild: drop the mesh BEFORE disconnecting (the server
-    // treats the intentional disconnect as a real leave, everyone tears their
-    // links down) — then re-join as a fresh session and let the addPeer storm
-    // rebuild every link with fresh ICE
-    resetLocalMesh();
-    socket.disconnect();
-    socket.connect();
-    clearTimeout(b1Timer);
-    b1Timer = setTimeout(() => {
-        b1InFlight = false;
-        selfReconnecting = false;
-    }, 15000);
-}
-
-function armB1Reset() {
-    clearTimeout(b1ResetTimer);
-    b1ResetTimer = setTimeout(() => (b1Attempts = 0), RECOVERY_B1_RESET_MS);
-}
-
-function cancelPeerRecovery(peerId) {
-    const rec = peerRecovery.get(peerId);
-    if (!rec) return;
-    clearTimeout(rec.timer);
-    peerRecovery.delete(peerId);
-    updatePeerCardRecovery(peerId);
-}
-
-function clearPeerRecovery() {
-    for (const peerId of [...peerRecovery.keys()]) cancelPeerRecovery(peerId);
-}
-
-function startRecoveryScan() {
-    if (recoveryScanTimer) return;
-    recoveryScanTimer = setInterval(() => {
-        if (!joined || !mesh) return;
-        for (const [peerId, entry] of mesh.entries) notePeerState(peerId, entry.pc.connectionState);
-    }, RECOVERY_SCAN_MS);
-}
-
-function stopRecoveryScan() {
-    clearInterval(recoveryScanTimer);
-    recoveryScanTimer = null;
-}
-
-/** Member card: red name/avatar while the link is broken, badge once recovery runs. */
-function updatePeerCardRecovery(peerId) {
-    const node = $(`#memberList .member[data-id="${peerId}"]`);
-    if (node) node.classList.toggle('lost', peerRecovery.has(peerId));
-}
-
-// ---------------------------------------------------------------------------
-// "connecting…" badge — a ghost member (socket dead, waiting for the server
-// heartbeat to reap it) never answers the SDP offer, so its card sits in
-// new/connecting looking normal while the link will never come up. Real links
-// settle in 2-8s (relayed ones slower), so only flag past a generous window.
-// ---------------------------------------------------------------------------
-
-const CONNECTING_BADGE_MS = 12000;
-const connectingTimers = new Map(); // peerId -> timeout; present = 'connected' not yet observed
-const stuckConnecting = new Set(); // window expired with the link still not up
-
-function armConnectingBadge(peerId) {
-    if (connectingTimers.has(peerId) || stuckConnecting.has(peerId)) return;
-    connectingTimers.set(
-        peerId,
-        setTimeout(() => {
-            connectingTimers.delete(peerId);
-            const state = mesh?.entries.get(peerId)?.pc.connectionState;
-            if (!members.has(peerId) || state === 'connected' || state === 'closed') return;
-            stuckConnecting.add(peerId);
-            updatePeerCardConnecting(peerId, true);
-        }, CONNECTING_BADGE_MS)
-    );
-}
-
-function clearConnectingBadge(peerId) {
-    const timer = connectingTimers.get(peerId);
-    if (timer) clearTimeout(timer);
-    connectingTimers.delete(peerId);
-    if (stuckConnecting.delete(peerId)) updatePeerCardConnecting(peerId, false);
-}
-
-function updatePeerCardConnecting(peerId, on) {
-    const node = $(`#memberList .member[data-id="${peerId}"]`);
-    if (node) node.classList.toggle('connecting', on);
-}
-
-// ---------------------------------------------------------------------------
-// connection path monitor — per-peer badge telling P2P (hole punching
-// succeeded) apart from TURN relay. Read from the selected ICE candidate
-// pair via mesh.connPath() every few seconds: an ICE restart that flips the
-// path gets picked up too. Client-side only — in a mesh no one (not even the
-// server) sees anyone's media path but their own.
-// ---------------------------------------------------------------------------
-
-const PATH_POLL_MS = 5000;
-const PATH_FIRST_CHECK_MS = 1200; // just-connected: let the selected pair settle, then read at once
-const connPaths = new Map(); // peerId -> { type, local, remote, rtt } from mesh.connPath()
-const pathChecks = new Set(); // peers with a getStats round-trip in flight
-const pathEarlyTimers = new Map(); // peerId -> post-connect one-shot check
-let pathPollTimer = null;
-
-function startPathMonitor() {
-    if (pathPollTimer) return;
-    pathPollTimer = setInterval(() => {
-        if (!joined || !mesh) return;
-        for (const peerId of mesh.entries.keys()) checkPeerPath(peerId);
-    }, PATH_POLL_MS);
-}
-
-function stopPathMonitor() {
-    clearInterval(pathPollTimer);
-    pathPollTimer = null;
-    for (const timer of pathEarlyTimers.values()) clearTimeout(timer);
-    pathEarlyTimers.clear();
-    connPaths.clear();
-    lossStreaks.clear();
-    for (const peerId of [...relayUpgrades.keys()]) cancelRelayUpgrade(peerId);
-}
-
-function checkPeerPath(peerId, delay = 0) {
-    if (delay) {
-        if (pathEarlyTimers.has(peerId)) return;
-        pathEarlyTimers.set(
-            peerId,
-            setTimeout(() => {
-                pathEarlyTimers.delete(peerId);
-                checkPeerPath(peerId);
-            }, delay)
-        );
-        return;
-    }
-    if (pathChecks.has(peerId)) return;
-    if (!mesh?.entries.has(peerId)) return;
-    pathChecks.add(peerId);
-    mesh.connPath(peerId)
-        .then((info) => {
-            if (!info || !mesh?.entries.has(peerId)) return; // peer left meanwhile
-            connPaths.set(peerId, info);
-            notePeerLoss(peerId, info);
-            updatePeerPathBadge(peerId);
-            noteRelayUpgrade(peerId, info);
-        })
-        .catch(() => {
-            connPaths.delete(peerId);
-            updatePeerPathBadge(peerId); // don't leave a stale "P2P"/relay badge behind
-            cancelRelayUpgrade(peerId);
-        })
-        .finally(() => pathChecks.delete(peerId));
-}
-
-function pathBadgeNode(peerId) {
-    const node = el('span', { class: 'badge path-badge' });
-    fillPathBadge(node, peerId);
-    return node;
-}
-
-function updatePeerPathBadge(peerId) {
-    const node = $(`#memberList .member[data-id="${peerId}"] .path-badge`);
-    if (node) fillPathBadge(node, peerId);
-}
-
-function fillPathBadge(node, peerId) {
-    const info = connPaths.get(peerId);
-    const known = !!info && (info.type === 'p2p' || info.type === 'relay');
-    node.classList.toggle('on', known);
-    node.classList.toggle('relay', known && info.type === 'relay');
-    node.textContent = known ? t(info.type === 'p2p' ? 'channel.pathP2p' : 'channel.pathRelay') : '';
-    if (!known) {
-        node.removeAttribute('title');
-        return;
-    }
-    // inline latency right after the link label; null = the selected pair
-    // report didn't expose currentRoundTripTime — badge stays label-only.
-    // the lone space text node is swallowed by the flex layout (gap: 4px
-    // already separates) but keeps "P2P 45ms" as the badge's text content
-    const quality = lossStreaks.get(peerId);
-    if (info.rtt !== null) node.append(' ', el('span', { class: 'rtt', text: `${info.rtt}ms` }));
-    // current loss marker: noticeable at a glance without hovering
-    if (quality && quality.loss !== null && quality.loss >= 5)
-        node.append(' ', el('span', { class: 'loss', text: t('channel.pathLoss', { n: Math.round(quality.loss) }) }));
-    // hover detail: candidate types on both ends (host/srflx/prflx/relay) + RTT
-    // + inbound quality (loss / jitter / bitrate, diffed between polls)
-    const parts = [t(info.type === 'p2p' ? 'channel.pathP2pTitle' : 'channel.pathRelayTitle')];
-    if (info.local && info.remote) parts.push(`${info.local} ↔ ${info.remote}`);
-    if (info.rtt !== null) parts.push(t('channel.pathRtt', { n: info.rtt }));
-    if (quality) {
-        if (quality.loss !== null) parts.push(t('channel.pathLoss', { n: quality.loss }));
-        if (quality.jitter !== null) parts.push(t('channel.pathJitter', { n: quality.jitter }));
-        if (quality.kbps !== null) parts.push(t('channel.pathBitrate', { n: quality.kbps }));
-    }
-    node.title = parts.join(' · ');
-}
-
-// ---------------------------------------------------------------------------
-// inbound link quality — cumulative RTP counters say nothing about a RATE, so
-// every path poll diffs packetsLost/packetsReceived since the previous one.
-// Sustained high loss flips an "unstable" badge on the member card (with
-// hysteresis so a single bad poll doesn't flicker it); the per-poll values
-// feed the path-badge hover detail. Only an ALIVE link is judged — a broken
-// one already shows the recovery badge.
-// ---------------------------------------------------------------------------
-
-const LOSS_BAD_PCT = 10; // a poll at/above this counts as bad
-const LOSS_OK_PCT = 5; // at/below this counts as good (in between: neither)
-const UNSTABLE_BAD_POLLS = 3; // ~15s at the 5s poll cadence → badge on
-const UNSTABLE_GOOD_POLLS = 2; // clean polls before the badge clears
-// peerId -> { last, loss, jitter, kbps, bad, good, unstable }
-const lossStreaks = new Map();
-
-function notePeerLoss(peerId, info) {
-    const rec = lossStreaks.get(peerId) || {
-        last: null,
-        loss: null,
-        jitter: null,
-        kbps: null,
-        bad: 0,
-        good: 0,
-        unstable: false,
-    };
-    const inbound = info?.inbound;
-    if (inbound) {
-        const prev = rec.last;
-        rec.jitter = inbound.jitter !== null ? Math.round(inbound.jitter * 1000) : null;
-        if (prev && inbound.timestamp > prev.timestamp) {
-            const dLost = inbound.packetsLost - prev.packetsLost;
-            const dRecv = inbound.packetsReceived - prev.packetsReceived;
-            const dSec = (inbound.timestamp - prev.timestamp) / 1000;
-            // negative deltas = counter reset (SSRC switch): skip the rate, rebase
-            if (dLost >= 0 && dRecv >= 0) {
-                const total = dLost + dRecv;
-                const loss = total > 0 ? (dLost / total) * 100 : 0;
-                rec.loss = Math.round(loss * 10) / 10;
-                rec.kbps =
-                    dSec > 0 ? Math.round(((inbound.bytesReceived - prev.bytesReceived) * 8) / dSec / 1000) : null;
-                if (loss >= LOSS_BAD_PCT) {
-                    rec.bad += 1;
-                    rec.good = 0;
-                } else if (loss <= LOSS_OK_PCT) {
-                    rec.good += 1;
-                    rec.bad = 0;
-                }
-            }
-        }
-        rec.last = inbound;
-    }
-    const was = rec.unstable;
-    if (!rec.unstable && rec.bad >= UNSTABLE_BAD_POLLS) rec.unstable = true;
-    else if (rec.unstable && rec.good >= UNSTABLE_GOOD_POLLS) rec.unstable = false;
-    lossStreaks.set(peerId, rec);
-    if (was !== rec.unstable) updatePeerUnstable(peerId);
-}
-
-function updatePeerUnstable(peerId) {
-    const node = $(`#memberList .member[data-id="${peerId}"]`);
-    if (node) node.classList.toggle('unstable', !!lossStreaks.get(peerId)?.unstable);
-}
-
-// ---------------------------------------------------------------------------
-// relay upgrade — ICE nominates the first working pair, which can be the TURN
-// relay when direct checks were still in flight (cold DNS, slow NAT binding,
-// coturn auth round-trip); WebRTC never re-runs checks on a connected link, so
-// a connected-but-relayed path stays relayed forever. Fed by the path poll:
-// once a link sits on relay past RELAY_UPGRADE_GRACE_MS, re-punch with an
-// iceRestart (chat DataChannel preserved). Glare arbitration mirrors the
-// recovery ladder — only the lower session-id side initiates, and the restart
-// re-runs checks on BOTH ends, so the peer needs no watchdog of its own.
-// Attempts are capped: when direct is impossible (symmetric NAT, blocked UDP)
-// another restart is pointless churn that only blips the audio.
-//
-// 🔴 The budget must survive everything the app reports about a healthy link:
-// the 10s recovery scan re-emits 'connected' for every peer, and a restart makes
-// the path read 'unknown' for a moment. Cancelling the record on either signal
-// resets `since`/`attempts` from inside the attempt it is supposed to bound —
-// which is how 1.1.5 ended up never firing (grace 12s > scan 10s).
-// Only these clear it: path is p2p, peer left / link broken (peerRecovery), the
-// peer left the room, or we left.
-// ---------------------------------------------------------------------------
-
-const RELAY_UPGRADE_GRACE_MS = 12000; // relayed this long after connect → try re-punching
-const RELAY_UPGRADE_RETRY_MS = 10000; // after a restart, let fresh checks settle before judging
-const RELAY_UPGRADE_MAX_ATTEMPTS = 2;
-const RELAY_UPGRADE_TOTAL_MS = 45000; // hard window, also bounds restartIce deferrals
-// peerId -> { timer, attempts, since, done, busy }
-//   done = attempts exhausted, tombstone so the poll stops re-arming
-//   busy = our re-offer is in flight, don't stack a second one
-const relayUpgrades = new Map();
-
-function noteRelayUpgrade(peerId, info) {
-    if (!info || peerRecovery.has(peerId) || !selfUuid || selfUuid >= peerId) {
-        // link gone, or this side isn't the one allowed to re-punch
-        cancelRelayUpgrade(peerId);
-        return;
-    }
-    if (info.type === 'p2p') {
-        // direct — the upgrade landed (or was never needed): start clean next time
-        cancelRelayUpgrade(peerId);
-        return;
-    }
-    // 'unknown' is transitional: our own restart is re-checking, or the candidate
-    // reports aren't readable yet. Keep the budget — cancelling here would reset
-    // the attempt counter from inside the restart it is supposed to bound.
-    if (info.state !== 'connected' || info.type !== 'relay') return;
-
-    let rec = relayUpgrades.get(peerId);
-    if (!rec) {
-        rec = { timer: null, attempts: 0, since: Date.now(), done: false, busy: false };
-        relayUpgrades.set(peerId, rec);
-    }
-    if (rec.done || rec.timer || rec.busy) return; // exhausted / armed / offer in flight
-    const due = Math.max(RELAY_UPGRADE_GRACE_MS - (Date.now() - rec.since), 0);
-    rec.timer = setTimeout(() => relayUpgradeTick(peerId), due);
-}
-
-function relayUpgradeTick(peerId) {
-    const rec = relayUpgrades.get(peerId);
-    if (!rec) return;
-    rec.timer = null;
-    if (rec.busy) {
-        // the previous offer hasn't settled — let it, then judge again
-        scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-        return;
-    }
-    // Peer gone, broken link, or not our turn to initiate: nothing left to judge.
-    if (!mesh?.entries.has(peerId) || peerRecovery.has(peerId) || !selfUuid || selfUuid >= peerId) {
-        cancelRelayUpgrade(peerId);
-        return;
-    }
-    // connPaths is written only by the 5s path poll, so this snapshot can still
-    // describe the restart that just finished (state 'connecting', type
-    // 'unknown'). Only a proven 'p2p' ends the cycle — treating "no verdict yet"
-    // as "upgrade not needed" would drop the record and hand the link a fresh
-    // 2 attempts, which is how a slow-settling restart turns into an endless
-    // renegotiation loop. Unknown waits for the next poll instead.
-    const info = connPaths.get(peerId);
-    if (info?.type === 'p2p') {
-        cancelRelayUpgrade(peerId);
-        return;
-    }
-    const relayed = info?.state === 'connected' && info.type === 'relay';
-    if (rec.attempts >= RELAY_UPGRADE_MAX_ATTEMPTS || Date.now() - rec.since >= RELAY_UPGRADE_TOTAL_MS) {
-        if (relayed) console.warn('[mesh] relay upgrade: giving up, link stays on TURN', peerId);
-        // tombstone: stay in the map so the poll doesn't re-arm a fresh cycle
-        rec.done = true;
-        return;
-    }
-    if (!relayed) {
-        // no verdict yet (restart still settling / candidates unreadable): look again
-        scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-        return;
-    }
-    rec.busy = true;
-    // restartIce resolves false (never rejects) when the pc is mid-negotiation
-    // or closed; the catch arm only guards a future signature change.
-    mesh.restartIce(peerId).then(
-        (sent) => {
-            rec.busy = false;
-            if (!relayUpgrades.has(peerId)) return; // cancelled while the offer was in flight
-            if (!sent) {
-                // mid-negotiation (reverse offer in flight): retry soon, don't burn an attempt
-                scheduleRelayUpgradeRetry(peerId, 6000);
-                return;
-            }
-            rec.attempts += 1;
-            console.log(
-                '[mesh] relay upgrade: ice restart sent',
-                peerId,
-                `${rec.attempts}/${RELAY_UPGRADE_MAX_ATTEMPTS}`
-            );
-            scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-        },
-        () => {
-            rec.busy = false;
-            if (relayUpgrades.has(peerId)) scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-        }
-    );
-}
-
-function scheduleRelayUpgradeRetry(peerId, delay) {
-    const rec = relayUpgrades.get(peerId);
-    if (!rec) return;
-    clearTimeout(rec.timer);
-    rec.timer = setTimeout(() => relayUpgradeTick(peerId), delay);
-}
-
-function cancelRelayUpgrade(peerId) {
-    const rec = relayUpgrades.get(peerId);
-    if (!rec) return;
-    clearTimeout(rec.timer);
-    relayUpgrades.delete(peerId);
-}
-
-function showOutageBanner(mode) {
-    $('#outageBanner').classList.remove('hidden');
-    $('#outageBanner').dataset.mode = mode;
-    $('#outageTitle').textContent = t(mode === 'failed' ? 'channel.outageFailedTitle' : 'channel.outageTitle');
-    $('#outageHint').textContent = t(mode === 'failed' ? 'channel.outageFailedHint' : 'channel.outageRecovering');
-    $('#outageActionBtn').textContent = t(mode === 'failed' ? 'channel.outageReload' : 'channel.outageRejoin');
-}
-
-function hideOutageBanner() {
-    $('#outageBanner').classList.add('hidden');
-}
-
-// ---------------------------------------------------------------------------
-// members
-// ---------------------------------------------------------------------------
-
-function syncMembers(peersMap) {
-    // peer ids are SESSION uuids (stable across our own reconnects) — our own
-    // id is selfUuid, never the ephemeral socket.id
-    const selfId = selfUuid;
-    for (const [peerId, info] of Object.entries(peersMap)) {
-        if (roomMetaKey(peerId)) continue;
-        if (peerId === selfId) continue;
-        const existing = members.get(peerId);
-        const name = info.peer_name || existing?.peer_name || '?';
-        const avatar =
-            typeof info.peer_avatar === 'string' &&
-            info.peer_avatar.length <= AVATAR_MAX_CHARS &&
-            DATA_URL_RE.test(info.peer_avatar)
-                ? info.peer_avatar
-                : existing?.avatar;
-        if (avatar) {
-            avatars.set(name, avatar);
-            capAvatars();
-        }
-        members.set(peerId, {
-            peer_name: name,
-            peer_presenter: !!info.peer_presenter,
-            peer_audio_status: info.peer_audio_status === true,
-            peer_deafen: info.peer_deafen === true,
-            peer_share: info.peer_share === true,
-            joined_at: info.joined_at || existing?.joined_at || Date.now(),
-            avatar,
-            // remembered per-user volume; an in-session adjustment wins over the stored one
-            volume: existing?.volume ?? (name !== '?' ? (peerVolumes[name] ?? 1) : 1),
-        });
-        if (!existing) armConnectingBadge(peerId);
-    }
-    // drop stale entries
-    for (const peerId of [...members.keys()]) {
-        if (peerId === selfId) continue;
-        if (!peersMap[peerId]) dropPeer(peerId, { silent: true });
-    }
-    ensureSelfMember();
-    renderMembers();
-}
-
-function roomMetaKey(key) {
-    return key === 'lock' || key === 'password' || key === 'joinLock';
-}
-
-function ensureSelfMember() {
-    members.set(selfUuid, {
-        peer_name: selfName,
-        peer_presenter: isPresenter,
-        peer_audio_status: onAir(),
-        peer_deafen: deafened,
-        peer_share: shareSound.active(),
-        joined_at: 0, // self always first
-        avatar: selfAvatar || undefined,
-        self: true,
-    });
-    if (selfAvatar) avatars.set(selfName, selfAvatar);
-}
-
-function dropPeer(peerId, { silent = false } = {}) {
-    cancelPeerRecovery(peerId);
-    cancelRelayUpgrade(peerId);
-    clearConnectingBadge(peerId);
-    clearTimeout(pathEarlyTimers.get(peerId));
-    pathEarlyTimers.delete(peerId);
-    connPaths.delete(peerId);
-    lossStreaks.delete(peerId);
-    members.delete(peerId);
-    pruneAvatars();
-    mesh?.removePeer(peerId);
-    hub?.unwatch(peerId);
-    hub?.stopPeer(peerId);
-    const audio = audioEls.get(peerId);
-    if (audio) {
-        audio.srcObject = null;
-        audio.remove();
-        audioEls.delete(peerId);
-    }
-    if (!silent) renderMembers();
-}
-
-/** avatars is keyed by display name — forget names no longer in the room. */
-function pruneAvatars() {
-    const present = new Set();
-    for (const info of members.values()) {
-        if (info.peer_name) present.add(info.peer_name);
-    }
-    for (const name of [...avatars.keys()]) {
-        if (!present.has(name)) avatars.delete(name);
-    }
-}
-
-/** Belt-and-braces: a peer cycling nicknames+avatars can't grow the map forever. */
-function capAvatars() {
-    while (avatars.size > AVATARS_MAX) avatars.delete(avatars.keys().next().value);
-}
-
-function memberAvatarNode(info) {
-    if (info.avatar) {
-        const img = el('img', { class: 'member-avatar img', alt: '' });
-        img.src = info.avatar; // validated data URL
-        return img;
-    }
-    return el(
-        'div',
-        { class: 'member-avatar', style: { background: avatarColor(info.peer_name) } },
-        (info.peer_name || '?').trim().charAt(0).toUpperCase() || '?'
-    );
-}
-
-function micIconNode(on) {
-    return el('span', {
-        class: 'member-mic' + (on ? '' : ' off'),
-        html: on ? MIC_ON_SVG : MIC_OFF_SVG,
-    });
-}
-
-const DEAFEN_SVG =
-    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M21 14a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2h1"/><path d="M3 14a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2H5"/><line x1="2" y1="2" x2="22" y2="22"/></svg>';
-
-/** Headphones-off badge on a member card (visible while self-deafened). */
-function deafenIconNode(on) {
-    return el('span', {
-        class: 'member-deafen' + (on ? ' on' : ''),
-        title: t('channel.deafenBadge'),
-        html: DEAFEN_SVG,
-    });
-}
-
-const SHARE_SVG =
-    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
-
-/** Music-note badge on a member card — that member is sharing sound into the channel. */
-function shareIconNode(on) {
-    return el('span', {
-        class: 'member-share' + (on ? ' on' : ''),
-        title: t('channel.shareBadge'),
-        html: SHARE_SVG,
-    });
-}
-
-/** Per-user volume row (0-300%), revealed on card hover. */
-function memberVolumeNode(peerId, info) {
-    const initial = Math.round((info.volume ?? 1) * 100);
-    const value = el('span', { class: 'member-volume-val', text: `${initial}%` });
-    const slider = el('input', {
-        type: 'range',
-        min: 0,
-        max: 300,
-        step: 5,
-        value: String(initial),
-        title: t('channel.userVolume'),
-    });
-    slider.addEventListener('input', () => {
-        info.volume = Number(slider.value) / 100;
-        value.textContent = `${slider.value}%`;
-        slider.closest('.member-volume')?.classList.add('adjusted');
-        savePeerVolume(info.peer_name, info.volume);
-        reapplyPeerVolume(peerId);
-    });
-    return el(
-        'div',
-        { class: 'member-volume' + (initial !== 100 ? ' adjusted' : '') },
-        el('span', { class: 'member-volume-icon', html: VOL_SVG }),
-        slider,
-        value
-    );
-}
-
-function renderMembers() {
-    const list = $('#memberList');
-    const sorted = [...members.entries()].sort((a, b) => {
-        const [, a2] = a;
-        const [, b2] = b;
-        if (!!a2.self !== !!b2.self) return a2.self ? -1 : 1;
-        if (!!a2.peer_presenter !== !!b2.peer_presenter) return a2.peer_presenter ? -1 : 1;
-        return (a2.joined_at || 0) - (b2.joined_at || 0);
-    });
-
-    list.replaceChildren(
-        ...sorted.map(([peerId, info]) => {
-            const node = el('li', {
-                class:
-                    'member' +
-                    (info.self ? ' self-member' : '') +
-                    (peerRecovery.has(peerId) ? ' lost' : '') +
-                    (stuckConnecting.has(peerId) ? ' connecting' : '') +
-                    (lossStreaks.get(peerId)?.unstable ? ' unstable' : ''),
-                dataset: { id: peerId },
-            });
-            node.append(
-                memberAvatarNode(info),
-                el(
-                    'div',
-                    { class: 'member-info' },
-                    el(
-                        'div',
-                        { class: 'member-name' },
-                        `${info.peer_name}`,
-                        info.self ? el('span', { class: 'you', text: `（${t('channel.you')}）` }) : null
-                    ),
-                    el(
-                        'div',
-                        { class: 'member-sub' },
-                        info.peer_presenter ? el('span', { class: 'badge host', text: t('channel.hostBadge') }) : null,
-                        info.self && textOnly ? el('span', { class: 'badge', text: t('channel.textOnlyBadge') }) : null,
-                        !info.self
-                            ? el('span', { class: 'badge connect-badge', text: t('channel.peerConnecting') })
-                            : null,
-                        !info.self
-                            ? el('span', { class: 'badge recover-badge', text: t('channel.peerOffline') })
-                            : null,
-                        !info.self
-                            ? el('span', { class: 'badge unstable-badge', text: t('channel.peerUnstable') })
-                            : null,
-                        !info.self ? pathBadgeNode(peerId) : null,
-                        deafenIconNode(!!info.peer_deafen),
-                        shareIconNode(!!info.peer_share),
-                        micIconNode(info.peer_audio_status)
-                    )
-                )
-            );
-
-            if (!info.self) node.append(memberVolumeNode(peerId, info));
-
-            if (isPresenter && !info.self) {
-                node.append(
-                    el(
-                        'div',
-                        { class: 'member-actions' },
-                        el('button', {
-                            class: 'btn ghost sm',
-                            text: t('channel.renameMember'),
-                            onclick: () => renamePeer(peerId),
-                        }),
-                        el('button', {
-                            class: 'btn ghost sm',
-                            text: t('channel.muteMember'),
-                            onclick: () => mutePeer(peerId),
-                        }),
-                        el('button', {
-                            class: 'btn danger sm',
-                            text: t('channel.removeMember'),
-                            onclick: () => kickPeer(peerId),
-                        })
-                    )
-                );
-            }
-
-            // touch fallback: hover never happens on a phone, so tapping a
-            // member row reveals the volume slider (and host actions) instead
-            node.addEventListener('click', (event) => {
-                if (event.target.closest('button, input, a')) return;
-                const wasOpen = node.classList.contains('open');
-                for (const other of list.querySelectorAll('.member.open')) other.classList.remove('open');
-                if (!wasOpen) node.classList.add('open');
-            });
-
-            return node;
-        })
-    );
-    $('#memberCount').textContent = String(members.size);
-}
-
-/**
- * Update one member's mic icon in place — remote peerStatus flips (and local
- * push-to-talk) must not rebuild the list, or a volume slider mid-drag dies.
- */
-function updateMicIconNode(peerId, on) {
-    const node = $(`#memberList .member[data-id="${peerId}"] .member-mic`);
-    if (!node) {
-        renderMembers();
-        return;
-    }
-    node.className = 'member-mic' + (on ? '' : ' off');
-    node.innerHTML = on ? MIC_ON_SVG : MIC_OFF_SVG;
-}
-
-function updateOnlineCount() {
-    $('#onlineCount').textContent = t('index.online', { n: members.size });
-    $('#memberCount').textContent = String(members.size);
-}
-
-// ---------------------------------------------------------------------------
-// host actions / moderation
-// ---------------------------------------------------------------------------
-
-function mutePeer(peerId) {
-    socket.emit('peerAction', {
-        room_id: channelId,
-        peer_name: selfName,
-        peer_uuid: selfUuid,
-        peer_id: peerId,
-        peer_action: 'muteAudio',
-        send_to_all: false,
-    });
-}
-
-function kickPeer(peerId) {
-    socket.emit('kickOut', {
-        room_id: channelId,
-        peer_name: selfName,
-        peer_uuid: selfUuid,
-        peer_id: peerId,
-        peer_kicked_reason: 'removed by host',
-    });
-}
-
-// ----- host renames a member's joined nickname -----
-
-let renameTarget = null; // peerId the rename modal is editing
-
-function renamePeer(peerId) {
-    renameTarget = peerId;
-    $('#renameInput').value = members.get(peerId)?.peer_name || '';
-    $('#renameError').textContent = '';
-    $('#renameModal').classList.remove('hidden');
-    $('#renameInput').focus();
-    $('#renameInput').select();
-}
-
-function closeRenameModal() {
-    renameTarget = null;
-    $('#renameModal').classList.add('hidden');
-}
-
-function onRenameSubmit(event) {
-    event.preventDefault();
-    const name = $('#renameInput').value.trim().slice(0, 24);
-    if (!name) {
-        $('#renameError').textContent = t('channel.errors.nickRequired');
-        return;
-    }
-    if (renameTarget && members.get(renameTarget)?.peer_name !== name) {
-        socket.emit('peerRename', {
-            room_id: channelId,
-            peer_name: selfName,
-            peer_uuid: selfUuid,
-            peer_id: renameTarget,
-            peer_name_new: name,
-        });
-    }
-    closeRenameModal();
-}
-
-/** Button content from a static SVG constant + a textContent label — never
- * string-built HTML, so a future interpolated label can't become an XSS sink. */
-function setIconBtn(btn, icon, label) {
-    btn.replaceChildren(el('span', { html: icon }), el('span', { text: label }));
-}
 
 function updateHeaderActions() {
     $('#hostBadge').classList.toggle('hidden', !isPresenter);
@@ -2125,1225 +822,11 @@ function updateHeaderActions() {
     const lockBtn = $('#lockBtn');
     lockBtn.classList.toggle('hidden', !isPresenter);
     if (isPresenter) {
-        setIconBtn(
+        mem.setIconBtn(
             lockBtn,
             joinLockOn ? LOCK_SVG : UNLOCK_SVG,
             joinLockOn ? t('channel.unlockBtn') : t('channel.lockBtn')
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// mic controls (manual mute + push-to-talk share one effective state)
-// ---------------------------------------------------------------------------
-
-/** mic is actually transmitting right now */
-function onAir() {
-    return !!localStream && micOn && (!settings.ptt || pttActive);
-}
-
-/**
- * Push the on-air state onto the right tracks. Normally the outgoing track
- * carries the mute gate; while a sound share runs the outgoing MIX must stay
- * live (it carries the music) and the mic alone is gated at its raw capture.
- */
-function applyTrackGate(live) {
-    if (!localStream) return;
-    if (micProcessed && shareSound.active()) {
-        rawMicStream?.getAudioTracks().forEach((track) => (track.enabled = live));
-        localStream.getAudioTracks().forEach((track) => (track.enabled = true));
-    } else {
-        localStream.getAudioTracks().forEach((track) => (track.enabled = live));
-    }
-}
-
-function onMicBtnClick() {
-    if (textOnly || !localStream) {
-        enableVoice();
-        return;
-    }
-    setMic(!micOn);
-}
-
-function setMic(on) {
-    const next = on && !!localStream;
-    if (next === micOn) return;
-    micOn = next;
-    applyMicState();
-    // click feedback for manual toggles and host mutes; push-to-talk keys
-    // drive applyMicState directly and must stay silent
-    playSound(next ? 'micOn' : 'micOff');
-}
-
-/** Push the effective state to the local track / peers / UI. */
-function applyMicState() {
-    const live = onAir();
-    applyTrackGate(live);
-    if (socket && joined && live !== lastOnAir) {
-        lastOnAir = live;
-        socket.emit('peerStatus', {
-            room_id: channelId,
-            peer_name: selfName,
-            peer_id: selfUuid,
-            element: 'audio',
-            status: live,
-        });
-    }
-    const self = members.get(selfUuid);
-    if (self) self.peer_audio_status = live;
-    updateVoiceControls();
-    syncPttHoldButton();
-    updateMicIconNode(selfUuid, live); // in-place: full re-renders kill a mid-drag volume slider
-}
-
-// ----- self-deafen: mute every remote member at once (own mic unaffected) -----
-
-function toggleDeafen() {
-    deafened = !deafened;
-    applyDeafenState();
-}
-
-function applyDeafenState() {
-    $('#deafenBtn').classList.toggle('on', deafened);
-    $('#deafenBtn').title = t(deafened ? 'channel.undeafen' : 'channel.deafen');
-    const self = members.get(selfUuid);
-    if (self) self.peer_deafen = deafened;
-    const icon = $('#memberList .member[data-id="' + (selfUuid || '') + '"] .member-deafen');
-    if (icon) icon.classList.toggle('on', deafened);
-    reapplyAllVolumes(); // 0×anything silences both playback paths
-    if (socket && joined && deafened !== lastDeafenSent) {
-        lastDeafenSent = deafened;
-        socket.emit('peerStatus', {
-            room_id: channelId,
-            peer_name: selfName,
-            peer_id: selfUuid,
-            element: 'deafen',
-            status: deafened,
-        });
-    }
-}
-
-// ----- "listen together": shared sound state -> room + UI -----
-
-function broadcastShare(on) {
-    const self = members.get(selfUuid);
-    if (self) self.peer_share = on;
-    const node = $(`#memberList .member[data-id="${selfUuid || ''}"] .member-share`);
-    if (node) node.classList.toggle('on', on);
-    else renderMembers();
-    const btn = $('#shareSoundBtn');
-    if (btn) {
-        btn.classList.toggle('on', on);
-        btn.title = t(on ? 'channel.shareStop' : 'channel.shareSound');
-    }
-    if (socket && joined) {
-        socket.emit('peerStatus', {
-            room_id: channelId,
-            peer_name: selfName,
-            peer_id: selfUuid,
-            element: 'share',
-            status: on,
-        });
-    }
-}
-
-function bindPttKeys() {
-    window.addEventListener('keydown', (event) => {
-        // Ctrl/Cmd+M: toggle the mic from anywhere (typing in the composer
-        // must keep inserting an 'm', so it stays exempt)
-        if ((event.ctrlKey || event.metaKey) && event.code === 'KeyM') {
-            const target = event.target;
-            const typing =
-                target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
-            if (!typing && joined && localStream) {
-                event.preventDefault();
-                setMic(!micOn);
-            }
-            return;
-        }
-        if (event.code !== PTT_KEY_CODE || event.repeat) return;
-        if (!settings.ptt || !joined || !localStream || !micOn) return;
-        const target = event.target;
-        if (
-            target &&
-            (target.tagName === 'INPUT' ||
-                target.tagName === 'TEXTAREA' ||
-                target.tagName === 'SELECT' ||
-                target.isContentEditable)
-        )
-            return;
-        event.preventDefault();
-        pttActive = true;
-        applyMicState();
-    });
-    window.addEventListener('keyup', (event) => {
-        if (event.code !== PTT_KEY_CODE || !pttActive) return;
-        pttActive = false;
-        applyMicState();
-    });
-}
-
-// ----- touch push-to-talk: a hold-to-talk button for devices with no keyboard -----
-// Visible only while PTT mode is on and the primary pointer is coarse.
-
-const coarsePointer = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-
-function bindPttHoldButton() {
-    const btn = $('#pttHoldBtn');
-    if (!btn) return;
-    const start = (event) => {
-        if (!settings.ptt || !joined || !localStream || !micOn || pttActive) return;
-        event.preventDefault();
-        btn.classList.add('active');
-        pttActive = true;
-        applyMicState();
-    };
-    const stop = () => {
-        if (!pttActive) return;
-        btn.classList.remove('active');
-        pttActive = false;
-        applyMicState();
-    };
-    btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', stop);
-    btn.addEventListener('pointercancel', stop);
-    btn.addEventListener('pointerleave', stop);
-    btn.addEventListener('contextmenu', (event) => event.preventDefault());
-}
-
-function syncPttHoldButton() {
-    const btn = $('#pttHoldBtn');
-    if (!btn) return;
-    const show = coarsePointer && settings.ptt && joined && !!localStream && micOn;
-    btn.classList.toggle('hidden', !show);
-    if (!show) btn.classList.remove('active');
-}
-
-function buildAudioConstraints() {
-    const audio = {
-        // music mode overrides the processing toggles — browsers mangle music
-        echoCancellation: settings.musicMode ? false : settings.echoCancellation,
-        noiseSuppression: settings.musicMode ? false : settings.noiseSuppression,
-        autoGainControl: settings.musicMode ? false : settings.autoGainControl,
-    };
-    if (settings.micDeviceId) audio.deviceId = { exact: settings.micDeviceId };
-    return { audio };
-}
-
-/**
- * Point the outgoing track at the gain-processed mic stream while the shared
- * AudioContext runs; a suspended context would emit silence, so the raw track
- * goes out instead until the context resumes (statechange re-runs this).
- */
-function syncMicPipeline() {
-    if (!rawMicStream) return;
-    const wantProcessed = !!hub?.ctx && hub.ctx.state === 'running';
-    if (wantProcessed === micProcessed) return;
-    const live = onAir();
-    if (wantProcessed) {
-        const processed = hub.attachMic(rawMicStream, settings.micVolume);
-        if (!processed) return;
-        localStream = processed;
-        micProcessed = true;
-        applyTrackGate(live); // before the swap: gate the mixed stream (or the raw mic while sharing)
-        mesh?.replaceAudioTrack(processed.getAudioTracks()[0], processed);
-    } else {
-        hub?.detachMic();
-        rawMicStream.getAudioTracks().forEach((track) => (track.enabled = live));
-        localStream = rawMicStream;
-        micProcessed = false;
-        mesh?.replaceAudioTrack(rawMicStream.getAudioTracks()[0], rawMicStream);
-    }
-    if (hub?.ctx) hub.watch('self', localStream, localLevelCb);
-}
-
-/**
- * Re-acquire the mic with the current settings (device switch or processing
- * toggle) and hot-swap the outgoing track — no renegotiation involved.
- */
-async function reacquireMic() {
-    const hadStream = !!localStream;
-    const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
-    const track = stream.getAudioTracks()[0];
-    // a device/processing change keeps the current mute state; enabling voice turns the mic on
-    micOn = hadStream ? micOn : true;
-    textOnly = false;
-    screenLock.sync(); // voice enabled from text-only: hold the screen awake now
-    track.enabled = onAir();
-    if (hub) await hub.ensureContext().catch(() => {});
-
-    // rebuild the input-gain pipeline around the new capture; the previous mic
-    // (raw capture + processed track) is stopped after the hot-swap
-    const oldRaw = rawMicStream;
-    const oldOut = localStream;
-    hub?.detachMic();
-    micProcessed = false;
-    rawMicStream = stream;
-    localStream = stream;
-    syncMicPipeline(); // upgrades to the processed track when possible
-    if (!micProcessed) mesh?.replaceAudioTrack(track, stream);
-    if (hub?.ctx) hub.watch('self', localStream, localLevelCb);
-    ensureSelfMember();
-    applyMicState();
-    oldOut?.getTracks().forEach((old) => old.stop());
-    oldRaw?.getTracks().forEach((old) => old.stop());
-    refreshDeviceSelects(); // labels become available after permission is granted
-}
-
-async function enableVoice() {
-    try {
-        await reacquireMic();
-    } catch {
-        toast(t('channel.errors.micDenied'), 'warn');
-    }
-}
-
-/** Settings-modal callers: re-acquire the mic, toasting the shared denial. */
-function reacquireMicOrToast() {
-    return reacquireMic().catch(() => toast(t('channel.errors.micDenied'), 'warn'));
-}
-
-function updateVoiceControls() {
-    const micBtn = $('#micBtn');
-    const live = onAir();
-    if (!localStream) {
-        micBtn.classList.add('muted');
-        setIconBtn(micBtn, MIC_OFF_SVG, t('channel.enableVoice'));
-    } else if (micOn && settings.ptt) {
-        micBtn.classList.toggle('muted', !live);
-        setIconBtn(micBtn, live ? MIC_ON_SVG : MIC_OFF_SVG, t('channel.pttOn'));
-    } else if (micOn) {
-        micBtn.classList.remove('muted');
-        setIconBtn(micBtn, MIC_ON_SVG, t('channel.micOn'));
-    } else {
-        micBtn.classList.add('muted');
-        setIconBtn(micBtn, MIC_OFF_SVG, t('channel.micOff'));
-    }
-    if (!live) {
-        $('#micLevelBar').style.width = '0%';
-        $('#settingsMicBar').style.width = '0%';
-    }
-}
-
-// ---------------------------------------------------------------------------
-// remote audio playback — per-user volume 0..300% x master 0..100%
-// ---------------------------------------------------------------------------
-
-/** Chromium: play through GainNodes (boost past 100% + AudioContext sink). */
-function webAudioPlayback() {
-    return !!hub?.ctx && hub.ctx.state === 'running' && typeof hub.ctx.setSinkId === 'function';
-}
-
-/** Context state flipped — move playback/mic between the gain path and raw paths. */
-function onCtxStateChange() {
-    if (webAudioPlayback()) {
-        for (const [peerId, audio] of [...audioEls]) {
-            if (audio.srcObject) attachRemoteAudio(peerId, audio.srcObject);
-        }
-        applySpeaker();
-    } else {
-        // suspended (again): the gain graph would be silent — play through elements
-        for (const [peerId, player] of [...(hub?.players?.entries() || [])]) {
-            const stream = player.src.mediaStream;
-            if (stream) attachRemoteAudio(peerId, stream);
-        }
-    }
-    syncMicPipeline(); // raw track <-> gain-processed track
-}
-
-/** total gain for a remote peer: per-user volume × master volume × (0 when deafened) */
-function peerTotalGain(peerId) {
-    return (members.get(peerId)?.volume ?? 1) * settings.volume * (deafened ? 0 : 1);
-}
-
-function removeAudioEl(peerId) {
-    const audio = audioEls.get(peerId);
-    if (audio) {
-        audio.srcObject = null;
-        audio.remove();
-        audioEls.delete(peerId);
-    }
-}
-
-function attachRemoteAudio(peerId, stream) {
-    const total = peerTotalGain(peerId);
-    if (webAudioPlayback() && hub.playPeer(peerId, stream, total)) {
-        removeAudioEl(peerId);
-        return;
-    }
-    // fallback path: <audio> elements honor element.setSinkId but cap at 100%
-    hub?.stopPeer(peerId);
-    let audio = audioEls.get(peerId);
-    if (!audio) {
-        audio = el('audio', { autoplay: '', playsinline: '' });
-        audio.style.display = 'none';
-        document.body.append(audio);
-        audioEls.set(peerId, audio);
-        applySink(audio);
-    }
-    audio.srcObject = stream;
-    audio.volume = Math.min(1, total);
-    audio.play().catch(() => {});
-}
-
-function reapplyPeerVolume(peerId) {
-    const total = peerTotalGain(peerId);
-    if (hub) hub.setPeerVolume(peerId, total);
-    const audio = audioEls.get(peerId);
-    if (audio) audio.volume = Math.min(1, total);
-}
-
-function reapplyAllVolumes() {
-    // members are keyed by session uuid — every entry is a remote peer
-    for (const peerId of members.keys()) reapplyPeerVolume(peerId);
-}
-
-/** Route remote playback to the selected output device. */
-async function applySpeaker() {
-    if (webAudioPlayback()) {
-        await hub.setSink(settings.spkDeviceId);
-        return;
-    }
-    for (const audio of audioEls.values()) await applySink(audio);
-}
-
-// ---------------------------------------------------------------------------
-// audio settings modal
-// ---------------------------------------------------------------------------
-
-function bindSettingsUi() {
-    micDropdown = createDropdown({
-        getItems: () => deviceItems('mic'),
-        getValue: () => settings.micDeviceId,
-        onSelect: (value) => {
-            settings.micDeviceId = value;
-            saveAudioSettings();
-            // switching device in text-only mode doubles as "enable voice"
-            if (localStream) reacquireMicOrToast();
-            else enableVoice();
-        },
-    });
-    spkDropdown = createDropdown({
-        getItems: () => deviceItems('spk'),
-        getValue: () => settings.spkDeviceId,
-        onSelect: (value) => {
-            settings.spkDeviceId = value;
-            saveAudioSettings();
-            applySpeaker();
-        },
-    });
-    $('#micDeviceSelect').append(micDropdown.el);
-    $('#spkDeviceSelect').append(spkDropdown.el);
-
-    $('#settingsBtn').addEventListener('click', openSettings);
-    $('#settingsCloseBtn').addEventListener('click', closeSettings);
-    $('#settingsModal').addEventListener('click', (event) => {
-        if (event.target === $('#settingsModal')) closeSettings();
-    });
-    bindAvatarUi();
-
-    for (const [id, key] of [
-        ['nsToggle', 'noiseSuppression'],
-        ['ecToggle', 'echoCancellation'],
-        ['agcToggle', 'autoGainControl'],
-    ]) {
-        $(`#${id}`).addEventListener('change', (event) => {
-            settings[key] = event.target.checked;
-            saveAudioSettings();
-            if (localStream) reacquireMicOrToast();
-        });
-    }
-
-    $('#musicToggle').addEventListener('change', (event) => {
-        settings.musicMode = event.target.checked;
-        // re-seed the bitrate slider with the mode's default (hand-tuning
-        // survives across sessions, but a mode switch is an explicit preset)
-        settings.opusBitrate = settings.musicMode ? 192 : 64;
-        saveAudioSettings();
-        reflectMusicMode();
-        reflectBitrate();
-        // re-capture under the overridden processing constraints (hot-swaps the
-        // outgoing track) and push the new bitrate onto live senders at once;
-        // the fmtp side (stereo) lands with the next SDP round
-        if (localStream) reacquireMicOrToast();
-        mesh?.setSendBitrate();
-    });
-
-    $('#pttToggle').addEventListener('change', (event) => {
-        settings.ptt = event.target.checked;
-        pttActive = false;
-        saveAudioSettings();
-        applyMicState();
-    });
-
-    $('#micVolumeSlider').addEventListener('input', (event) => {
-        settings.micVolume = Number(event.target.value) / 100;
-        $('#micVolumeVal').textContent = `${event.target.value}%`;
-        hub?.setMicGain(settings.micVolume); // takes effect immediately, no renegotiation
-        saveAudioSettings();
-    });
-
-    $('#bitrateSlider').addEventListener('input', (event) => {
-        settings.opusBitrate = Number(event.target.value);
-        $('#bitrateVal').textContent = `${event.target.value} kbps`;
-        saveAudioSettings();
-        // pushes onto live senders via setParameters, no renegotiation; the
-        // fmtp cap rides along on the next SDP round
-        mesh?.setSendBitrate();
-    });
-
-    $('#volumeSlider').addEventListener('input', (event) => {
-        settings.volume = Number(event.target.value) / 100;
-        $('#volumeVal').textContent = `${event.target.value}%`;
-        reapplyAllVolumes();
-        saveAudioSettings();
-    });
-
-    $('#testMicBtn').addEventListener('click', onTestMicClick);
-    $('#testSpkBtn').addEventListener('click', playTestBeep);
-
-    // operation sound effects: master switch, volume, per-event sound pickers
-    initSoundSettings({ applySink, toast });
-
-    // desktop notifications on mention (hidden where unsupported)
-    $('#notifySection').classList.toggle('hidden', !notifySupported);
-    $('#notifyToggle').addEventListener('change', onNotifyToggle);
-
-    navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceSelects);
-}
-
-async function onNotifyToggle(event) {
-    const on = event.target.checked;
-    if (!on) {
-        notifyEnabled = false;
-        localStorage.setItem(NOTIFY_KEY, '0');
-        return;
-    }
-    if (Notification.permission === 'granted') {
-        notifyEnabled = true;
-        localStorage.setItem(NOTIFY_KEY, '1');
-        return;
-    }
-    if (Notification.permission === 'denied') {
-        event.target.checked = false;
-        toast(t('channel.notifyBlocked'), 'warn');
-        return;
-    }
-    const permission = await Notification.requestPermission();
-    if (permission === 'granted') {
-        notifyEnabled = true;
-        localStorage.setItem(NOTIFY_KEY, '1');
-    } else {
-        event.target.checked = false;
-        if (permission === 'denied') toast(t('channel.notifyBlocked'), 'warn');
-    }
-}
-
-function openSettings() {
-    updateAvatarPreview();
-    reflectMusicMode();
-    $('#pttToggle').checked = settings.ptt;
-    $('#notifyToggle').checked = notifyEnabled;
-    spkDropdown.setDisabled(!sinkSupported);
-    $('#sinkUnsupported').classList.toggle('hidden', sinkSupported);
-    const pct = Math.round(settings.volume * 100);
-    $('#volumeSlider').value = String(pct);
-    $('#volumeVal').textContent = `${pct}%`;
-    const micPct = Math.round(settings.micVolume * 100);
-    $('#micVolumeSlider').value = String(micPct);
-    $('#micVolumeVal').textContent = `${micPct}%`;
-    reflectBitrate();
-    refreshDeviceSelects();
-    $('#settingsModal').classList.remove('hidden');
-}
-
-/** Music mode owns the three processing toggles — grays them out and reflects
- *  the forced-off capture state (the stored preferences survive underneath). */
-function reflectMusicMode() {
-    const on = settings.musicMode;
-    $('#musicToggle').checked = on;
-    $('#nsToggle').disabled = on;
-    $('#ecToggle').disabled = on;
-    $('#agcToggle').disabled = on;
-    if (on) {
-        $('#nsToggle').checked = false;
-        $('#ecToggle').checked = false;
-        $('#agcToggle').checked = false;
-    } else {
-        $('#nsToggle').checked = settings.noiseSuppression;
-        $('#ecToggle').checked = settings.echoCancellation;
-        $('#agcToggle').checked = settings.autoGainControl;
-    }
-}
-
-/** Sync the bitrate slider/readout from settings (NOT inside
- *  reflectMusicMode — opening the modal must not clobber a hand-tuned value). */
-function reflectBitrate() {
-    const kbps = opusFmtp().maxaveragebitrate / 1000;
-    $('#bitrateSlider').value = String(kbps);
-    $('#bitrateVal').textContent = `${kbps} kbps`;
-}
-
-function closeSettings() {
-    micDropdown?.close();
-    spkDropdown?.close();
-    $('#settingsModal').classList.add('hidden');
-    stopMicTest();
-}
-
-function deviceItems(kind) {
-    const list = kind === 'mic' ? micDevices : spkDevices;
-    const generic = t(kind === 'mic' ? 'settings.deviceMic' : 'settings.deviceSpk');
-    const items = [{ value: '', label: t('settings.defaultDevice') }];
-    list.forEach((device, index) => {
-        items.push({
-            value: device.deviceId,
-            label: ((device.label || '').trim() || `${generic} ${index + 1}`).slice(0, 60),
-        });
-    });
-    return items;
-}
-
-async function refreshDeviceSelects() {
-    let devices;
-    try {
-        devices = await navigator.mediaDevices.enumerateDevices();
-    } catch {
-        return;
-    }
-    micDevices = devices.filter((d) => d.kind === 'audioinput');
-    spkDevices = devices.filter((d) => d.kind === 'audiooutput');
-    micDropdown?.refresh();
-    spkDropdown?.refresh();
-}
-
-async function applySink(audioEl) {
-    if (!sinkSupported || !settings.spkDeviceId) return;
-    try {
-        await audioEl.setSinkId(settings.spkDeviceId);
-    } catch {
-        /* device vanished — keep the default output */
-    }
-}
-
-async function playTestBeep() {
-    const url = await getTestBeepUrl();
-    if (!url) return toast(t('common.error'), 'warn');
-    const beep = new Audio(url);
-    beep.volume = settings.volume;
-    await applySink(beep);
-    beep.play().catch(() => toast(t('common.error'), 'warn'));
-}
-
-// ----- mic test: live loopback — hear your own mic through the speakers with
-// a short delay; click again to stop. Taps the RAW capture so it works even
-// while the channel mic is muted, and applies the input volume itself -----
-
-const MIC_TEST_DELAY = 0.5; // seconds — long enough to feel like an echo, short enough to be live
-
-let micTest = null; // { src, delay, gain, timer }
-
-async function onTestMicClick() {
-    if (micTest) {
-        stopMicTest();
-        return;
-    }
-    if (!localStream) {
-        await enableVoice();
-        if (!localStream) return;
-    }
-    if (!hub?.ctx) return toast(t('settings.micTestUnsupported'), 'warn');
-    try {
-        await hub.ensureContext();
-    } catch {
-        /* fall through — the graph below will simply stay silent */
-    }
-    const ctx = hub.ctx;
-    const src = ctx.createMediaStreamSource(rawMicStream || localStream);
-    const delay = ctx.createDelay(2);
-    delay.delayTime.value = MIC_TEST_DELAY;
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
-    src.connect(delay).connect(gain).connect(ctx.destination); // ctx sink = selected speaker
-    gain.gain.setTargetAtTime(Math.max(0.2, settings.volume) * settings.micVolume, ctx.currentTime, 0.03);
-    micTest = {
-        src,
-        delay,
-        gain,
-        timer: setTimeout(stopMicTest, 30000), // safety stop: bounded feedback risk
-    };
-    const btn = $('#testMicBtn');
-    btn.classList.add('recording');
-    btn.textContent = t('settings.stopMicTest');
-}
-
-function stopMicTest() {
-    if (!micTest) return;
-    clearTimeout(micTest.timer);
-    try {
-        micTest.src.disconnect();
-        micTest.delay.disconnect();
-        micTest.gain.disconnect();
-    } catch {
-        /* already disconnected */
-    }
-    micTest = null;
-    resetTestMicBtn();
-}
-
-function resetTestMicBtn() {
-    const btn = $('#testMicBtn');
-    btn.classList.remove('recording');
-    btn.textContent = t('settings.testMic');
-}
-
-function loadAudioSettings() {
-    try {
-        const stored = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY) || '{}');
-        const merged = { ...defaultAudioSettings, ...stored };
-        // pre-slider music-mode users never stored a bitrate — keep their 192k
-        // ceiling instead of silently dropping them to the voice default
-        if (stored.opusBitrate === undefined && merged.musicMode) merged.opusBitrate = 192;
-        return merged;
-    } catch {
-        return { ...defaultAudioSettings };
-    }
-}
-
-function saveAudioSettings() {
-    try {
-        localStorage.setItem(AUDIO_SETTINGS_KEY, JSON.stringify(settings));
-    } catch {
-        /* storage full / disabled — settings just won't persist */
-    }
-}
-
-// per-user volumes, keyed by display name so they survive reconnects,
-// page reloads and follow the same person into other channels
-function loadPeerVolumes() {
-    try {
-        return JSON.parse(localStorage.getItem(PEER_VOLUMES_KEY)) || {};
-    } catch {
-        return {};
-    }
-}
-
-const peerVolumes = loadPeerVolumes();
-
-function savePeerVolume(name, volume) {
-    if (!name || name === '?') return;
-    delete peerVolumes[name]; // re-insert so recency order holds
-    if (volume !== 1) peerVolumes[name] = volume;
-    const keys = Object.keys(peerVolumes);
-    if (keys.length > 50) for (const key of keys.slice(0, keys.length - 50)) delete peerVolumes[key];
-    try {
-        localStorage.setItem(PEER_VOLUMES_KEY, JSON.stringify(peerVolumes));
-    } catch {
-        /* storage full — volumes still apply for this session */
-    }
-}
-
-// ---------------------------------------------------------------------------
-// chat + image sending
-// ---------------------------------------------------------------------------
-
-// composer textarea grows with the content up to this height, then scrolls
-const CHAT_INPUT_MAX_HEIGHT = 120;
-
-function bindChatInput() {
-    const input = $('#chatInput');
-    input.addEventListener('input', () => {
-        autoGrowChatInput();
-        updateMentionMenu();
-        if (input.value.trim()) maybeSendTyping();
-    });
-    input.addEventListener('keydown', onChatInputKeydown);
-    $('#replyCancelBtn').addEventListener('click', cancelReply);
-    $('#editCancelBtn').addEventListener('click', cancelEdit);
-
-    // composer emoji: insert at the caret via the shared palette
-    $('#emojiBtn').addEventListener('click', (event) => {
-        openEmojiPicker(event.currentTarget, (emoji) => {
-            const box = $('#chatInput');
-            const at = box.selectionStart ?? box.value.length;
-            const end = box.selectionEnd ?? at;
-            box.setRangeText(emoji, at, end, 'end');
-            box.focus();
-            autoGrowChatInput();
-        });
-    });
-
-    // QQ-style send-key menu behind the caret next to the send button
-    const menu = $('#sendKeyMenu');
-    const caret = $('#sendKeyBtn');
-    for (const radio of menu.querySelectorAll('input[name="sendKey"]')) {
-        if (radio.value === sendKey) radio.checked = true;
-        radio.addEventListener('change', () => {
-            sendKey = radio.value === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
-            localStorage.setItem(SEND_KEY_STORE, sendKey);
-            toggleSendKeyMenu(false);
-        });
-    }
-    caret.addEventListener('click', () => toggleSendKeyMenu(menu.classList.contains('hidden')));
-    document.addEventListener('click', (event) => {
-        if (!menu.classList.contains('hidden') && !menu.contains(event.target) && !caret.contains(event.target)) {
-            toggleSendKeyMenu(false);
-        }
-        // the mention menu only closes on outside clicks — its own buttons
-        // complete the mention instead
-        const mMenu = $('#mentionMenu');
-        if (!mMenu.classList.contains('hidden') && !mMenu.contains(event.target) && event.target !== input) {
-            closeMentionMenu();
-        }
-    });
-    document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') toggleSendKeyMenu(false);
-    });
-}
-
-function toggleSendKeyMenu(open) {
-    $('#sendKeyMenu').classList.toggle('hidden', !open);
-    $('#sendKeyBtn').classList.toggle('open', open);
-}
-
-function autoGrowChatInput() {
-    const input = $('#chatInput');
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, CHAT_INPUT_MAX_HEIGHT) + 'px';
-}
-
-function onChatInputKeydown(event) {
-    // mention menu navigation wins over everything else while it is open
-    if (mentionMenuKeydown(event)) return;
-    // Esc bails out of the reply/edit composers (sendKey menu handled below)
-    if (event.key === 'Escape') {
-        if (editing) cancelEdit();
-        else if (replyTo) cancelReply();
-    }
-    // IME composition: Enter confirms the candidate text, it must never send
-    if (event.isComposing || event.keyCode === 229) return;
-    if (event.key !== 'Enter') return;
-    // newline/sending is handled EXPLICITLY — relying on the browser's default
-    // insertion is unreliable across webviews and mobile keyboards
-    event.preventDefault();
-    const ctrlEnter = event.ctrlKey || event.metaKey;
-    if (sendKey === 'enter') {
-        if (ctrlEnter || event.shiftKey) insertChatNewline();
-        else $('#chatForm').requestSubmit();
-    } else if (ctrlEnter) {
-        $('#chatForm').requestSubmit();
-    } else {
-        insertChatNewline();
-    }
-}
-
-function insertChatNewline() {
-    const input = $('#chatInput');
-    // execCommand keeps the native undo stack; setRangeText is the fallback
-    let inserted = false;
-    try {
-        inserted = document.execCommand('insertText', false, '\n');
-    } catch {
-        /* execCommand unavailable — the setRangeText fallback below applies */
-    }
-    if (!inserted) input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end');
-    autoGrowChatInput();
-}
-
-/**
- * Give the server copies of an outgoing chat message for the history store.
- * Live delivery stays P2P over the DataChannel mesh; this relay is storage
- * only (the sender is the single reporting point, so nothing is stored
- * twice). A submit with images = one head event + one event per image —
- * each image rides alone because a whole batch can exceed the socket.io
- * packet cap; the server assembles the batch into one history row.
- */
-function emitChatForHistory(text, images = [], reply = null) {
-    if (!socket) return;
-    const replyField = reply ? { reply } : {};
-    if (!images.length) {
-        socket.emit('chat', { room_id: channelId, msg: text, ...replyField });
-        return;
-    }
-    const batch = crypto.randomUUID();
-    socket.emit('chat', { room_id: channelId, msg: text, batch, imgs: images.length, ...replyField });
-    for (const img of images) socket.emit('chat', { room_id: channelId, batch, img });
-}
-
-async function onChatSubmit(event) {
-    event.preventDefault();
-    if (!joined) return;
-    const input = $('#chatInput');
-    const text = input.value.trim().slice(0, 500);
-    const images = [...pendingImages];
-
-    // edit mode: resubmit one's own already-sent row (text only; the server
-    // broadcasts the persisted result back to everyone including us)
-    if (editing) {
-        if (text && socket) {
-            socket.emit('chatEdit', { room_id: channelId, ts: editing.ts, name: editing.name, msg: text });
-        }
-        cancelEdit();
-        return;
-    }
-
-    if (!text && !images.length) return;
-    input.value = '';
-    autoGrowChatInput();
-    closeMentionMenu();
-    clearPendingImages(); // the tray is emptied up-front; failures toast per image
-
-    const reply = replyPayload();
-    cancelReply();
-
-    if (!images.length) {
-        trySendChat({ type: 'chat', from: selfName, msg: text, reply });
-        chat.add({ name: selfName, text, self: true, reply });
-        emitChatForHistory(text, [], reply);
-        return;
-    }
-
-    // text + images go out as ONE batch = one merged bubble on every receiver
-    const payloads = [];
-    for (const item of images) {
-        try {
-            payloads.push(await fileToImageMessage(item.file));
-        } catch (err) {
-            const key = err?.message === 'too-large' ? 'chat.imageTooLarge' : 'chat.imageUnsupported';
-            toast(t(key), 'warn');
-        }
-    }
-    if (!payloads.length) {
-        if (text) {
-            trySendChat({ type: 'chat', from: selfName, msg: text, reply });
-            chat.add({ name: selfName, text, self: true, reply });
-            emitChatForHistory(text, [], reply);
-        }
-        return;
-    }
-
-    const batch = crypto.randomUUID();
-    if (!trySendChat({ type: 'chat', from: selfName, msg: text, batch, imgs: payloads.length, reply })) return;
-    chat.openBatch({ batch, name: selfName, text, count: payloads.length, self: true, reply });
-    emitChatForHistory(
-        text,
-        payloads.map((payload) => payload.dataUrl),
-        reply
-    );
-    for (const payload of payloads) {
-        try {
-            sendImageData({
-                send: (frame) => mesh.sendChat(frame),
-                from: selfName,
-                mime: payload.mime,
-                dataUrl: payload.dataUrl,
-                batch,
-            });
-        } catch {
-            // a DataChannel refused the frames (send buffer full / channel
-            // closing) — stop here instead of silently losing the remaining
-            // images of the batch
-            toast(t('chat.imageSendFailed'), 'warn');
-            break;
-        }
-        chat.addBatchImage(batch, payload.dataUrl, t('chat.image'));
-    }
-}
-
-/**
- * mesh.sendChat with a delivery-failure path: a DataChannel refusing frames
- * (buffer full / closing) must not surface as an uncaught throw. Returns
- * false — after toasting — when the frame could not be delivered.
- */
-function trySendChat(payload) {
-    try {
-        mesh.sendChat(payload);
-        return true;
-    } catch {
-        toast(t('chat.sendFailed'), 'warn');
-        return false;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// chat search — filters the RENDERED rows (loaded pages only, no server round
-// trip); the counter says how many of the loaded messages match
-// ---------------------------------------------------------------------------
-
-function bindChatSearch() {
-    const btn = $('#chatSearchBtn');
-    const input = $('#chatSearchInput');
-    const count = $('#chatSearchCount');
-    let open = false;
-
-    const close = () => {
-        open = false;
-        btn.classList.remove('active');
-        input.classList.add('hidden');
-        count.classList.add('hidden');
-        input.value = '';
-        chat?.setSearch('');
-    };
-    btn.addEventListener('click', () => {
-        if (open) return close();
-        open = true;
-        btn.classList.add('active');
-        input.classList.remove('hidden');
-        input.focus();
-    });
-    input.addEventListener('input', () => {
-        const result = chat?.setSearch(input.value);
-        if (result) {
-            count.classList.remove('hidden');
-            count.textContent = t('chat.searchCount', { hits: result.hits, total: result.total });
-        } else {
-            count.classList.add('hidden');
-        }
-    });
-    input.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') {
-            event.stopPropagation();
-            close();
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// appearance (settings modal): theme preference + UI language
-// ---------------------------------------------------------------------------
-
-function bindAppearanceControls() {
-    const themeSeg = $('#themeSegmented');
-    const renderTheme = () => {
-        const pref = getThemePref();
-        for (const btn of themeSeg.querySelectorAll('.segment')) {
-            btn.classList.toggle('active', btn.dataset.themePref === pref);
-        }
-    };
-    themeSeg.addEventListener('click', (event) => {
-        const pref = event.target.closest('.segment')?.dataset.themePref;
-        if (pref && pref !== getThemePref()) {
-            setThemePref(pref);
-            renderTheme();
-        }
-    });
-    renderTheme();
-
-    const langSeg = $('#langSegmented');
-    const renderLang = () => {
-        for (const btn of langSeg.querySelectorAll('.segment')) {
-            btn.classList.toggle('active', btn.dataset.lang === getLang());
-        }
-    };
-    langSeg.addEventListener('click', (event) => {
-        const lang = event.target.closest('.segment')?.dataset.lang;
-        if (lang && lang !== getLang()) {
-            // switching language reloads the page — take that as intended so
-            // the leave-site prompt stays quiet
-            intentionalUnload = true;
-            setLang(lang);
-        }
-    });
-    renderLang();
-}
-
-// ---------------------------------------------------------------------------
-// custom avatar (settings modal)
-// ---------------------------------------------------------------------------
-
-function safeAvatarUrl(value) {
-    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && DATA_URL_RE.test(value) ? value : '';
-}
-
-function bindAvatarUi() {
-    $('#avatarUploadBtn').addEventListener('click', () => $('#avatarFileInput').click());
-    $('#avatarResetBtn').addEventListener('click', () => applySelfAvatar(''));
-    $('#avatarFileInput').addEventListener('change', async (event) => {
-        const file = event.target.files?.[0];
-        event.target.value = ''; // allow re-picking the same file
-        if (!file) return;
-        try {
-            applySelfAvatar(await processAvatarFile(file));
-        } catch {
-            toast(t('chat.imageUnsupported'), 'warn');
-        }
-    });
-}
-
-function updateAvatarPreview() {
-    $('#avatarPreview').replaceChildren(memberAvatarNode({ peer_name: selfName, avatar: selfAvatar }));
-}
-
-function applySelfAvatar(dataUrl) {
-    selfAvatar = safeAvatarUrl(dataUrl);
-    if (selfAvatar) localStorage.setItem(AVATAR_KEY, selfAvatar);
-    else localStorage.removeItem(AVATAR_KEY);
-    if (selfAvatar) avatars.set(selfName, selfAvatar);
-    else avatars.delete(selfName);
-    chat.setAvatar(selfName, selfAvatar);
-    const me = members.get(selfUuid);
-    if (me) {
-        me.avatar = selfAvatar || undefined;
-        renderMembers();
-    }
-    updateAvatarPreview();
-    if (joined) socket.emit('peerAvatar', { room_id: channelId, avatar: selfAvatar || null });
-}
-
-/**
- * Center-crop any image to a small square JPEG data URL that always fits the
- * avatar broadcast budget (shrinks size/quality until it does).
- */
-async function processAvatarFile(file) {
-    if (!file || !file.type.startsWith('image/') || file.type === 'image/gif') {
-        throw new Error('not-image');
-    }
-    if (file.size > 8 * 1024 * 1024) throw new Error('too-large');
-    const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('read-failed'));
-        reader.readAsDataURL(file);
-    });
-    const img = await new Promise((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = () => reject(new Error('not-image'));
-        image.src = dataUrl;
-    });
-
-    const crop = (size) => {
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        const side = Math.min(img.naturalWidth, img.naturalHeight);
-        ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
-        return canvas;
-    };
-
-    let out = '';
-    for (const size of [96, 72, 56]) {
-        const canvas = crop(size);
-        for (const quality of [0.85, 0.7, 0.5]) {
-            out = canvas.toDataURL('image/jpeg', quality);
-            if (out.length <= 64 * 1024) return out;
-        }
-    }
-    return out; // 56px q0.5 always lands well under the 96KB broadcast cap
-}
-
-function bindImageUi() {
-    $('#imageBtn').addEventListener('click', () => $('#imageFileInput').click());
-    $('#imageFileInput').addEventListener('change', (event) => {
-        const files = [...(event.target.files || [])];
-        event.target.value = ''; // allow re-picking the same file
-        for (const file of files) addPendingImage(file);
-    });
-
-    // pasted images land in the composer tray, so text or more images can be
-    // added before everything goes out together
-    window.addEventListener('paste', (event) => {
-        if (!joined) return;
-        const items = event.clipboardData?.items;
-        if (!items) return;
-        for (const item of items) {
-            if (item.kind === 'file' && item.type.startsWith('image/')) {
-                const file = item.getAsFile();
-                if (file) {
-                    event.preventDefault();
-                    addPendingImage(file);
-                    return;
-                }
-            }
-        }
-    });
-}
-
-// ----- pending image tray (composer attachments) -----
-
-const MAX_PENDING_IMAGES = 6;
-let pendingImages = []; // {id, file, url}
-let pendingImageSeq = 0;
-
-function addPendingImage(file) {
-    if (!joined) return;
-    if (!file || !file.type.startsWith('image/')) return toast(t('chat.imageUnsupported'), 'warn');
-    if (file.size > 8 * 1024 * 1024) return toast(t('chat.imageTooLarge'), 'warn');
-    if (pendingImages.length >= MAX_PENDING_IMAGES) return toast(t('chat.imageTooMany'), 'warn');
-    pendingImages.push({ id: ++pendingImageSeq, file, url: URL.createObjectURL(file) });
-    renderPendingImages();
-}
-
-function removePendingImage(id) {
-    const index = pendingImages.findIndex((item) => item.id === id);
-    if (index === -1) return;
-    URL.revokeObjectURL(pendingImages[index].url);
-    pendingImages.splice(index, 1);
-    renderPendingImages();
-}
-
-function clearPendingImages() {
-    for (const item of pendingImages) URL.revokeObjectURL(item.url);
-    pendingImages = [];
-    renderPendingImages();
-}
-
-function renderPendingImages() {
-    const tray = $('#chatAttachments');
-    tray.replaceChildren(
-        ...pendingImages.map((item) =>
-            el(
-                'div',
-                { class: 'chat-attachment' },
-                el('img', { src: item.url, alt: t('chat.image') }),
-                el('button', {
-                    class: 'chat-attachment-remove',
-                    type: 'button',
-                    text: '✕',
-                    'aria-label': 'remove image',
-                    onclick: () => removePendingImage(item.id),
-                })
-            )
-        )
-    );
-    tray.classList.toggle('hidden', !pendingImages.length);
-}
-
-// ---------------------------------------------------------------------------
-// host login (pre-join)
-// ---------------------------------------------------------------------------
-
-function openHostModal() {
-    $('#hostLoginError').textContent = '';
-    $('#hostModal').classList.remove('hidden');
-    $('#hostUser').focus();
-}
-
-function closeHostModal() {
-    $('#hostModal').classList.add('hidden');
-}
-
-async function onHostLoginSubmit(event) {
-    event.preventDefault();
-    const username = $('#hostUser').value.trim();
-    const password = $('#hostPass').value;
-    $('#hostLoginError').textContent = '';
-    try {
-        const { token } = await api.hostLogin(channelId, username, password);
-        saveHostToken(token);
-        hostToken = token;
-        $('#hostReadyHint').classList.remove('hidden');
-        closeHostModal();
-        if (!joined) join({ textOnly: false });
-        else {
-            // presenter status is granted at join time — rejoin with the token
-            intentionalUnload = true;
-            location.reload();
-        }
-    } catch (err) {
-        const key = err?.status === 503 ? 'channel.hostLoginUnavailable' : 'channel.hostLoginFailed';
-        $('#hostLoginError').textContent = t(key);
     }
 }
 
@@ -3364,37 +847,27 @@ function teardown() {
     joined = false;
     socket?.disconnect();
     teardownMedia();
-    clearPendingImages();
-    clearTyping();
-    syncPttHoldButton();
-    for (const peerId of [...members.keys()]) dropPeer(peerId, { silent: true });
+    composer.clearPendingImages();
+    composer.clearTyping();
+    voice.syncPttHoldButton();
+    for (const peerId of [...members.keys()]) mem.dropPeer(peerId, { silent: true });
 }
 
 function teardownMedia() {
-    stopRecoveryScan();
-    clearPeerRecovery();
-    stopPathMonitor();
+    rec.stopRecoveryScan();
+    rec.clearPeerRecovery();
+    rec.stopPathMonitor();
+    rec.resetForTeardown();
+    se.clearDisconnectToast();
     screenLock.release();
     shareSound.stop({ silent: true }); // releases the capture + tells the room before the socket goes
-    // the connecting-badge state is per-peer too — drop it with the rest
-    for (const timer of connectingTimers.values()) clearTimeout(timer);
-    connectingTimers.clear();
-    stuckConnecting.clear();
-    hideOutageBanner();
-    b1Attempts = 0;
-    b1InFlight = false;
-    selfReconnecting = false;
-    clearTimeout(b1Timer);
-    clearTimeout(b1ResetTimer);
-    clearTimeout(disconnectToastTimer);
-    disconnectToastTimer = null;
-    stopMicTest();
+    settingsUi.stopMicTest();
+    voice.resetProcessed();
     mesh?.close();
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
     if (rawMicStream) rawMicStream.getTracks().forEach((track) => track.stop());
     rawMicStream = null;
     localStream = null;
-    micProcessed = false;
     hub?.destroy();
     hub = null;
 }
@@ -3421,7 +894,7 @@ function showJoinError(message) {
     teardownMedia();
     // the disconnect handler keeps mesh/members for a resume — this path is a
     // dead end, drop them here so no stale member cards linger behind the overlay
-    resetLocalMesh();
+    rec.resetLocalMesh();
     socket?.disconnect();
     socket = null;
     mesh = null;
@@ -3438,24 +911,35 @@ function showJoinFatal(message) {
 }
 
 // ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+function safeAvatarUrl(value) {
+    return typeof value === 'string' && value.length <= AVATAR_MAX_CHARS && DATA_URL_RE.test(value) ? value : '';
+}
+
+// ---------------------------------------------------------------------------
 // The #debug probes live in ./channel/debug.js — installed with a live
 // snapshot getter so every probe reads the controller state at call time.
 if (location.hash === '#debug') {
-    installDebugHooks(() => ({
-        hub,
-        mesh,
-        members,
-        audioEls,
-        connPaths,
-        lossStreaks,
-        peerRecovery,
-        micProcessed,
-        micTest,
-        settings,
-        localStream,
-        b1Attempts,
-        b1InFlight,
-        webAudioPlayback,
-        shareSound,
-    }));
+    installDebugHooks(() => {
+        const d = rec.debugState();
+        return {
+            hub,
+            mesh,
+            members,
+            audioEls,
+            connPaths: d.connPaths,
+            lossStreaks: d.lossStreaks,
+            peerRecovery: d.peerRecovery,
+            micProcessed: voice.micProcessed,
+            micTest: settingsUi.micTest,
+            settings,
+            localStream,
+            b1Attempts: d.b1Attempts,
+            b1InFlight: d.b1InFlight,
+            webAudioPlayback: voice.webAudioPlayback,
+            shareSound,
+        };
+    });
 }
