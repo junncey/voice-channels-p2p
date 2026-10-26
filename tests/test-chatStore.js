@@ -712,7 +712,12 @@ describe('test-chatStore', () => {
             const dir = tempDir('defer-compact');
             const store = new ChatStore({ dir, sweepMs: 0, maxBytes: 8192 });
             const bigText = 'x'.repeat(600); // stored capped at 500 → ~543B/line: ratio crosses at 14 lines
-            for (let i = 0; i < 14; i++) store.append('room1', { name: 'a', text: `${i}-${bigText}` });
+            // explicit distinct ts: 14 appends land in the same millisecond on fast CI
+            // runners, and edit() resolves a row by ts — identical ts would make the
+            // target ambiguous (the test then edits the wrong message).
+            const base = Date.now();
+            for (let i = 0; i < 14; i++)
+                store.append('room1', { name: 'a', text: `${i}-${bigText}` }, { ts: base + i });
             const file = store.fileFor('room1');
             const sizeAfterAppends = fs.statSync(file).size;
             sizeAfterAppends.should.be.above(8192 * 0.9); // ratio crossed …
