@@ -14,3 +14,13 @@ npm-debug.log
 
 # personal env
 .env
+
+# runtime state (bind-mounted in production; must never ship in the image —
+# the registry holds password hashes and chat_history holds private messages)
+app/src/channels.json
+app/src/channels.json.bak
+app/src/channels.json.restore
+app/src/chat_history
+app/src/audit.jsonl
+app/src/audit.jsonl.1
+app/src/backups
