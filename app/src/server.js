@@ -587,7 +587,7 @@ function sanitizeChannelPayload(body) {
 }
 
 // Host login -> JWT used as peer_token when joining the channel socket room
-app.post('/api/host/login', loginLimiter, (req, res) => {
+app.post('/api/host/login', loginLimiter, async (req, res) => {
     const { channelId, username, password } = sanitizeExceptSecrets(req.body, ['password']);
 
     if (!channelId || !username || !password) {
@@ -602,7 +602,7 @@ app.post('/api/host/login', loginLimiter, (req, res) => {
         return res.status(404).json({ error: 'Channel not found' });
     }
 
-    const host = channelStore.verifyHost(channelId, username, password);
+    const host = await channelStore.verifyHost(channelId, username, password);
     if (!host) {
         log.warn('Host login failed', { channelId, username: host || username, ip: getIP(req) });
         return res.status(401).json({ error: 'unauthorized' });
@@ -722,15 +722,15 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
     res.json({ settings: result.settings });
 });
 
-app.post('/api/admin/channels', requireAdmin, (req, res) => {
-    const result = channelStore.create(sanitizeChannelPayload(req.body));
+app.post('/api/admin/channels', requireAdmin, async (req, res) => {
+    const result = await channelStore.create(sanitizeChannelPayload(req.body));
     if (!result.ok) return res.status(400).json({ error: result.errors.join('; ') });
     audit.record('channelCreate', { id: result.channel.id, name: result.channel.name });
     res.status(201).json({ channel: result.channel });
 });
 
-app.put('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
-    const result = channelStore.update(req.params.channelId, sanitizeChannelPayload(req.body));
+app.put('/api/admin/channels/:channelId', requireAdmin, async (req, res) => {
+    const result = await channelStore.update(req.params.channelId, sanitizeChannelPayload(req.body));
     if (!result.ok) {
         return result.errors[0].includes('not found')
             ? res.status(404).json({ error: result.errors[0] })
@@ -1217,10 +1217,12 @@ io.sockets.on('connect', async (socket) => {
             // Persistent channel password (set in the admin console). Hosts
             // authenticate with their own credentials and always pass. A pending
             // temp room (channelDef still null) has no password yet.
+            // Verification is async (threadpool scrypt) — a wrong-password
+            // join flood must not stall the event loop.
             if (
                 !is_presenter &&
                 channelDef?.passwordHash &&
-                !channelStore.verifyChannelPassword(channel, channel_password)
+                !(await channelStore.verifyChannelPassword(channel, channel_password))
             ) {
                 log.debug('[' + socket.id + '] [Warning] channel password required/invalid', { channel });
                 recordJoinFailure(peer_ip);

@@ -9,7 +9,7 @@
 | #   | 任务                                                   | 类别     | 价值 | 工作量 | 前置条件                   |
 | --- | ------------------------------------------------------ | -------- | ---- | ------ | -------------------------- |
 | 1   | ✅ chatStore 写路径与 sweep 的阻塞改造（已实施，见下） | 性能     | 高   | 中大   | 设计评审 + 基准验证        |
-| 2   | scryptSync 异步化                                      | 稳定性   | 中   | 小中   | 无（按 IP 节流已部分缓解） |
+| 2   | ✅ scryptSync 异步化（已实施，见下）                   | 稳定性   | 中   | 小中   | 无（按 IP 节流已部分缓解） |
 | 3   | server.js / channel.js 大文件拆分                      | 可维护性 | 中   | 大     | 建议配合一轮功能冻结期     |
 | 4   | httpolyglot / colors 依赖替换                          | 依赖卫生 | 低   | 小     | 确认部署形态（#4a）        |
 
@@ -52,7 +52,19 @@
 
 **验收**：全量回归绿；新增基准用例——构造 12MB 频道，断言编辑/发言期间事件循环停顿（如并发期间 `/api/version` 的 p99 响应）在约定阈值内；崩溃注入（重写中途 kill）后重启无撕裂、无 quarantine 误报。
 
-## 2. scryptSync 异步化
+## 2. scryptSync 异步化 —— ✅ 已实施（2026-10-26）
+
+> **实施记录**：按原方案思路落地，全部验收项达成（212 passing，原 210 + 新增 2 条压力用例）。
+>
+> **最终设计**：
+>
+> - **哈希层全部异步**：新增 `scryptAsync`（`crypto.scrypt` 的 Promise 封装，跑 libuv 线程池），`hashPassword`/`verifyPassword`/`verifyPasswordCompat` 及类方法 `create`/`update`/`verifyHost`/`verifyChannelPassword` 改为 async；畸形 stored 哈希保留同步快速拒绝路径（不付 scrypt）。N=16384 安全参数未动。
+> - **create/update「先哈希、后变更」**：全部密钥哈希经 `Promise.all` 预计算完成后，注册表变更 + 原子写仍是一段同步代码——`await` 不落在校验与保存之间，并发 API 调用无法交错出半写状态。
+> - **调用点**（`server.js`）：host 登录与 admin 建频道/更新频道处理器 async 化；socket join 密码校验改为 `await verifyChannelPassword`（join 处理器本就 async）。restore/backup 不经哈希路径，零改动。
+> - **可选加固核实**：admin/host 登录端点本就挂 `loginLimiter`（按 IP 的 express-rate-limit），原「复用按 IP 失败计数」已由现状覆盖，无需重复建设。
+> - **验收用例**：(a) 结构用例（test-channelStore describe 0）——5ms 定时器**先排程**再触发 16 个并发错误密码校验，断言定时器漂移 <200ms；(b) 集成用例（test-server describe 4）——9 个并发错误密码 join（第 10 次失败会触发按 IP 冷却被静默丢弃，故上限取 9）期间轮询 `/api/version`，断言最坏延迟 <250ms，用例前后各做一次成功 join 复位失败计数、不透支后续用例的 join 预算。两条用例均做过**反向验证**：临时还原同步 scrypt 后结构用例漂移 506ms、集成用例 299ms，双双失败——测试确实守得住该行为。
+
+**原始分析**（2026-10-25 评审，留档）：
 
 **现状**（`app/src/channelStore.js`）：`hashPassword`/`verifyPassword` 用 `crypto.scryptSync`（N=16384，单次约 50–100ms），同步运行在三处热路径：host 登录（`verifyHost`）、admin 建频道的哈希、**socket join 的频道密码校验**（`verifyChannelPassword`）。错误密码的 join 洪水可直接占住事件循环。2026-10-25 批次已把 join 防爆破改为**按 IP 计数**（10 次/60s 冷却，`server.js` `recordJoinFailure`），单一来源的同步 scrypt 次数已被封顶，但分布式来源（多 IP）仍可叠加阻塞。
 

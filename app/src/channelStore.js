@@ -5,9 +5,11 @@
  *
  * Channels live in a JSON file (app/src/channels.json by default) and are
  * managed at runtime through the /admin console. Host credentials are stored
- * as scrypt hashes — plaintext passwords never touch the disk. Every mutation
- * is written back atomically (temp file + rename) so a crash can never leave
- * a half-written registry behind.
+ * as scrypt hashes — plaintext passwords never touch the disk. Hashing and
+ * verification are ASYNC (threadpool scrypt; create/update/verifyHost/
+ * verifyChannelPassword return Promises) so password work never blocks the
+ * event loop. Every mutation is written back atomically (temp file + rename)
+ * so a crash can never leave a half-written registry behind.
  */
 
 const fs = require('fs');
@@ -53,6 +55,18 @@ const RETENTION_MAX = 2160;
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1 };
 
+/**
+ * crypto.scrypt promisified. All hashing/verification goes through here —
+ * scryptSync (N=16384 ≈ 50-100ms) ran on the event loop, so a flood of
+ * wrong-password joins or host logins stalled every other request; the async
+ * form runs on the libuv threadpool instead. N is a security parameter and
+ * is deliberately NOT tuned down.
+ */
+const scryptAsync = (password, salt, keylen, options) =>
+    new Promise((resolve, reject) => {
+        crypto.scrypt(password, salt, keylen, options, (err, derivedKey) => (err ? reject(err) : resolve(derivedKey)));
+    });
+
 // Admin-managed runtime settings persisted alongside the channel list. The
 // env value (TEMP_ROOMS_ENABLED etc.) only seeds the default on first boot;
 // after that the console values in channels.json are the source of truth.
@@ -82,19 +96,19 @@ function isValidSettingValue(value, rule) {
     return Number.isInteger(value) && value >= rule.min && value <= rule.max;
 }
 
-function hashPassword(password) {
+async function hashPassword(password) {
     const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.scryptSync(String(password), salt, SCRYPT_KEYLEN, SCRYPT_OPTIONS).toString('hex');
+    const hash = (await scryptAsync(String(password), salt, SCRYPT_KEYLEN, SCRYPT_OPTIONS)).toString('hex');
     return `scrypt$${salt}$${hash}`;
 }
 
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
     if (typeof stored !== 'string') return false;
     const parts = stored.split('$');
     if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
     const [, salt, expected] = parts;
     try {
-        const actual = crypto.scryptSync(String(password), salt, SCRYPT_KEYLEN, SCRYPT_OPTIONS);
+        const actual = await scryptAsync(String(password), salt, SCRYPT_KEYLEN, SCRYPT_OPTIONS);
         const expectedBuf = Buffer.from(expected, 'hex');
         return expectedBuf.length === actual.length && crypto.timingSafeEqual(actual, expectedBuf);
     } catch {
@@ -121,8 +135,8 @@ function constantTimeEquals(a, b) {
  * (wired in from server.js, which owns the xss module) re-derives that form
  * so pre-fix stored hashes keep verifying.
  */
-function verifyPasswordCompat(password, stored, legacySanitize) {
-    if (verifyPassword(password, stored)) return true;
+async function verifyPasswordCompat(password, stored, legacySanitize) {
+    if (await verifyPassword(password, stored)) return true;
     if (typeof legacySanitize === 'function' && typeof password === 'string') {
         const legacyForm = legacySanitize(password);
         if (typeof legacyForm === 'string' && legacyForm !== password) {
@@ -629,7 +643,7 @@ class ChannelStore {
             );
     }
 
-    create(input) {
+    async create(input) {
         const { ok, errors, value } = validateDefinition(input);
         if (!ok) return { ok: false, errors };
 
@@ -641,6 +655,15 @@ class ChannelStore {
             return { ok: false, errors: [`channel id already exists: ${id}`] };
         }
 
+        // Hash every secret FIRST (async scrypt); the mutation + save below
+        // stays synchronous so concurrent API calls can never interleave
+        // between validation and persistence.
+        const hostsInput = value.hosts || [];
+        const [hostHashes, passwordHash] = await Promise.all([
+            Promise.all(hostsInput.map((h) => (h.password ? hashPassword(h.password) : null))),
+            value.password ? hashPassword(value.password) : null,
+        ]);
+
         const now = new Date().toISOString();
         const channel = {
             id,
@@ -648,13 +671,13 @@ class ChannelStore {
             description: value.description || '',
             public: value.public !== false,
             maxParticipants: value.maxParticipants || limits.DEFAULT_MAX_PARTICIPANTS,
-            hosts: (value.hosts || [])
-                .filter((h) => h.password)
-                .map((h) => ({ username: h.username, passwordHash: hashPassword(h.password) })),
+            hosts: hostsInput
+                .map((h, i) => (h.password ? { username: h.username, passwordHash: hostHashes[i] } : null))
+                .filter(Boolean),
             createdAt: now,
             updatedAt: now,
         };
-        if (value.password) channel.passwordHash = hashPassword(value.password);
+        if (passwordHash) channel.passwordHash = passwordHash;
         if (value.chatRetentionHours !== null && value.chatRetentionHours !== undefined) {
             channel.chatRetentionHours = value.chatRetentionHours;
         }
@@ -666,12 +689,21 @@ class ChannelStore {
         return { ok: true, channel: this.sanitize(channel, { includePrivate: true }) };
     }
 
-    update(id, input) {
+    async update(id, input) {
         const channel = this.get(id);
         if (!channel) return { ok: false, errors: [`channel not found: ${id}`] };
 
         const { ok, errors, value } = validateDefinition(input, { partial: true });
         if (!ok) return { ok: false, errors };
+
+        // Hash new secrets BEFORE touching the channel (async scrypt) so the
+        // mutation + save below stays one synchronous section — see create().
+        const [hostHashes, newChannelHash] = await Promise.all([
+            value.hosts !== undefined
+                ? Promise.all(value.hosts.map((h) => (h.password ? hashPassword(h.password) : null)))
+                : null,
+            value.password ? hashPassword(value.password) : null,
+        ]);
 
         if (value.name !== undefined) channel.name = value.name;
         if (value.description !== undefined) channel.description = value.description;
@@ -681,8 +713,8 @@ class ChannelStore {
         else if (value.chatRetentionHours !== undefined) channel.chatRetentionHours = value.chatRetentionHours;
 
         if (value.hosts !== undefined) {
-            channel.hosts = value.hosts.map((h) => {
-                if (h.password) return { username: h.username, passwordHash: hashPassword(h.password) };
+            channel.hosts = value.hosts.map((h, i) => {
+                if (h.password) return { username: h.username, passwordHash: hostHashes[i] };
                 // keep existing hash when the admin left the password field blank
                 const existing = channel.hosts.find((prev) => prev.username === h.username);
                 return { username: h.username, passwordHash: existing ? existing.passwordHash : '' };
@@ -690,7 +722,7 @@ class ChannelStore {
         }
 
         if (value.password !== undefined) {
-            if (value.password) channel.passwordHash = hashPassword(value.password);
+            if (newChannelHash) channel.passwordHash = newChannelHash;
             else delete channel.passwordHash; // '' explicitly clears the password
         }
 
@@ -716,15 +748,19 @@ class ChannelStore {
      * DEFAULT_CHANNEL_MODERATOR secret as the password (username is free-form).
      * Fallback logins carry `via: 'default-moderator'` so the join path can
      * re-check that the channel is STILL hostless before honoring the token.
-     * @returns {{username: string, via?: string}|null}
+     * @returns {Promise<{username: string, via?: string}|null>}
      */
-    verifyHost(id, username, password) {
+    async verifyHost(id, username, password) {
         const channel = this.get(id);
         if (!channel || typeof password !== 'string' || !password) return null;
 
         if (Array.isArray(channel.hosts) && channel.hosts.length) {
             const host = channel.hosts.find((h) => h.username === username);
-            if (host && host.passwordHash && verifyPasswordCompat(password, host.passwordHash, this.legacySanitize)) {
+            if (
+                host &&
+                host.passwordHash &&
+                (await verifyPasswordCompat(password, host.passwordHash, this.legacySanitize))
+            ) {
                 return { username: host.username };
             }
             return null;
@@ -748,15 +784,11 @@ class ChannelStore {
         return !!(channel && Array.isArray(channel.hosts) && channel.hosts.some((h) => h.username === username));
     }
 
-    /** Verify a join password against the channel's stored hash. */
-    verifyChannelPassword(id, password) {
+    /** Verify a join password against the channel's stored hash (async scrypt). */
+    async verifyChannelPassword(id, password) {
         const channel = this.get(id) || this.getTemp(id);
-        return Boolean(
-            channel &&
-            channel.passwordHash &&
-            typeof password === 'string' &&
-            verifyPasswordCompat(password, channel.passwordHash, this.legacySanitize)
-        );
+        if (!channel || !channel.passwordHash || typeof password !== 'string') return false;
+        return verifyPasswordCompat(password, channel.passwordHash, this.legacySanitize);
     }
 }
 

@@ -486,6 +486,46 @@ describe('test-server (signaling integration)', function () {
             data.temps.map((ch) => ch.id).should.not.containEql('zztemp1');
             void gone;
         });
+
+        it('should keep /api/version responsive during a wrong-password join flood', async () => {
+            const room = freshRoom('flood');
+            await adminApi('POST', '/api/admin/channels', { id: room, name: 'Flood', password: 'flood-pw' });
+
+            // a successful join resets the per-IP join-failure counter, so the
+            // flood below gets the full attempt budget regardless of earlier
+            // tests' rejected joins
+            const primed = track(connect());
+            primed.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'reset'), channel_password: 'flood-pw' });
+            await once(primed, 'serverInfo');
+
+            // 9 concurrent wrong-password joins (a 10th failure would arm the
+            // per-IP cooldown and get silently dropped) — each triggers an
+            // scrypt verify. scryptSync used to queue all of them on the event
+            // loop, stalling every HTTP request for hundreds of ms; the async
+            // form runs on the threadpool and the loop stays free. (Threshold
+            // generous for CI noise — the deterministic structural twin of
+            // this assertion lives in test-channelStore describe 0.)
+            const rejects = Array.from({ length: 9 }, () => {
+                const s = track(connect());
+                const got = once(s, 'channelPasswordRequired');
+                s.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'flood'), channel_password: 'nope' });
+                return got;
+            });
+            let worst = 0;
+            for (let i = 0; i < 4; i++) {
+                const t0 = Date.now();
+                const res = await fetch(URL + '/api/version');
+                res.status.should.equal(200);
+                worst = Math.max(worst, Date.now() - t0);
+            }
+            await Promise.all(rejects);
+            worst.should.be.below(250);
+
+            // hand the failure budget back to the tests that follow
+            const reset = track(connect());
+            reset.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'reset2'), channel_password: 'flood-pw' });
+            await once(reset, 'serverInfo');
+        });
     });
 
     describe('5. admin member list + kick', () => {

@@ -56,8 +56,8 @@ describe('test-restore', () => {
 
     it('should restore channels, settings and histories into a fresh server', async () => {
         source = buildSource();
-        source.channelStore.create({ id: 'chan1', name: 'One', hosts: [{ username: 'hosta', password: 'pw1' }] });
-        source.channelStore.create({ id: 'chan2', name: 'Two' });
+        await source.channelStore.create({ id: 'chan1', name: 'One', hosts: [{ username: 'hosta', password: 'pw1' }] });
+        await source.channelStore.create({ id: 'chan2', name: 'Two' });
         source.channelStore.updateSettings({ chatRetentionHours: 48 });
         source.chatStore.append('chan1', { name: 'alice', text: 'hello' }, { ts: Date.now() });
         source.chatStore.append(
@@ -75,7 +75,7 @@ describe('test-restore', () => {
         };
         // pre-existing state the restore must REPLACE, including a channel
         // that is NOT in the archive (whole-state semantics)
-        target.channelStore.create({ id: 'ghostchan', name: 'Old' });
+        await target.channelStore.create({ id: 'ghostchan', name: 'Old' });
         target.chatStore.append('ghostchan', { name: 'x', text: 'stale' });
         target.chatStore.append('chan2', { name: 'y', text: 'not in archive' });
 
@@ -90,7 +90,7 @@ describe('test-restore', () => {
         // settings travelled along
         target.channelStore.settings.chatRetentionHours.should.equal(48);
         // host password hashes survive (verify against the original password)
-        target.channelStore.verifyHost('chan1', 'hosta', 'pw1').username.should.equal('hosta');
+        (await target.channelStore.verifyHost('chan1', 'hosta', 'pw1')).username.should.equal('hosta');
         // history restored through the in-memory caches
         const rows = target.chatStore.history('chan1').messages;
         rows.map((r) => r.text).should.eql(['hello', 'edited?']);
@@ -105,7 +105,7 @@ describe('test-restore', () => {
 
     it('should accept legacy .json history entries from old backups', async () => {
         source = buildSource();
-        source.channelStore.create({ id: 'legacy1', name: 'L' });
+        await source.channelStore.create({ id: 'legacy1', name: 'L' });
         const archive = zlib.gzipSync(
             tarFiles([
                 { name: 'channels.json', data: fs.readFileSync(source.channelStore.filePath) },
@@ -138,7 +138,7 @@ describe('test-restore', () => {
             channelStore: new ChannelStore({ filePath: path.join(dir, 'channels.json'), autoInit: true }),
             chatStore: new ChatStore({ dir: path.join(dir, 'chat_history'), sweepMs: 0 }),
         };
-        target.channelStore.create({ id: 'keepme', name: 'K' });
+        await target.channelStore.create({ id: 'keepme', name: 'K' });
 
         // not gzip
         await applyBackupArchive(Buffer.from('plain text'), target).should.be.rejectedWith(/gzip/);

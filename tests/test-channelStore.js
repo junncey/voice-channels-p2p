@@ -27,21 +27,38 @@ function newStore(name, opts = {}) {
 
 describe('test-channelStore', () => {
     describe('0. Password hashing', () => {
-        it('should hash and verify with scrypt', () => {
-            const stored = hashPassword('s3cret-pass');
+        it('should hash and verify with scrypt', async () => {
+            const stored = await hashPassword('s3cret-pass');
             stored.should.startWith('scrypt$');
-            verifyPassword('s3cret-pass', stored).should.be.true();
-            verifyPassword('wrong', stored).should.be.false();
+            (await verifyPassword('s3cret-pass', stored)).should.be.true();
+            (await verifyPassword('wrong', stored)).should.be.false();
         });
 
-        it('should produce unique salts', () => {
-            hashPassword('same').should.not.equal(hashPassword('same'));
+        it('should produce unique salts', async () => {
+            (await hashPassword('same')).should.not.equal(await hashPassword('same'));
         });
 
-        it('should reject malformed stored hashes', () => {
-            verifyPassword('x', '').should.be.false();
-            verifyPassword('x', 'md5$abc$def').should.be.false();
-            verifyPassword('x', null).should.be.false();
+        it('should reject malformed stored hashes', async () => {
+            (await verifyPassword('x', '')).should.be.false();
+            (await verifyPassword('x', 'md5$abc$def')).should.be.false();
+            (await verifyPassword('x', null)).should.be.false();
+        });
+
+        it('should keep the event loop responsive while verifying (async scrypt)', async () => {
+            const store = newStore('flood');
+            await store.create({ id: 'flood', name: 'F', password: 'right-pw' });
+            // 16 concurrent wrong-password verifies ≈ 0.5-1.6s of scrypt work.
+            // The 5ms timer is scheduled BEFORE the flood starts: with scryptSync
+            // the 16 verifies block the loop inside Array.from, so the timer
+            // cannot fire until they all finish (drift ≥ the whole scrypt batch);
+            // on the threadpool the loop stays free (drift ≈ scheduling noise).
+            const t0 = Date.now();
+            const timer = new Promise((resolve) => setTimeout(resolve, 5));
+            const jobs = Array.from({ length: 16 }, () => store.verifyChannelPassword('flood', 'wrong-pw'));
+            await timer;
+            const drift = Date.now() - t0;
+            (await Promise.all(jobs)).every((ok) => ok === false).should.be.true();
+            drift.should.be.below(200);
         });
     });
 
@@ -54,12 +71,16 @@ describe('test-channelStore', () => {
             raw.channels.should.be.an.Array().and.empty();
         });
 
-        it('should persist channels across reloads (atomic write)', () => {
+        it('should persist channels across reloads (atomic write)', async () => {
             const filePath = tempFile('persist');
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
             const store = new ChannelStore({ filePath, autoInit: true });
-            store.create({ id: 'night-talk', name: '周五夜聊', hosts: [{ username: 'alice', password: 'pw1' }] });
+            await store.create({
+                id: 'night-talk',
+                name: '周五夜聊',
+                hosts: [{ username: 'alice', password: 'pw1' }],
+            });
 
             const reloaded = new ChannelStore({ filePath, autoInit: false });
             reloaded.exists('night-talk').should.be.true();
@@ -80,8 +101,8 @@ describe('test-channelStore', () => {
             store = newStore('crud');
         });
 
-        it('should manage temporary channels in memory only', () => {
-            store.create({ id: 'persisted', name: 'kept' });
+        it('should manage temporary channels in memory only', async () => {
+            await store.create({ id: 'persisted', name: 'kept' });
             const temp = store.getOrCreateTemp('quick-room');
             temp.temporary.should.be.true();
             store.getOrCreateTemp('quick-room').should.equal(temp); // created once
@@ -107,8 +128,8 @@ describe('test-channelStore', () => {
             store.isTemp('quick-room').should.be.false();
         });
 
-        it('should create a valid channel and never expose hashes', () => {
-            const res = store.create({
+        it('should create a valid channel and never expose hashes', async () => {
+            const res = await store.create({
                 id: 'good-id_1',
                 name: '频道A',
                 description: 'desc',
@@ -121,50 +142,50 @@ describe('test-channelStore', () => {
             should.not.exist(res.channel.hosts[0]?.passwordHash);
         });
 
-        it('should reject invalid ids', () => {
+        it('should reject invalid ids', async () => {
             for (const bad of ['ab', 'has space', '../etc/passwd', 'x'.repeat(33), '<script>']) {
-                store.create({ id: bad, name: 'n' }).ok.should.be.false(bad);
+                (await store.create({ id: bad, name: 'n' })).ok.should.be.false(bad);
             }
         });
 
-        it('should auto-generate a valid unique id when id is empty or omitted', () => {
-            const a = store.create({ id: '', name: 'auto A' });
+        it('should auto-generate a valid unique id when id is empty or omitted', async () => {
+            const a = await store.create({ id: '', name: 'auto A' });
             a.ok.should.be.true();
             store.isValidId(a.channel.id).should.be.true();
             a.channel.id.should.have.length(8);
             store.exists(a.channel.id).should.be.true();
 
-            const b = store.create({ name: 'auto B' });
+            const b = await store.create({ name: 'auto B' });
             b.ok.should.be.true();
             store.isValidId(b.channel.id).should.be.true();
             b.channel.id.should.not.equal(a.channel.id);
         });
 
-        it('should still reject an invalid explicit id (auto only applies to empty)', () => {
-            store.create({ id: 'x', name: 'too short' }).ok.should.be.false();
+        it('should still reject an invalid explicit id (auto only applies to empty)', async () => {
+            (await store.create({ id: 'x', name: 'too short' })).ok.should.be.false();
         });
 
-        it('should reject Object.prototype-poisoning reserved ids', () => {
+        it('should reject Object.prototype-poisoning reserved ids', async () => {
             for (const bad of ['constructor', '__proto__', 'prototype']) {
                 store.isValidId(bad).should.be.false(bad);
-                store.create({ id: bad, name: 'n' }).ok.should.be.false(bad);
+                (await store.create({ id: bad, name: 'n' })).ok.should.be.false(bad);
             }
             // exact match only: the id pattern is case-sensitive
             store.isValidId('Constructor').should.be.true();
         });
 
-        it('should reject duplicate ids and enforce field limits', () => {
-            store.create({ id: 'dup', name: 'first' }).ok.should.be.true();
-            store.create({ id: 'dup', name: 'second' }).ok.should.be.false();
+        it('should reject duplicate ids and enforce field limits', async () => {
+            (await store.create({ id: 'dup', name: 'first' })).ok.should.be.true();
+            (await store.create({ id: 'dup', name: 'second' })).ok.should.be.false();
 
-            store.create({ id: 'ok-id', name: 'n'.repeat(65) }).ok.should.be.false();
-            store.create({ id: 'ok-id2', name: 'n', maxParticipants: 99 }).ok.should.be.false();
-            store.create({ id: 'ok-id3', name: 'n', maxParticipants: 1 }).ok.should.be.false();
+            (await store.create({ id: 'ok-id', name: 'n'.repeat(65) })).ok.should.be.false();
+            (await store.create({ id: 'ok-id2', name: 'n', maxParticipants: 99 })).ok.should.be.false();
+            (await store.create({ id: 'ok-id3', name: 'n', maxParticipants: 1 })).ok.should.be.false();
         });
 
-        it('should update fields and keep blank-password hosts', () => {
-            store.create({ id: 'upd', name: 'old', hosts: [{ username: 'bob', password: 'pw2' }] });
-            const res = store.update('upd', {
+        it('should update fields and keep blank-password hosts', async () => {
+            await store.create({ id: 'upd', name: 'old', hosts: [{ username: 'bob', password: 'pw2' }] });
+            const res = await store.update('upd', {
                 name: 'new',
                 hosts: [
                     { username: 'bob', password: '' },
@@ -175,21 +196,21 @@ describe('test-channelStore', () => {
             res.channel.name.should.equal('new');
             res.channel.hosts.should.eql(['bob', 'carol']);
             // bob kept the original hash
-            store.verifyHost('upd', 'bob', 'pw2').should.be.ok();
-            store.verifyHost('upd', 'carol', 'pw3').should.be.ok();
-            should(store.verifyHost('upd', 'carol', 'pw2')).be.null();
+            (await store.verifyHost('upd', 'bob', 'pw2')).should.be.ok();
+            (await store.verifyHost('upd', 'carol', 'pw3')).should.be.ok();
+            should(await store.verifyHost('upd', 'carol', 'pw2')).be.null();
         });
 
-        it('should remove channels', () => {
-            store.create({ id: 'gone', name: 'n' });
+        it('should remove channels', async () => {
+            await store.create({ id: 'gone', name: 'n' });
             store.remove('gone').ok.should.be.true();
             store.exists('gone').should.be.false();
             store.remove('gone').ok.should.be.false();
         });
 
-        it('should list only public channels for the public list', () => {
-            store.create({ id: 'pub1', name: 'a', public: true });
-            store.create({ id: 'priv1', name: 'b', public: false });
+        it('should list only public channels for the public list', async () => {
+            await store.create({ id: 'pub1', name: 'a', public: true });
+            await store.create({ id: 'priv1', name: 'b', public: false });
             store
                 .list()
                 .map((c) => c.id)
@@ -202,33 +223,33 @@ describe('test-channelStore', () => {
     });
 
     describe('3. Host verification', () => {
-        it('should verify per-channel hosts', () => {
+        it('should verify per-channel hosts', async () => {
             const store = newStore('hostauth');
-            store.create({ id: 'chan1', name: 'c', hosts: [{ username: 'alice', password: 'pw1' }] });
-            store.create({ id: 'chan2', name: 'c', hosts: [{ username: 'bob', password: 'pw2' }] });
+            await store.create({ id: 'chan1', name: 'c', hosts: [{ username: 'alice', password: 'pw1' }] });
+            await store.create({ id: 'chan2', name: 'c', hosts: [{ username: 'bob', password: 'pw2' }] });
 
-            store.verifyHost('chan1', 'alice', 'pw1').should.eql({ username: 'alice' });
+            (await store.verifyHost('chan1', 'alice', 'pw1')).should.eql({ username: 'alice' });
             // wrong channel / wrong user / wrong password
-            should.not.exist(store.verifyHost('chan2', 'alice', 'pw1'));
-            should.not.exist(store.verifyHost('chan1', 'bob', 'pw1'));
-            should.not.exist(store.verifyHost('chan1', 'alice', 'pw2'));
-            should.not.exist(store.verifyHost('missing', 'alice', 'pw1'));
+            should.not.exist(await store.verifyHost('chan2', 'alice', 'pw1'));
+            should.not.exist(await store.verifyHost('chan1', 'bob', 'pw1'));
+            should.not.exist(await store.verifyHost('chan1', 'alice', 'pw2'));
+            should.not.exist(await store.verifyHost('missing', 'alice', 'pw1'));
         });
 
-        it('should fall back to the default moderator secret for host-less channels', () => {
+        it('should fall back to the default moderator secret for host-less channels', async () => {
             const store = newStore('fallback', { defaultModerator: 'letmein' });
-            store.create({ id: 'open', name: 'c' }); // no hosts configured
-            store.create({ id: 'locked', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
+            await store.create({ id: 'open', name: 'c' }); // no hosts configured
+            await store.create({ id: 'locked', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
 
-            store.verifyHost('open', 'anyone', 'letmein').should.be.ok();
-            should.not.exist(store.verifyHost('open', 'anyone', 'nope'));
+            (await store.verifyHost('open', 'anyone', 'letmein')).should.be.ok();
+            should.not.exist(await store.verifyHost('open', 'anyone', 'nope'));
             // fallback must NOT apply when the channel has its own hosts
-            should.not.exist(store.verifyHost('locked', 'anyone', 'letmein'));
+            should.not.exist(await store.verifyHost('locked', 'anyone', 'letmein'));
         });
 
-        it('should re-check host membership for join-time validation', () => {
+        it('should re-check host membership for join-time validation', async () => {
             const store = newStore('isHost');
-            store.create({ id: 'chan1', name: 'c', hosts: [{ username: 'alice', password: 'pw' }] });
+            await store.create({ id: 'chan1', name: 'c', hosts: [{ username: 'alice', password: 'pw' }] });
             store.isHost('chan1', 'alice').should.be.true();
             store.isHost('chan1', 'bob').should.be.false();
             store.isHost('nope', 'alice').should.be.false();
@@ -236,52 +257,52 @@ describe('test-channelStore', () => {
     });
 
     describe('4. Channel join password', () => {
-        it('should set a password on create and never expose the hash', () => {
+        it('should set a password on create and never expose the hash', async () => {
             const store = newStore('chanpw');
-            store.create({ id: 'locked', name: 'c', password: 'open-sesame' }).ok.should.be.true();
-            store.create({ id: 'open', name: 'c' }).ok.should.be.true();
+            (await store.create({ id: 'locked', name: 'c', password: 'open-sesame' })).ok.should.be.true();
+            (await store.create({ id: 'open', name: 'c' })).ok.should.be.true();
 
             store.sanitize(store.get('locked')).hasPassword.should.be.true();
             store.sanitize(store.get('open')).hasPassword.should.be.false();
             // hash never leaks through the sanitized copy
             JSON.stringify(store.sanitize(store.get('locked'))).should.not.containEql('scrypt$');
 
-            store.verifyChannelPassword('locked', 'open-sesame').should.be.true();
-            store.verifyChannelPassword('locked', 'wrong').should.be.false();
-            store.verifyChannelPassword('locked', '').should.be.false();
-            store.verifyChannelPassword('locked').should.be.false();
-            store.verifyChannelPassword('open', 'anything').should.be.false(); // no password set
-            store.verifyChannelPassword('missing', 'open-sesame').should.be.false();
+            (await store.verifyChannelPassword('locked', 'open-sesame')).should.be.true();
+            (await store.verifyChannelPassword('locked', 'wrong')).should.be.false();
+            (await store.verifyChannelPassword('locked', '')).should.be.false();
+            (await store.verifyChannelPassword('locked')).should.be.false();
+            (await store.verifyChannelPassword('open', 'anything')).should.be.false(); // no password set
+            (await store.verifyChannelPassword('missing', 'open-sesame')).should.be.false();
         });
 
-        it('should keep / replace / clear the password on update (tri-state)', () => {
+        it('should keep / replace / clear the password on update (tri-state)', async () => {
             const store = newStore('chanpw-upd');
-            store.create({ id: 'sec', name: 'c', password: 'first' });
+            await store.create({ id: 'sec', name: 'c', password: 'first' });
             // field omitted -> unchanged
-            store.update('sec', { name: 'renamed' }).ok.should.be.true();
-            store.verifyChannelPassword('sec', 'first').should.be.true();
+            (await store.update('sec', { name: 'renamed' })).ok.should.be.true();
+            (await store.verifyChannelPassword('sec', 'first')).should.be.true();
             // non-empty -> replaced
-            store.update('sec', { password: 'second' }).ok.should.be.true();
-            store.verifyChannelPassword('sec', 'first').should.be.false();
-            store.verifyChannelPassword('sec', 'second').should.be.true();
+            (await store.update('sec', { password: 'second' })).ok.should.be.true();
+            (await store.verifyChannelPassword('sec', 'first')).should.be.false();
+            (await store.verifyChannelPassword('sec', 'second')).should.be.true();
             // '' -> explicitly cleared
-            const cleared = store.update('sec', { password: '' });
+            const cleared = await store.update('sec', { password: '' });
             cleared.ok.should.be.true();
             cleared.channel.hasPassword.should.be.false();
             should.not.exist(store.get('sec').passwordHash);
         });
 
-        it('should persist the hash across reloads and reject bad values', () => {
+        it('should persist the hash across reloads and reject bad values', async () => {
             const filePath = tempFile('chanpw-file');
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
             const store = new ChannelStore({ filePath, autoInit: true });
-            store.create({ id: 'keep', name: 'c', password: 'gate' });
+            await store.create({ id: 'keep', name: 'c', password: 'gate' });
             const reloaded = new ChannelStore({ filePath, autoInit: false });
-            reloaded.verifyChannelPassword('keep', 'gate').should.be.true();
+            (await reloaded.verifyChannelPassword('keep', 'gate')).should.be.true();
 
-            store.create({ id: 'bad1', name: 'n', password: 'x'.repeat(65) }).ok.should.be.false();
-            store.create({ id: 'bad2', name: 'n', password: '   ' }).ok.should.be.false();
-            store.create({ id: 'bad3', name: 'n', password: 123 }).ok.should.be.false();
+            (await store.create({ id: 'bad1', name: 'n', password: 'x'.repeat(65) })).ok.should.be.false();
+            (await store.create({ id: 'bad2', name: 'n', password: '   ' })).ok.should.be.false();
+            (await store.create({ id: 'bad3', name: 'n', password: 123 })).ok.should.be.false();
         });
     });
 
@@ -501,11 +522,11 @@ describe('test-channelStore', () => {
             fs.existsSync(filePath).should.be.false();
         });
 
-        it('should restore a quarantined registry from the .bak copy', () => {
+        it('should restore a quarantined registry from the .bak copy', async () => {
             const filePath = tempFile('quarantine-bak');
             const store = new ChannelStore({ filePath, autoInit: true });
-            store.create({ id: 'keep-me', name: 'kept' });
-            store.create({ id: 'second', name: 'kept2' }); // .bak now holds the pre-write state
+            await store.create({ id: 'keep-me', name: 'kept' });
+            await store.create({ id: 'second', name: 'kept2' }); // .bak now holds the pre-write state
             fs.writeFileSync(filePath, 'garbage{', 'utf8'); // corrupt the live file
 
             const reloaded = new ChannelStore({ filePath, autoInit: false });
@@ -514,13 +535,13 @@ describe('test-channelStore', () => {
             fs.existsSync(`${filePath}.corrupt`).should.be.true();
         });
 
-        it('should refresh the .bak copy before every save', () => {
+        it('should refresh the .bak copy before every save', async () => {
             const filePath = tempFile('bak');
             const store = new ChannelStore({ filePath, autoInit: true });
-            store.create({ id: 'one', name: 'first' });
+            await store.create({ id: 'one', name: 'first' });
             fs.existsSync(`${filePath}.bak`).should.be.true();
             JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.should.be.empty(); // pre-create state
-            store.create({ id: 'two', name: 'second' });
+            await store.create({ id: 'two', name: 'second' });
             JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8'))
                 .channels.map((c) => c.id)
                 .should.eql(['one']);
@@ -528,28 +549,28 @@ describe('test-channelStore', () => {
     });
 
     describe('8. Default-moderator fallback tokens', () => {
-        it('should mark fallback logins with a via claim and configured hosts without', () => {
+        it('should mark fallback logins with a via claim and configured hosts without', async () => {
             const store = newStore('fallback-claim', { defaultModerator: 'letmein' });
-            store.create({ id: 'open', name: 'c' });
-            store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
+            await store.create({ id: 'open', name: 'c' });
+            await store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
 
-            const fallback = store.verifyHost('open', 'anyone', 'letmein');
+            const fallback = await store.verifyHost('open', 'anyone', 'letmein');
             fallback.should.be.ok();
             fallback.username.should.equal('anyone');
             fallback.via.should.equal('default-moderator');
 
-            store.verifyHost('hosted', 'a', 'b').should.eql({ username: 'a' }); // no via claim
-            should.not.exist(store.verifyHost('open', 'anyone', 'wrong'));
+            (await store.verifyHost('hosted', 'a', 'b')).should.eql({ username: 'a' }); // no via claim
+            should.not.exist(await store.verifyHost('open', 'anyone', 'wrong'));
         });
 
-        it('should report hostless channels for the join-time fallback re-check', () => {
+        it('should report hostless channels for the join-time fallback re-check', async () => {
             const store = newStore('hostless', { defaultModerator: 'letmein' });
-            store.create({ id: 'open', name: 'c' });
-            store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
+            await store.create({ id: 'open', name: 'c' });
+            await store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
             store.isHostless('open').should.be.true();
             store.isHostless('hosted').should.be.false();
             // configuring a real host revokes the fallback
-            store.update('open', { hosts: [{ username: 'real', password: 'pw' }] });
+            await store.update('open', { hosts: [{ username: 'real', password: 'pw' }] });
             store.isHostless('open').should.be.false();
             store.isHostless('missing').should.be.false();
         });
@@ -592,89 +613,89 @@ describe('test-channelStore', () => {
         beforeEach(() => {
             store = newStore('retention');
         });
-        it('should accept and expose a per-channel retention override', () => {
-            const { channel } = store.create({ id: 'keep-long', name: 'A', chatRetentionHours: 720 });
+        it('should accept and expose a per-channel retention override', async () => {
+            const { channel } = await store.create({ id: 'keep-long', name: 'A', chatRetentionHours: 720 });
             channel.chatRetentionHours.should.equal(720);
             store.sanitize(store.get('keep-long')).chatRetentionHours.should.equal(720);
         });
 
-        it('should inherit the global setting when absent or cleared', () => {
-            const { channel } = store.create({ id: 'inherit', name: 'B' });
+        it('should inherit the global setting when absent or cleared', async () => {
+            const { channel } = await store.create({ id: 'inherit', name: 'B' });
             should(channel.chatRetentionHours).be.null();
-            store.update('inherit', { chatRetentionHours: 0 });
+            await store.update('inherit', { chatRetentionHours: 0 });
             store.sanitize(store.get('inherit')).chatRetentionHours.should.equal(0);
-            store.update('inherit', { chatRetentionHours: null });
+            await store.update('inherit', { chatRetentionHours: null });
             should(store.sanitize(store.get('inherit')).chatRetentionHours).be.null();
         });
 
-        it('should reject out-of-range or non-integer overrides', () => {
-            store.create({ id: 'badret', name: 'C', chatRetentionHours: 9999 }).ok.should.be.false();
-            store.create({ id: 'badret2', name: 'D', chatRetentionHours: 1.5 }).ok.should.be.false();
-            store.create({ id: 'badret3', name: 'E', chatRetentionHours: 'abc' }).ok.should.be.false();
+        it('should reject out-of-range or non-integer overrides', async () => {
+            (await store.create({ id: 'badret', name: 'C', chatRetentionHours: 9999 })).ok.should.be.false();
+            (await store.create({ id: 'badret2', name: 'D', chatRetentionHours: 1.5 })).ok.should.be.false();
+            (await store.create({ id: 'badret3', name: 'E', chatRetentionHours: 'abc' })).ok.should.be.false();
         });
 
-        it('should survive a registry reload', () => {
-            store.create({ id: 'persist', name: 'F', chatRetentionHours: 48 });
+        it('should survive a registry reload', async () => {
+            await store.create({ id: 'persist', name: 'F', chatRetentionHours: 48 });
             const reloaded = new ChannelStore({ filePath: store.filePath, autoInit: false });
             reloaded.sanitize(reloaded.get('persist')).chatRetentionHours.should.equal(48);
         });
     });
 
     describe('10. Verbatim passwords + legacy sanitized-hash fallback', () => {
-        it('should hash and verify passwords containing markup characters verbatim', () => {
+        it('should hash and verify passwords containing markup characters verbatim', async () => {
             const secret = '<b>p&ss</b>"word\'';
-            const stored = hashPassword(secret);
-            verifyPassword(secret, stored).should.be.true();
-            verifyPassword('wrong', stored).should.be.false();
+            const stored = await hashPassword(secret);
+            (await verifyPassword(secret, stored)).should.be.true();
+            (await verifyPassword('wrong', stored)).should.be.false();
             // no legacy fallback wired: verifyPasswordCompat behaves like verifyPassword
-            ChannelStore.verifyPasswordCompat(secret, stored, null).should.be.true();
-            ChannelStore.verifyPasswordCompat('wrong', stored, null).should.be.false();
+            (await ChannelStore.verifyPasswordCompat(secret, stored, null)).should.be.true();
+            (await ChannelStore.verifyPasswordCompat('wrong', stored, null)).should.be.false();
         });
 
-        it('should keep pre-fix hashes of SANITIZED passwords verifiable via the fallback', () => {
+        it('should keep pre-fix hashes of SANITIZED passwords verifiable via the fallback', async () => {
             const checkXSS = require('../app/src/xss.js');
             const raw = 'a<b>&c';
             const legacyForm = checkXSS(raw);
             legacyForm.should.not.equal(raw); // sanity: the sanitizer really rewrites it
             // a pre-fix registry stored the hash of the SANITIZED form
-            const legacyHash = hashPassword(legacyForm);
+            const legacyHash = await hashPassword(legacyForm);
 
             const store = newStore('legacy-pw', { legacySanitize: (pw) => checkXSS(pw) });
-            store.create({ id: 'legacy-chan', name: 'Legacy', password: raw });
+            await store.create({ id: 'legacy-chan', name: 'Legacy', password: raw });
             // raw-first verify against the NEW hash
-            store.verifyChannelPassword('legacy-chan', raw).should.be.true();
+            (await store.verifyChannelPassword('legacy-chan', raw)).should.be.true();
 
             // plant the legacy hash and verify the raw password still passes
             store.get('legacy-chan').passwordHash = legacyHash;
-            store.verifyChannelPassword('legacy-chan', raw).should.be.true();
-            store.verifyChannelPassword('legacy-chan', 'wrong').should.be.false();
+            (await store.verifyChannelPassword('legacy-chan', raw)).should.be.true();
+            (await store.verifyChannelPassword('legacy-chan', 'wrong')).should.be.false();
         });
 
-        it('should verify hosts verbatim and via the legacy fallback', () => {
+        it('should verify hosts verbatim and via the legacy fallback', async () => {
             const checkXSS = require('../app/src/xss.js');
             const raw = 'h<b>ost';
             const store = newStore('legacy-host', { legacySanitize: (pw) => checkXSS(pw) });
-            store.create({ id: 'hostchan', name: 'H', hosts: [{ username: 'alice', password: raw }] });
-            store.verifyHost('hostchan', 'alice', raw).should.eql({ username: 'alice' });
+            await store.create({ id: 'hostchan', name: 'H', hosts: [{ username: 'alice', password: raw }] });
+            (await store.verifyHost('hostchan', 'alice', raw)).should.eql({ username: 'alice' });
 
-            store.get('hostchan').hosts[0].passwordHash = hashPassword(checkXSS(raw));
-            store.verifyHost('hostchan', 'alice', raw).should.eql({ username: 'alice' });
-            should(store.verifyHost('hostchan', 'alice', 'wrong')).be.null();
+            store.get('hostchan').hosts[0].passwordHash = await hashPassword(checkXSS(raw));
+            (await store.verifyHost('hostchan', 'alice', raw)).should.eql({ username: 'alice' });
+            should(await store.verifyHost('hostchan', 'alice', 'wrong')).be.null();
         });
     });
 
     describe('11. sanitize: host usernames are operator data', () => {
-        it('should omit hosts from the public shape and include them for admin', () => {
+        it('should omit hosts from the public shape and include them for admin', async () => {
             const store = newStore('hosts-gate');
-            store.create({ id: 'hosted', name: 'Hosted', hosts: [{ username: 'alice', password: 'pw1' }] });
+            await store.create({ id: 'hosted', name: 'Hosted', hosts: [{ username: 'alice', password: 'pw1' }] });
             const channel = store.get('hosted');
 
             should(store.sanitize(channel).hosts).be.undefined();
             store.sanitize(channel, { includePrivate: true }).hosts.should.eql(['alice']);
             // create/update results feed the admin console — they carry hosts
-            store
-                .create({ id: 'hosted2', name: 'H2', hosts: [{ username: 'bob', password: 'pw2' }] })
-                .channel.hosts.should.eql(['bob']);
+            (
+                await store.create({ id: 'hosted2', name: 'H2', hosts: [{ username: 'bob', password: 'pw2' }] })
+            ).channel.hosts.should.eql(['bob']);
         });
 
         it('should never generate an id shadowed by a live temp room', () => {
