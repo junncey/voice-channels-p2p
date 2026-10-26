@@ -33,4 +33,15 @@
     } catch (e) {
         /* no live switching on this engine — the next reload re-resolves */
     }
+
+    /* Service worker (offline shell + cached assets) — registered after load
+     * so it never competes with first paint. Best-effort: every page works
+     * without it. Strategy lives in /sw.js. */
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+            navigator.serviceWorker.register('/sw.js').catch(function (e) {
+                /* unsupported/blocked — the plain HTTP path is unaffected */
+            });
+        });
+    }
 })();

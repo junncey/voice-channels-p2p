@@ -111,10 +111,32 @@ function showUpdateBar(build) {
  * accidental exits (an active call) would otherwise confirm twice — once from
  * this bar, once from the browser's own prompt. Announce the intent first so
  * they can stand down; the listener runs synchronously, before beforeunload.
+ *
+ * The reload also purges the service worker's static cache first: without it
+ * stale-while-revalidate would re-serve the OLD js/css on this very reload
+ * (the background revalidation only lands on the next one) and "refresh now"
+ * would turn into a two-reload affair.
  */
 function reloadNow() {
     window.dispatchEvent(new Event('vc:unload-intent'));
-    location.reload();
+    purgeStaticCache().finally(() => location.reload());
+}
+
+/** Ask the controlling service worker to drop its static cache; resolves
+ *  quickly no matter what (no SW, no controller yet, or a wedged worker must
+ *  never delay the reload). */
+function purgeStaticCache() {
+    const sw = navigator.serviceWorker;
+    if (!sw?.controller) return Promise.resolve();
+    return new Promise((resolve) => {
+        const channel = new MessageChannel();
+        const timer = setTimeout(resolve, 400);
+        channel.port1.onmessage = () => {
+            clearTimeout(timer);
+            resolve();
+        };
+        sw.controller.postMessage({ type: 'vc-purge-static' }, [channel.port2]);
+    });
 }
 
 function dismissBuild(build) {

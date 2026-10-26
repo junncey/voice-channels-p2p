@@ -12,6 +12,7 @@ js/pages/channel/ together:
   settings.js      settings modal (devices/volumes/appearance/avatar)
   composer.js      chat composer (reply/edit/typing/mention/images)
   notify.js        unread title badge + @mention notifications
+  offline.js       offline banner (navigator.onLine strip)
   hostAuth.js      host login + channel-password persistence
   socketEvents.js  socket.io event wiring + chat history pagination
 
@@ -40,6 +41,7 @@ import { createVoice } from '/js/pages/channel/voice.js';
 import { createSettings } from '/js/pages/channel/settings.js';
 import { createComposer } from '/js/pages/channel/composer.js';
 import { createNotify } from '/js/pages/channel/notify.js';
+import { createOfflineBanner } from '/js/pages/channel/offline.js';
 import { createHostAuth, loadHostToken, loadChannelPw } from '/js/pages/channel/hostAuth.js';
 import { createSocketEvents } from '/js/pages/channel/socketEvents.js';
 import { $, el, avatarColor, randomNick, copyText, toast } from '/js/core/utils.js';
@@ -483,6 +485,7 @@ async function boot() {
     await initI18n();
     // a reload drops the call, so ask first while any peer link is up
     initVersionCheck({ isBusy: () => !!mesh && mesh.entries.size > 0 });
+    createOfflineBanner({ t });
     chat = initChat($('#chatMessages'), {
         emptyText: t('chat.empty'),
         downloadText: t('chat.saveImage'),

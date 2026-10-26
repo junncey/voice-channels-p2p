@@ -67,6 +67,7 @@
     "channel.errors.joinFailed": "Join failed, please retry",
     "channel.errors.micDenied": "Microphone unavailable, joining as text only",
     "channel.errors.disconnected": "Connection lost, reconnecting…",
+    "channel.offline": "You are offline — the channel reconnects automatically…",
     "channel.kicked": "You were removed from the channel by the host",
     "channel.channelDeleted": "This channel has been deleted",
     "channel.outageTitle": "Voice connection lost",

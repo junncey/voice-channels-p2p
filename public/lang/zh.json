@@ -67,6 +67,7 @@
     "channel.errors.joinFailed": "加入失败，请重试",
     "channel.errors.micDenied": "无法访问麦克风，将以仅文字模式加入",
     "channel.errors.disconnected": "连接已断开，正在尝试重连…",
+    "channel.offline": "网络已离线，恢复后将自动重连…",
     "channel.kicked": "你已被主持人移出频道",
     "channel.channelDeleted": "该频道已被删除",
     "channel.outageTitle": "语音连接已中断",

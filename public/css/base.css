@@ -333,6 +333,14 @@ select {
     color: var(--text-1);
 }
 
+/* offline strip (channel page) — update-bar layout, danger palette, no close
+   button: it disappears on its own when the network returns */
+.offline-bar {
+    padding-right: 16px;
+    background: var(--danger-dim);
+    color: var(--text-1);
+}
+
 /* ---------- toasts ---------- */
 
 .toasts {

@@ -22,9 +22,9 @@
 - `app/src/config.js` — 仅 7 个存活配置块；改配置须同步 `config.template.js` 与 `.env.template`（定时备份三个 env 直读、不经 config.js，老 config.js 无需重建）
 - `public/` — 前端全部在此：
     - `js/core/`（api/socket 内联于页面/webrtc mesh/audio WebAudio 管线/chat 消息列表/emoji 调色板+选择器/images/dropdown/i18n 含 `setLang`/sound 操作音效/theme 三态 dark|light|auto/utils/version 版本检测）
-    - `js/pages/`（index/channel/admin 页面控制器，channel.js 是核心但**只留共享状态与装配**；`js/pages/channel/` 子模块：recovery（自愈状态机）、members、voice、settings、composer、notify、hostAuth、socketEvents、wakeLock、debug 钩子——子模块为工厂函数，共享可重赋值状态经控制器的 `s` 存取器、跨模块调用经晚绑定 `x` 面，改接口先看 channel.js 尾部的 `Object.assign(x, …)`）
+    - `js/pages/`（index/channel/admin 页面控制器，channel.js 是核心但**只留共享状态与装配**；`js/pages/channel/` 子模块：recovery（自愈状态机）、members、voice、settings、composer、notify、offline（离线横幅）、hostAuth、socketEvents、wakeLock、share（一起听）、debug 钩子——子模块为工厂函数，共享可重赋值状态经控制器的 `s` 存取器、跨模块调用经晚绑定 `x` 面，改接口先看 channel.js 尾部的 `Object.assign(x, …)`）
     - `lang/zh.json`、`lang/en.json` 扁平键词典；`t(key, {name})` 占位符为 `{name}` 形式
-    - `manifest.webmanifest` + `images/icon-*.png` — PWA 安装（图标由 `scripts/gen-pwa-icons.js` 生成）
+    - `manifest.webmanifest` + `images/icon-*.png` — PWA 安装（图标由 `scripts/gen-pwa-icons.js` 生成）；`sw.js` — service worker（导航 network-first 且双键缓存「路由 URL + shell 资产路径」，`/images/**` cache-first，其余同源 GET SWR；`/api/**`、`/socket.io/**`、非 GET、跨域直通；**版本横幅的重载前必经 version.js 的 `vc-purge-static` 消息清静态缓存**，改缓存策略须同步 bump 缓存名后缀），注册在 `js/core/theme-boot.js`
 - `tests/` — mocha + should（channelStore/chatStore/validate/xss/version/opusFmtp/backup 含 tar reader/restore/audit/logs/i18n 词典对齐/embedHeaders CSP/server 信令集成）。**测试文件里不得提前 require `app/src/config.js`**——config 按 env 缓存，会污染 test-server.js 的 env 预置（参见 test-embed-headers.js 的缓存自清理）
 
 ## 关键约定与坑
