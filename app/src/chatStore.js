@@ -6,14 +6,32 @@
  * Chat itself travels peer-to-peer over WebRTC DataChannels; the sender's
  * page additionally relays every message (text + compressed image data URLs)
  * here so late joiners can catch up. Messages are kept per channel as
- * append-only JSONL in app/src/chat_history/<id>.jsonl — one appendSync per
- * message instead of a full-file rewrite (a channel may hold up to 12MB of
- * image history) — and pruned to the admin-configured retention window
- * (channels.json settings: chatRetentionHours, 0 = keep nothing). Full
- * rewrites only happen on retention/cap drops, edits/recalls/reactions and
- * background compaction. Legacy <id>.json files (single JSON array) are
- * migrated to JSONL on first load. Temporary rooms keep history in memory
- * only; it vanishes together with the room.
+ * append-only JSONL in app/src/chat_history/<id>.jsonl, and none of the
+ * interaction paths ever rewrite the file:
+ *
+ *   - a new message appends exactly one line;
+ *   - lifecycle changes append small event lines (`{"e":...}`) that replay
+ *     in file order on load: edits, recalls, reactions, and prefix drops
+ *     (retention window / MAX_MESSAGES cap) — so even a 12MB image-heavy
+ *     channel mutates in O(1), with no full serialization stalling the
+ *     event loop while people are chatting;
+ *   - the file reconciles with memory only via deferred background
+ *     compaction (scheduled once the file crosses COMPACT_AT_RATIO of its
+ *     budget, coalesced ~1s), via an inline shrink when a single append
+ *     pushes past the hard budget (disk bound identical to the old
+ *     rewrite-per-message scheme), on legacy <id>.json migration, and as
+ *     the fallback when an append fails.
+ *
+ * Retention trimming for channels nobody has in memory is driven by stat +
+ * a tail sample: unchanged files inside their retention epoch are skipped
+ * without reading, an all-expired file is wiped from the tail timestamps
+ * alone, and only the remaining cases pay a full parse.
+ *
+ * A torn trailing line (crash mid-append) is normal for append-only logs
+ * and is skipped; every line carries a finite `ts` so restore validation
+ * keeps accepting the format. Legacy <id>.json files (single JSON array)
+ * are migrated to JSONL on first load. Temporary rooms keep history in
+ * memory only; it vanishes together with the room.
  */
 
 const fs = require('fs');
@@ -42,10 +60,14 @@ const REACTIONS_MAX_NAMES = 50;
 const REACTION_EMOJI_MAX = limits.REACTION_EMOJI_MAX;
 // Disk budget per channel, images included; rows drop from the oldest end
 // until a file fits (images dominate — text rows are a few hundred bytes).
-// Append-mode stops at 90% of the budget so compaction runs before it is
-// actually needed.
+// Appends keep working past COMPACT_AT_RATIO (90%) of the budget; crossing
+// it only schedules a coalesced background compaction. Only the hard budget
+// shrinks inline, so peak disk usage stays bounded like it always was.
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const COMPACT_AT_RATIO = 0.9;
+// Grace period after the ratio is crossed before the background compaction
+// runs — bursts of edits/reactions/messages coalesce into one rewrite.
+const COMPACT_DELAY_MS = 1000;
 // Catch-up pagination: one page sent per request — on join and per
 // scroll-up fetch. The byte budget keeps a single emit under the socket.io
 // packet cap (images dominate — the newest row is always included, older
@@ -56,6 +78,9 @@ const MAX_SEND_BYTES = 2 * 1024 * 1024;
 // disk) so messages past the retention window actually disappear even for
 // channels nobody touches (e.g. after the admin shortens the window).
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+// How much of a history file's tail the sweep reads to find the newest row
+// timestamp before deciding to pay a full parse.
+const SWEEP_TAIL_BYTES = 64 * 1024;
 
 class ChatStore {
     /**
@@ -76,8 +101,12 @@ class ChatStore {
         this.dir = dir;
         this.maxBytes = maxBytes > 0 ? maxBytes : MAX_FILE_BYTES;
         this.retentionHours = typeof retentionHours === 'function' ? retentionHours : () => retentionHours;
-        /** channelId -> { persistent, messages: [{ts,name,text,...}], fileSize } */
+        /** channelId -> { persistent, messages: [{ts,name,text,...}], fileSize, pendingDrop, pendingDropTs } */
         this.channels = new Map();
+        /** channelId -> { size, mtimeMs, retention, minTs } — lets sweep() skip unchanged idle files */
+        this.sweepState = new Map();
+        this.compactPending = new Set();
+        this.compactTimer = null;
         this.sweepTimer = null;
         if (sweepMs > 0) {
             this.sweepTimer = setInterval(() => {
@@ -132,6 +161,8 @@ class ChatStore {
                     entry.fileSize = 0;
                 }
             }
+            entry.pendingDrop = 0;
+            entry.pendingDropTs = undefined;
             this.channels.set(id, entry);
         }
         return entry;
@@ -190,10 +221,11 @@ class ChatStore {
     }
 
     /**
-     * Parse a JSONL history file line by line. A torn trailing line (crash
-     * mid-append) is normal for append-only logs and is skipped silently;
-     * lines that still fail to parse are skipped with a warn. A file where
-     * EVERY line is garbage yields an empty history.
+     * Parse a JSONL history file line by line, replaying lifecycle event
+     * lines (`{"e":...}`) onto the message rows in file order. A torn
+     * trailing line (crash mid-append) is normal for append-only logs and is
+     * skipped silently; lines that still fail to parse are skipped with a
+     * warn. A file where EVERY line is garbage yields an empty history.
      */
     loadJsonlFile(file) {
         const raw = fs.readFileSync(file, 'utf8');
@@ -204,9 +236,15 @@ class ChatStore {
         for (const line of lines) {
             if (!line) continue;
             try {
-                const msg = JSON.parse(line);
-                if (isPlainMessage(msg)) messages.push(msg);
-                else bad++;
+                const row = JSON.parse(line);
+                // message rows never carry an `e` field — it marks an event
+                if (row && typeof row === 'object' && !Array.isArray(row) && row.e !== undefined) {
+                    applyEvent(messages, row); // invalid/unknown events just don't apply
+                } else if (isPlainMessage(row)) {
+                    messages.push(row);
+                } else {
+                    bad++;
+                }
             } catch {
                 bad++;
             }
@@ -249,37 +287,88 @@ class ChatStore {
         const cleanReply = sanitizeReply(reply);
         if (cleanReply) message.reply = cleanReply;
         entry.messages.push(message);
-        const before = entry.messages.length;
-        this.prune(entry.messages, Date.now(), id);
-        while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
-        const dropped = entry.messages.length !== before;
-        if (persistent) {
-            // O(1) path: nothing left the window/cap and the file is comfortably
-            // inside its budget → append exactly one JSONL line
-            if (
-                !dropped &&
-                entry.fileSize !== null &&
-                entry.fileSize > 0 &&
-                entry.fileSize < this.maxBytes * COMPACT_AT_RATIO
-            ) {
-                this.appendLine(id, entry, message);
-            } else {
-                this.save(id, entry);
-            }
+        if (!persistent) {
+            this.prune(entry.messages, Date.now(), id);
+            while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
+            return message;
         }
+
+        this.trimEntry(entry, id);
+        // drops are prefix-only, so the message survived unless it is gone
+        // from the tail (i.e. the whole history expired around it)
+        const kept = entry.messages[entry.messages.length - 1] === message;
+        if (!kept || !(entry.fileSize > 0)) {
+            // whole history expired, first row ever, or unknown disk state
+            // (e.g. a failed migration): one canonical write settles it
+            this.save(id, entry);
+            entry.pendingDrop = 0;
+            entry.pendingDropTs = undefined;
+            return message;
+        }
+        // O(1) path: pending prefix-drops ride as one replayable marker line,
+        // the message as another — the budget is enforced by deferred
+        // compaction (or inline past the hard budget inside appendLines)
+        const lines = [];
+        if (entry.pendingDrop > 0) {
+            lines.push({ e: 'drop', ts: entry.pendingDropTs ?? 0, n: entry.pendingDrop });
+            entry.pendingDrop = 0;
+            entry.pendingDropTs = undefined;
+        }
+        lines.push(message);
+        this.appendLines(id, entry, lines);
         return message;
     }
 
-    /** One-line append; a failure falls back to a full rewrite. */
-    appendLine(id, entry, message) {
-        const line = Buffer.from(JSON.stringify(message) + '\n', 'utf8');
+    /**
+     * Append one or more JSONL rows in a single write. A failure falls back
+     * to a full rewrite. Crossing COMPACT_AT_RATIO schedules the background
+     * compaction; crossing the hard budget shrinks inline so peak disk use
+     * stays bounded even under an image flood.
+     */
+    appendLines(id, entry, rows) {
+        const line = Buffer.from(rows.map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
         try {
             fs.appendFileSync(this.fileFor(id), line);
             entry.fileSize = (entry.fileSize || 0) + line.length;
+            if (entry.fileSize >= this.maxBytes) this.save(id, entry);
+            else if (entry.fileSize >= this.maxBytes * COMPACT_AT_RATIO) this.scheduleCompact(id);
         } catch (err) {
             log.warn('Chat history append failed, rewriting', { channel: id, error: err.message });
             this.save(id, entry);
         }
+    }
+
+    /**
+     * Retention prune + MAX_MESSAGES cap on an entry's rows, accounting
+     * every dropped row into entry.pendingDrop so the next drop marker (or
+     * full rewrite) keeps the disk replay equal to memory — including drops
+     * that happened on read paths (history/export), which never write.
+     */
+    trimEntry(entry, id, now = Date.now()) {
+        const { dropped, lastTs } = this.prune(entry.messages, now, id);
+        let capDropped = 0;
+        let capLastTs;
+        while (entry.messages.length > MAX_MESSAGES) {
+            capLastTs = entry.messages.shift().ts;
+            capDropped++;
+        }
+        if (dropped > 0 || capDropped > 0) {
+            entry.pendingDrop = (entry.pendingDrop || 0) + dropped + capDropped;
+            // cap drops sit after prune drops in the prefix, so they are the
+            // newer end of what left
+            const latestDroppedTs = capLastTs ?? lastTs;
+            if (latestDroppedTs !== undefined) entry.pendingDropTs = latestDroppedTs;
+        }
+    }
+
+    /** Flush pending prefix-drops as one replayable marker line. */
+    emitDropMarker(id, entry) {
+        const n = entry.pendingDrop || 0;
+        if (n <= 0) return;
+        const evt = { e: 'drop', ts: entry.pendingDropTs ?? 0, n };
+        entry.pendingDrop = 0;
+        entry.pendingDropTs = undefined;
+        this.appendLines(id, entry, [evt]);
     }
 
     /**
@@ -294,7 +383,8 @@ class ChatStore {
         if (!cleanText) return null;
         row.text = cleanText;
         row.edited = true;
-        this.persistIf(id, persistent);
+        // event line replays through applyEvent('edit') — keep both in sync
+        this.persistEvent(id, persistent, { e: 'edit', ts, name, text: cleanText });
         return row;
     }
 
@@ -309,7 +399,8 @@ class ChatStore {
         row.text = '';
         delete row.imgs;
         delete row.reactions;
-        this.persistIf(id, persistent);
+        // event line replays through applyEvent('del') — keep both in sync
+        this.persistEvent(id, persistent, { e: 'del', ts, name });
         return row;
     }
 
@@ -324,8 +415,10 @@ class ChatStore {
         const whoName = typeof who === 'string' ? who.slice(0, NAME_MAX) : '';
         if (!cleanEmoji || !whoName) return null;
 
+        // copy the per-emoji array too: mutating it in place would leak into
+        // row.reactions and make the changed check below always equal
         const reactions = { ...(row.reactions || {}) };
-        const names = reactions[cleanEmoji] || [];
+        const names = [...(reactions[cleanEmoji] || [])];
         const idx = names.indexOf(whoName);
         if (op === 'remove') {
             if (idx !== -1) names.splice(idx, 1);
@@ -337,10 +430,34 @@ class ChatStore {
         }
         if (names.length) reactions[cleanEmoji] = names;
         else delete reactions[cleanEmoji];
+        const changed = JSON.stringify(reactions) !== JSON.stringify(row.reactions || {});
         if (Object.keys(reactions).length) row.reactions = reactions;
         else delete row.reactions;
-        this.persistIf(id, persistent);
+        if (changed) {
+            // event line replays through applyEvent('react') — keep both in sync
+            this.persistEvent(id, persistent, {
+                e: 'react',
+                ts,
+                name,
+                emoji: cleanEmoji,
+                who: whoName,
+                op: op === 'remove' ? 'remove' : 'add',
+            });
+        }
         return row;
+    }
+
+    /**
+     * Persist one lifecycle event as an O(1) append; the full rewrite is
+     * only the fallback for entries whose file is missing or empty (failed
+     * migration, brand-new disk state).
+     */
+    persistEvent(id, persistent, evt) {
+        if (!persistent) return;
+        const entry = this.channels.get(id);
+        if (!entry) return;
+        if (entry.fileSize > 0) this.appendLines(id, entry, [evt]);
+        else this.save(id, entry);
     }
 
     /** Find a row by ts + sender name; null when absent (or channel unknown). */
@@ -348,18 +465,7 @@ class ChatStore {
         if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return null;
         if (!Number.isFinite(ts) || ts <= 0 || typeof name !== 'string' || !name) return null;
         const entry = this.entry(id, { persistent });
-        for (let i = entry.messages.length - 1; i >= 0; i--) {
-            const row = entry.messages[i];
-            if (row.ts === ts && row.name === name) return row;
-        }
-        return null;
-    }
-
-    /** Full rewrite after an in-place row mutation (edits are rare). */
-    persistIf(id, persistent) {
-        if (!persistent) return;
-        const entry = this.entry(id);
-        this.save(id, entry);
+        return findRowIn(entry.messages, ts, name);
     }
 
     /**
@@ -376,7 +482,7 @@ class ChatStore {
     history(id, { persistent = true, before = 0, limit = CHAT_PAGE_SIZE, maxBytes = MAX_SEND_BYTES } = {}) {
         if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return { messages: [], hasMore: false };
         const entry = this.entry(id, { persistent });
-        this.prune(entry.messages, Date.now(), id);
+        this.trimEntry(entry, id);
 
         const messages = entry.messages;
         let end = messages.length;
@@ -407,18 +513,26 @@ class ChatStore {
         return { messages: messages.slice(first, end), hasMore: first > 0 };
     }
 
-    /** Drop rows older than the channel's retention window, in place. */
+    /**
+     * Drop rows older than the channel's retention window, in place.
+     * Returns how many rows left and the newest dropped ts (undefined when
+     * nothing dropped) so callers can account prefix-drops for the disk log.
+     */
     prune(messages, now = Date.now(), id = null) {
         // id-less callers (legacy) fall back to the resolver without an argument
         const retention = this.retentionMs(id);
         if (retention <= 0) {
+            const all = messages.length;
+            const lastTs = all ? messages[all - 1].ts : undefined;
             messages.length = 0;
-            return;
+            return { dropped: all, lastTs };
         }
         const cutoff = now - retention;
         let drop = 0;
         while (drop < messages.length && messages[drop].ts <= cutoff) drop++;
+        const lastTs = drop > 0 ? messages[drop - 1].ts : undefined;
         if (drop > 0) messages.splice(0, drop);
+        return { dropped: drop, lastTs };
     }
 
     /**
@@ -428,14 +542,16 @@ class ChatStore {
     exportAll(id) {
         if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return [];
         const entry = this.entry(id, { persistent: true });
-        this.prune(entry.messages, Date.now(), id);
+        this.trimEntry(entry, id);
         return entry.messages.map((m) => ({ ...m }));
     }
 
     /**
      * Atomic full rewrite (tmp + rename; content copy for single-file bind
-     * mounts). Also the compaction point: rows drop from the oldest end
-     * until the serialized file fits its disk budget.
+     * mounts). Also the compaction point: event lines collapse into plain
+     * rows and rows drop from the oldest end until the file fits its disk
+     * budget. Only ever called off the interaction path (deferred
+     * compaction, migration, hard-budget shrink, fallbacks).
      */
     save(id, entry) {
         try {
@@ -482,10 +598,45 @@ class ChatStore {
         }
     }
 
+    /**
+     * Schedule the coalesced background compaction for a channel: the first
+     * ratio-crossing starts the timer, further crossings only join the
+     * batch. Runs between interactions, never inside one.
+     */
+    scheduleCompact(id) {
+        if (this.compactPending.has(id)) return;
+        this.compactPending.add(id);
+        if (this.compactTimer) return;
+        this.compactTimer = setTimeout(() => {
+            this.compactTimer = null;
+            const ids = [...this.compactPending];
+            this.compactPending.clear();
+            for (const pendingId of ids) {
+                try {
+                    this.runCompact(pendingId);
+                } catch (err) {
+                    log.error('Chat history compaction failed', { channel: pendingId, error: err.message });
+                }
+            }
+        }, COMPACT_DELAY_MS);
+        this.compactTimer.unref?.();
+    }
+
+    /** Reconcile one channel's file with memory: prune, rewrite, drop markers collapse. */
+    runCompact(id) {
+        const entry = this.channels.get(id); // peek only — never lazy-load here
+        if (!entry) return;
+        this.trimEntry(entry, id);
+        this.save(id, entry);
+        entry.pendingDrop = 0;
+        entry.pendingDropTs = undefined;
+    }
+
     /** Forget a channel entirely (room destroyed / admin delete / restore). */
     removeChannel(id) {
         if (typeof id !== 'string' || !id) return;
         this.channels.delete(id);
+        this.sweepState.delete(id);
         for (const file of [this.fileFor(id), this.legacyFileFor(id)]) {
             try {
                 fs.unlinkSync(file);
@@ -498,6 +649,7 @@ class ChatStore {
     /** Drop every in-memory cache entry so the next read re-loads from disk. */
     reload() {
         this.channels.clear();
+        this.sweepState.clear(); // restored/replaced files must be re-checked
     }
 
     /**
@@ -505,6 +657,12 @@ class ChatStore {
      * (covers channels nobody touched since the retention window shrank),
      * deleting whatever ends up empty. With the feature disabled it wipes all
      * history.
+     *
+     * Disk-only channels skip the expensive path whenever possible: a file
+     * whose size/mtime is unchanged, whose window is unchanged, and whose
+     * oldest retained row has not reached its own expiry cannot have
+     * anything to trim; an all-expired file is wiped from a tail sample
+     * alone. Only the remaining cases pay a full parse.
      */
     sweep(now = Date.now()) {
         for (const [id, entry] of [...this.channels]) {
@@ -514,18 +672,55 @@ class ChatStore {
                 else this.channels.delete(id);
                 continue;
             }
-            const before = entry.messages.length;
-            this.prune(entry.messages, now, id);
-            while (entry.messages.length > MAX_MESSAGES) entry.messages.shift();
-            if (entry.messages.length === before) continue;
-            if (entry.persistent) this.save(id, entry);
-            else if (!entry.messages.length) this.channels.delete(id);
+            this.trimEntry(entry, id, now);
+            if (!(entry.pendingDrop > 0)) continue;
+            if (!entry.persistent) {
+                entry.pendingDrop = 0;
+                entry.pendingDropTs = undefined;
+                if (!entry.messages.length) this.channels.delete(id);
+                continue;
+            }
+            if (!entry.messages.length || !(entry.fileSize > 0)) {
+                this.save(id, entry);
+                entry.pendingDrop = 0;
+                entry.pendingDropTs = undefined;
+            } else {
+                this.emitDropMarker(id, entry);
+            }
         }
         for (const id of this.listFiles()) {
             if (this.channels.has(id)) continue;
             if (this.retentionMs(id) <= 0) {
                 this.removeChannel(id); // per-channel override disabled it
                 continue;
+            }
+            const retention = this.retentionMs(id);
+            let st = null;
+            try {
+                st = fs.statSync(this.fileFor(id));
+            } catch {
+                /* legacy-only channel (or racing removal) — take the full path */
+            }
+            const seen = this.sweepState.get(id);
+            if (
+                st &&
+                seen &&
+                seen.size === st.size &&
+                seen.mtimeMs === st.mtimeMs &&
+                seen.retention === retention &&
+                now < seen.minTs + retention
+            ) {
+                continue; // unchanged file, nothing can have expired since the last check
+            }
+            // tail probe: when even the newest row is past the window, the
+            // whole file is droppable — no need to parse megabytes to know it
+            if (st && st.size > 0) {
+                const latest = this.tailLatestMessageTs(this.fileFor(id), st.size);
+                if (latest !== null && latest <= now - retention) {
+                    this.save(id, { persistent: true, messages: [] });
+                    this.sweepState.delete(id);
+                    continue;
+                }
             }
             // loadFile() may itself migrate a legacy .json to .jsonl — the
             // existence check runs after it so a fresh migration is not
@@ -536,7 +731,71 @@ class ChatStore {
             if (messages.length !== before || !fs.existsSync(this.fileFor(id))) {
                 this.save(id, { persistent: true, messages });
             }
+            // remember the post-check shape so idle channels skip every
+            // future sweep until the file changes, the window moves, or the
+            // oldest retained row reaches its own expiry
+            try {
+                const after = fs.statSync(this.fileFor(id));
+                this.sweepState.set(id, {
+                    size: after.size,
+                    mtimeMs: after.mtimeMs,
+                    retention,
+                    minTs: messages.length ? messages[0].ts : 0,
+                });
+            } catch {
+                this.sweepState.delete(id); // file ended up gone (everything expired)
+            }
         }
+    }
+
+    /**
+     * Newest message-row ts found in the last SWEEP_TAIL_BYTES of a history
+     * file, or null when the tail is unreadable/ambiguous (then the caller
+     * falls back to a full check). Event lines carry the ts of a row that is
+     * already in the file, so they never raise the maximum.
+     */
+    tailLatestMessageTs(file, size) {
+        const start = Math.max(0, size - SWEEP_TAIL_BYTES);
+        const len = size - start;
+        const buf = Buffer.allocUnsafe(len);
+        try {
+            const fd = fs.openSync(file, 'r');
+            try {
+                const read = fs.readSync(fd, buf, 0, len, start);
+                if (read !== len) return null;
+            } finally {
+                fs.closeSync(fd);
+            }
+        } catch {
+            return null;
+        }
+        let text = buf.toString('utf8');
+        if (start > 0) {
+            // the chunk may begin mid-line (or mid-code-point): drop the
+            // fragment up to the first complete newline
+            const nl = text.indexOf('\n');
+            if (nl === -1) return null;
+            text = text.slice(nl + 1);
+        }
+        let maxTs = null;
+        for (const line of text.split('\n')) {
+            if (!line) continue;
+            try {
+                const row = JSON.parse(line);
+                if (
+                    row &&
+                    typeof row === 'object' &&
+                    !Array.isArray(row) &&
+                    row.e === undefined &&
+                    Number.isFinite(row.ts)
+                ) {
+                    if (maxTs === null || row.ts > maxTs) maxTs = row.ts;
+                }
+            } catch {
+                return null; // torn or foreign tail — defer to the full check
+            }
+        }
+        return maxTs;
     }
 
     /** Channel ids that have a history file on disk (JSONL or legacy JSON). */
@@ -557,7 +816,92 @@ class ChatStore {
     destroy() {
         if (this.sweepTimer) clearInterval(this.sweepTimer);
         this.sweepTimer = null;
+        if (this.compactTimer) clearTimeout(this.compactTimer);
+        this.compactTimer = null;
+        this.compactPending.clear();
+        this.sweepState.clear();
     }
+}
+
+/**
+ * Replay one lifecycle event line onto an in-order row list. Mirrors the
+ * live mutators (edit/remove/react + prefix drops) exactly so that
+ * replaying a file always yields the same rows the writing process had in
+ * memory; unknown event kinds from a newer version are skipped.
+ */
+function applyEvent(messages, evt) {
+    switch (evt.e) {
+        case 'drop': {
+            // prefix drop: retention window / MAX_MESSAGES cap left the
+            // first n rows — exact count, no ts/name assumptions (the `ts`
+            // field only exists so restore validation accepts the line)
+            if (!Number.isInteger(evt.n) || evt.n <= 0) return;
+            messages.splice(0, Math.min(evt.n, messages.length));
+            return;
+        }
+        case 'edit': {
+            if (!isEventTarget(evt)) return;
+            const text = typeof evt.text === 'string' ? evt.text.trim().slice(0, TEXT_MAX) : '';
+            if (!text) return;
+            const row = findRowIn(messages, evt.ts, evt.name);
+            if (!row || row.deleted) return;
+            row.text = text;
+            row.edited = true;
+            return;
+        }
+        case 'del': {
+            if (!isEventTarget(evt)) return;
+            const row = findRowIn(messages, evt.ts, evt.name);
+            if (!row || row.deleted) return;
+            row.deleted = true;
+            row.text = '';
+            delete row.imgs;
+            delete row.reactions;
+            return;
+        }
+        case 'react': {
+            if (!isEventTarget(evt)) return;
+            const emoji = typeof evt.emoji === 'string' ? evt.emoji.trim().slice(0, REACTION_EMOJI_MAX) : '';
+            const who = typeof evt.who === 'string' ? evt.who.slice(0, NAME_MAX) : '';
+            if (!emoji || !who) return;
+            const row = findRowIn(messages, evt.ts, evt.name);
+            if (!row || row.deleted) return;
+            const reactions = { ...(row.reactions || {}) };
+            const names = [...(reactions[emoji] || [])];
+            const idx = names.indexOf(who);
+            if (evt.op === 'remove') {
+                if (idx !== -1) names.splice(idx, 1);
+            } else if (idx === -1) {
+                // same caps as the live toggle: a capped or repeated add
+                // replays as the no-op it was when it happened
+                if (Object.keys(reactions).length >= REACTIONS_MAX_EMOJI && !reactions[emoji]) return;
+                if (names.length >= REACTIONS_MAX_NAMES) return;
+                names.push(who);
+            }
+            if (names.length) reactions[emoji] = names;
+            else delete reactions[emoji];
+            if (Object.keys(reactions).length) row.reactions = reactions;
+            else delete row.reactions;
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+/** Row identity carried by edit/del/react event lines (ts + sender name). */
+function isEventTarget(evt) {
+    return Number.isFinite(evt.ts) && typeof evt.name === 'string' && !!evt.name;
+}
+
+/** Find a row by ts + sender name in a plain row list (shared with replay). */
+function findRowIn(messages, ts, name) {
+    if (!Number.isFinite(ts) || typeof name !== 'string') return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const row = messages[i];
+        if (row.ts === ts && row.name === name) return row;
+    }
+    return null;
 }
 
 function serializeLines(messages) {

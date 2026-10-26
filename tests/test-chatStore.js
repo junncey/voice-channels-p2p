@@ -553,4 +553,303 @@ describe('test-chatStore', () => {
             fs.readdirSync(store.dir).should.be.empty();
         });
     });
+
+    describe('7. event-line write path (no rewrites on the interaction path)', () => {
+        it('should append one event line per lifecycle op without touching base rows', () => {
+            store = newStore('events');
+            const ts = Date.now() - 60 * 1000;
+            store.append('room1', { name: 'a', text: 'm1' }, { ts });
+            store.append('room1', { name: 'a', text: 'm2' }, { ts: ts + 1 });
+            const file = store.fileFor('room1');
+            const before = fs.readFileSync(file, 'utf8');
+            const sizeBefore = fs.statSync(file).size;
+
+            store.edit('room1', { ts, name: 'a', text: 'm1 edited' });
+            store.remove('room1', { ts: ts + 1, name: 'a' });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
+
+            const after = fs.readFileSync(file, 'utf8');
+            after.should.startWith(before); // pure append: base rows byte-identical
+            const lines = after.split('\n').filter(Boolean);
+            lines.should.have.length(5); // 2 base + edit + del + react
+            JSON.parse(lines[2]).should.eql({ e: 'edit', ts, name: 'a', text: 'm1 edited' });
+            JSON.parse(lines[3]).should.eql({ e: 'del', ts: ts + 1, name: 'a' });
+            JSON.parse(lines[4]).should.eql({ e: 'react', ts, name: 'a', emoji: '👍', who: 'b', op: 'add' });
+            fs.statSync(file).size.should.be.above(sizeBefore);
+        });
+
+        it('should not persist a no-op reaction (capped or repeated)', () => {
+            store = newStore('react-noop');
+            const ts = Date.now() - 1000;
+            store.append('room1', { name: 'a', text: 'm1' }, { ts });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
+            const file = store.fileFor('room1');
+            // repeated add / absent removal are no-ops: no line is written
+            const afterFirst = fs.readFileSync(file, 'utf8');
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'nobody', op: 'remove' });
+            fs.readFileSync(file, 'utf8').should.equal(afterFirst);
+            // distinct-emoji cap (8): the 9th is refused without a line, too
+            for (const emoji of ['😀', '😁', '😂', '🤣', '😅', '😆', '😉', '😊']) {
+                store.react('room1', { ts, name: 'a', emoji, who: 'b' });
+            }
+            const afterCap = fs.readFileSync(file, 'utf8');
+            afterCap.should.not.equal(afterFirst); // the 8 valid adds did land
+            store.react('room1', { ts, name: 'a', emoji: '😏', who: 'b' }); // capped
+            fs.readFileSync(file, 'utf8').should.equal(afterCap);
+        });
+
+        it('should replay event lines into the exact same history after reload', () => {
+            const dir = tempDir('replay');
+            const ts = Date.now() - 60 * 1000;
+            const first = new ChatStore({ dir, sweepMs: 0 });
+            first.append('room1', { name: 'a', text: 'm1', imgs: [IMG('r1=')] }, { ts });
+            first.append('room1', { name: 'b', text: 'm2', reply: { name: 'a', text: 'm1', ts } }, { ts: ts + 1 });
+            first.edit('room1', { ts, name: 'a', text: 'm1 edited' });
+            first.react('room1', { ts: ts + 1, name: 'b', emoji: '🎉', who: 'a' });
+            first.remove('room1', { ts, name: 'a' }); // tombstone the edited row
+            const expected = first.exportAll('room1');
+            first.destroy();
+
+            const second = new ChatStore({ dir, sweepMs: 0 });
+            second.exportAll('room1').should.eql(expected);
+            second.destroy();
+        });
+
+        it('should round-trip a mixed op sequence exactly', () => {
+            const dir = tempDir('roundtrip');
+            const first = new ChatStore({ dir, sweepMs: 0 });
+            const base = Date.now() - 60 * 1000;
+            const rows = [];
+            for (let i = 0; i < 12; i++) {
+                rows.push(
+                    first.append(
+                        'room1',
+                        { name: i % 2 ? 'alice' : 'bob', text: `m${i}`, imgs: i % 4 === 0 ? [IMG(`i${i}=`)] : [] },
+                        { ts: base + i * 100 }
+                    )
+                );
+            }
+            first.edit('room1', { ts: rows[1].ts, name: rows[1].name, text: 'm1 v2' });
+            first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice' });
+            first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice' }); // idempotent add
+            first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'carol' });
+            first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice', op: 'remove' });
+            first.edit('room1', { ts: rows[3].ts, name: rows[3].name, text: 'm3 v2' });
+            first.edit('room1', { ts: rows[3].ts, name: rows[3].name, text: 'm3 v3' });
+            first.remove('room1', { ts: rows[5].ts, name: rows[5].name });
+            first.react('room1', { ts: rows[5].ts, name: rows[5].name, emoji: '😅', who: 'bob' }); // tombstone: ignored
+            first.edit('room1', { ts: rows[5].ts, name: rows[5].name, text: 'zombie' }); // tombstone: ignored
+            first.remove('room1', { ts: 404, name: 'nobody' }); // missing row: ignored
+            const expected = first.exportAll('room1');
+            first.destroy();
+
+            const second = new ChatStore({ dir, sweepMs: 0 });
+            second.exportAll('room1').should.eql(expected);
+            second.destroy();
+        });
+
+        it('should ride retention drops as drop markers on the next append', () => {
+            let hours = 24;
+            store = newStore('shrink', { retentionHours: () => hours });
+            const old = Date.now() - 2 * 60 * 60 * 1000;
+            store.append('room1', { name: 'a', text: 'old' }, { ts: old });
+            hours = 1; // admin shrinks the window; the next append pays one marker line
+            store.append('room1', { name: 'a', text: 'fresh' });
+
+            const lines = fs.readFileSync(store.fileFor('room1'), 'utf8').split('\n').filter(Boolean);
+            lines.should.have.length(3); // old row + drop marker + new row
+            JSON.parse(lines[1]).should.eql({ e: 'drop', ts: old, n: 1 });
+            store
+                .history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['fresh']);
+            const second = new ChatStore({ dir: store.dir, sweepMs: 0 });
+            second
+                .history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['fresh']); // replay matches: no resurrection
+            second.destroy();
+        });
+
+        it('should ride MAX_MESSAGES cap drops as drop markers and stay replay-exact', () => {
+            const dir = tempDir('dropmarker');
+            const first = new ChatStore({ dir, sweepMs: 0 });
+            const base = Date.now() - 60 * 1000;
+            const total = ChatStore.MAX_MESSAGES + 25;
+            for (let i = 0; i < total; i++) {
+                first.append('room1', { name: 'a', text: `m${i}` }, { ts: base + i });
+            }
+            const expected = first.exportAll('room1');
+            expected.length.should.equal(ChatStore.MAX_MESSAGES);
+            first.destroy();
+
+            const second = new ChatStore({ dir, sweepMs: 0 });
+            second.exportAll('room1').should.eql(expected);
+            second.destroy();
+        });
+
+        it('should drop-mark sweep trims of in-memory channels', () => {
+            let hours = 3;
+            store = newStore('sweep-marker', { retentionHours: () => hours });
+            const old = Date.now() - 2 * 60 * 60 * 1000; // inside the 3h window
+            store.append('room1', { name: 'a', text: 'old' }, { ts: old });
+            store.append('room1', { name: 'a', text: 'fresh' });
+            hours = 1; // window shrinks; sweep trims via one marker line, not a rewrite
+            store.sweep();
+
+            const lines = fs.readFileSync(store.fileFor('room1'), 'utf8').split('\n').filter(Boolean);
+            lines.should.have.length(3);
+            JSON.parse(lines[2]).should.eql({ e: 'drop', ts: old, n: 1 });
+            store
+                .history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['fresh']);
+        });
+
+        it('should keep appending past the compaction ratio and compact later', function () {
+            this.timeout(4000);
+            const dir = tempDir('defer-compact');
+            const store = new ChatStore({ dir, sweepMs: 0, maxBytes: 8192 });
+            const bigText = 'x'.repeat(600); // stored capped at 500 → ~543B/line: ratio crosses at 14 lines
+            for (let i = 0; i < 14; i++) store.append('room1', { name: 'a', text: `${i}-${bigText}` });
+            const file = store.fileFor('room1');
+            const sizeAfterAppends = fs.statSync(file).size;
+            sizeAfterAppends.should.be.above(8192 * 0.9); // ratio crossed …
+            sizeAfterAppends.should.be.below(8192); // … hard budget not
+
+            let saves = 0;
+            const orig = ChatStore.prototype.save;
+            ChatStore.prototype.save = function (...args) {
+                saves++;
+                return orig.apply(this, args);
+            };
+            try {
+                const ts = store.history('room1').messages[0].ts;
+                store.edit('room1', { ts, name: 'a', text: 'edited' });
+            } finally {
+                ChatStore.prototype.save = orig;
+            }
+            saves.should.equal(0); // interaction path stays rewrite-free over the ratio
+
+            return new Promise((resolve) => setTimeout(resolve, 1300)).then(() => {
+                fs.statSync(file).size.should.be.belowOrEqual(8192); // background compaction ran
+                const second = new ChatStore({ dir, sweepMs: 0 });
+                second.history('room1').messages.at(-1).text.should.startWith('13');
+                second.destroy();
+            });
+        });
+
+        it('should skip unchanged idle files on repeated sweeps', () => {
+            const dir = tempDir('sweep-skip');
+            const writer = new ChatStore({ dir, retentionHours: 24, sweepMs: 0 });
+            writer.append('idle', { name: 'a', text: 'kept' });
+            writer.append('idle', { name: 'a', text: 'kept2' });
+            writer.destroy();
+
+            const reader = new ChatStore({ dir, retentionHours: 24, sweepMs: 0 });
+            let loads = 0;
+            const orig = ChatStore.prototype.loadFile;
+            ChatStore.prototype.loadFile = function (...args) {
+                loads++;
+                return orig.apply(this, args);
+            };
+            try {
+                reader.sweep();
+                loads.should.equal(1); // first sight: one full check
+                reader.sweep();
+                loads.should.equal(1); // unchanged file inside its retention epoch: skipped
+                // an external change (restore-style rewrite) forces a fresh look
+                fs.appendFileSync(
+                    reader.fileFor('idle'),
+                    JSON.stringify({ ts: Date.now(), name: 'x', text: 'external' }) + '\n',
+                    'utf8'
+                );
+                reader.sweep();
+                loads.should.equal(2);
+            } finally {
+                ChatStore.prototype.loadFile = orig;
+            }
+            fs.existsSync(reader.fileFor('idle')).should.be.true();
+            reader.destroy();
+        });
+
+        it('should wipe an all-expired idle file from the tail sample alone', () => {
+            const dir = tempDir('sweep-tailwipe');
+            const writer = new ChatStore({ dir, retentionHours: 1, sweepMs: 0 });
+            writer.append('old', { name: 'a', text: 'ancient' }, { ts: Date.now() - 9 * 60 * 60 * 1000 });
+            writer.destroy();
+
+            const reader = new ChatStore({ dir, retentionHours: 1, sweepMs: 0 });
+            let loads = 0;
+            const orig = ChatStore.prototype.loadFile;
+            ChatStore.prototype.loadFile = function (...args) {
+                loads++;
+                return orig.apply(this, args);
+            };
+            try {
+                reader.sweep();
+            } finally {
+                ChatStore.prototype.loadFile = orig;
+            }
+            loads.should.equal(0); // tail probe decided; never parsed the file
+            fs.existsSync(reader.fileFor('old')).should.be.false();
+            reader.destroy();
+        });
+
+        it('should tolerate a torn event line and skip unknown event kinds', () => {
+            const dir = tempDir('event-tolerance');
+            fs.mkdirSync(dir, { recursive: true });
+            const ts = Date.now();
+            const rows = [
+                JSON.stringify({ ts, name: 'a', text: 'base' }),
+                JSON.stringify({ e: 'edit', ts, name: 'a', text: 'edited' }),
+                JSON.stringify({ e: 'warp', ts, name: 'a', text: 'from the future' }), // unknown kind
+                '{"e":"del","ts":1,"name":"a"', // torn tail (crash mid-append)
+                '',
+            ].join('\n');
+            fs.writeFileSync(path.join(dir, 'room1.jsonl'), rows, 'utf8');
+
+            const tolerant = new ChatStore({ dir, sweepMs: 0 });
+            const history = tolerant.history('room1').messages;
+            history.should.have.length(1);
+            history[0].text.should.equal('edited');
+            history[0].edited.should.be.true();
+            fs.existsSync(path.join(dir, 'room1.jsonl.corrupt')).should.be.false(); // no quarantine false positive
+            tolerant.destroy();
+        });
+
+        it('should ignore a leftover .tmp from an interrupted compaction', () => {
+            const dir = tempDir('interrupted-compact');
+            fs.mkdirSync(dir, { recursive: true });
+            const ts = Date.now();
+            fs.writeFileSync(
+                path.join(dir, 'room1.jsonl'),
+                JSON.stringify({ ts, name: 'a', text: 'good' }) + '\n',
+                'utf8'
+            );
+            // kill -9 between writeFileSync(tmp) and renameSync leaves junk behind
+            fs.writeFileSync(path.join(dir, 'room1.jsonl.tmp'), '{"ts":1,"nam', 'utf8');
+
+            const restarted = new ChatStore({ dir, sweepMs: 0 });
+            restarted
+                .history('room1')
+                .messages.map((m) => m.text)
+                .should.eql(['good']);
+            fs.existsSync(path.join(dir, 'room1.jsonl.corrupt')).should.be.false();
+            restarted.destroy();
+        });
+
+        it('should keep every line restore-valid (parses to a finite ts)', () => {
+            store = newStore('restore-valid');
+            const ts = Date.now() - 1000;
+            store.append('room1', { name: 'a', text: 'm1' }, { ts });
+            store.edit('room1', { ts, name: 'a', text: 'edited' });
+            store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
+            store.remove('room1', { ts, name: 'a' });
+            for (const line of fs.readFileSync(store.fileFor('room1'), 'utf8').split('\n').filter(Boolean)) {
+                Number.isFinite(JSON.parse(line).ts).should.be.true(); // restore.js line validation
+            }
+        });
+    });
 });
