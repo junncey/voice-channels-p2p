@@ -48,14 +48,16 @@ export function installDebugHooks(getCtx) {
             micTest: micTest ? { delay: micTest.delay.delayTime.value, gain: micTest.gain.gain.value } : null,
             micVolume: settings.micVolume,
             micGain: hub?.mic?.gain.gain.value ?? null,
-            // live sampling (not the throttled _tick values) — readable in background tabs
+            // live sampling (not the throttled _tick values) — readable in background tabs.
+            // Same float time-domain RMS as AudioHub._tick (the watcher buffer is a
+            // Float32Array; the old byte-API read here threw on every call)
             levels: hub
                 ? Object.fromEntries(
                       [...hub.watchers.entries()].map(([k, w]) => {
-                          w.analyser.getByteFrequencyData(w.data);
+                          w.analyser.getFloatTimeDomainData(w.data);
                           let sum = 0;
                           for (let i = 0; i < w.data.length; i++) sum += w.data[i] * w.data[i];
-                          return [k, Math.sqrt(sum / w.data.length) / 255];
+                          return [k, Math.sqrt(sum / w.data.length)];
                       })
                   )
                 : null,
@@ -145,9 +147,31 @@ export function installDebugHooks(getCtx) {
             const rows = [];
             stats.forEach((r) => {
                 if (r.type === 'inbound-rtp' && r.kind === 'audio')
-                    rows.push({ dir: 'in', bytes: r.bytesReceived, packets: r.packetsReceived, lost: r.packetsLost });
+                    rows.push({
+                        dir: 'in',
+                        bytes: r.bytesReceived,
+                        packets: r.packetsReceived,
+                        lost: r.packetsLost,
+                        jitterMs: typeof r.jitter === 'number' ? Math.round(r.jitter * 1000) : null,
+                        // what the listener actually hears: NetEQ concealment share
+                        // (PLC stitches over loss) and the playout buffer it keeps
+                        concealed: r.concealedSamples,
+                        concealedPct:
+                            r.concealedSamples && r.totalSamplesReceived
+                                ? Math.round((r.concealedSamples / r.totalSamplesReceived) * 1000) / 10
+                                : null,
+                        jbDelayMs:
+                            r.jitterBufferDelay && r.jitterBufferEmittedCount
+                                ? Math.round((r.jitterBufferDelay / r.jitterBufferEmittedCount) * 1000) / 1000
+                                : null,
+                    });
                 if (r.type === 'outbound-rtp' && r.kind === 'audio')
-                    rows.push({ dir: 'out', bytes: r.bytesSent, packets: r.packetsSent });
+                    rows.push({
+                        dir: 'out',
+                        bytes: r.bytesSent,
+                        packets: r.packetsSent,
+                        targetBitrate: r.targetBitrate, // readback: did setParameters stick?
+                    });
             });
             const path = await mesh.connPath(peerId).catch(() => null);
             out.push({ peerId, state: entry.pc.connectionState, path, rows });

@@ -3,6 +3,15 @@ Signaling/media self-healing — the recovery engine for the channel page.
 
   - recovery ladder: per-peer ICE-restart rounds → per-link PC rebuild →
     signaling reconnect (B1)
+  - flap shortcut: a link that healed ≥4 breaks inside 5 minutes stops riding
+    the round ladder — one restart, then straight to the rebuild rung (edge
+    WiFi flaps as "periodic blips" otherwise, forever)
+  - zombie links: connected, the peer claims to be sending, but zero RTP for
+    30s → preemptive ICE restart (DPI/policy black holes that ICE consent
+    survives)
+  - network-back fast path: 'online'/return-to-visible scans every link at
+    once, skips the grace for links already in the ladder, and cuts the
+    socket backoff tail
   - presence probe: server-confirmed dead sessions drop out of the ladder
   - "connecting…" badge for ghost members whose offer will never be answered
   - connection path monitor (P2P vs TURN relay badge + rtt)
@@ -43,8 +52,15 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     const RECOVERY_MAX_B1 = 2; // automatic signaling reconnects before asking the user
     const RECOVERY_SCAN_MS = 10000;
     const RECOVERY_B1_RESET_MS = 60000; // stable for this long → the B1 budget refills
+    // flap shortcut: a link healing this many times inside the window stops
+    // trusting restart rounds (each round = one audible blip) and escalates
+    // to the rebuild rung after a single immediate round
+    const FLAP_WINDOW_MS = 5 * 60 * 1000;
+    const FLAP_HEAL_THRESHOLD = 4;
+    const FLAP_ESCALATE_MS = 6000; // flappy window: one round + a settle beat, then escalate
 
-    const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated }
+    const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated, flappy }
+    const flapHeals = new Map(); // peerId -> [healedAt, ...] inside FLAP_WINDOW_MS
     let recoveryScanTimer = null;
     let b1Attempts = 0; // automatic signaling reconnects since the last stable period
     let b1InFlight = false;
@@ -60,6 +76,9 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             if (state === 'connected') {
                 hideOutageBanner();
                 armB1Reset();
+                // a break that HEALED (the 10s scan re-reports healthy peers with
+                // no recovery record — rec existing here means a real cycle)
+                if (rec) countFlapHeal(peerId);
             }
             clearConnectingBadge(peerId);
             cancelPeerRecovery(peerId);
@@ -78,14 +97,17 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
 
         if (!rec) {
             clearTimeout(b1ResetTimer); // instability: don't refill the B1 budget
+            const flappy = flapCount(peerId) >= FLAP_HEAL_THRESHOLD;
             peerRecovery.set(peerId, {
                 timer: null,
                 attempts: 0,
                 lastState: state,
                 brokenAt: Date.now(),
                 escalated: false,
+                flappy,
             });
-            scheduleRecoveryTick(peerId, state === 'failed' ? 0 : RECOVERY_GRACE_MS);
+            if (flappy) console.warn('[mesh] recovery: flapping link, fast-tracking', peerId);
+            scheduleRecoveryTick(peerId, state === 'failed' || flappy ? 0 : RECOVERY_GRACE_MS);
             updatePeerCardRecovery(peerId);
             return;
         }
@@ -110,14 +132,19 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             cancelPeerRecovery(peerId);
             return;
         }
-        if (Date.now() - rec.brokenAt >= RECOVERY_TOTAL_MS) {
+        // a flapping link gets a compressed window: ONE immediate round to catch
+        // a simple route change, then escalate — its history says restarts only
+        // ever buy seconds before the next blip
+        const windowMs = rec.flappy ? FLAP_ESCALATE_MS : RECOVERY_TOTAL_MS;
+        if (Date.now() - rec.brokenAt >= windowMs) {
             escalatePeerRecovery(peerId);
             return;
         }
+        const roundLimit = rec.flappy ? 1 : RECOVERY_ROUND_DELAYS.length;
         if (state === 'disconnected' || state === 'failed') {
-            if (rec.attempts < RECOVERY_ROUND_DELAYS.length) {
+            if (rec.attempts < roundLimit) {
                 rec.attempts += 1;
-                if (rec.attempts === 1) probePeerPresence(peerId); // maybe nobody is there at all
+                probePeerPresence(peerId); // every round: 'gone' settles a dead session one round sooner
                 // glare arbitration: with both sides broken, only the lower
                 // session id re-offers; the other just answers
                 if (s.selfUuid < peerId) {
@@ -125,7 +152,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                 } else {
                     console.log('[mesh] recovery: waiting for peer re-offer', peerId);
                 }
-                scheduleRecoveryTick(peerId, RECOVERY_ROUND_DELAYS[rec.attempts - 1]);
+                scheduleRecoveryTick(peerId, rec.flappy ? 3000 : RECOVERY_ROUND_DELAYS[rec.attempts - 1]);
                 return;
             }
             // rounds spent but the window isn't over: keep watching the link
@@ -135,6 +162,22 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         // transitional (new/checking/connecting): a restart is being evaluated —
         // re-check shortly without burning another round
         scheduleRecoveryTick(peerId, 3000);
+    }
+
+    /** Record a healed break and count the heals still inside the flap window. */
+    function countFlapHeal(peerId) {
+        const now = Date.now();
+        const heals = (flapHeals.get(peerId) || []).filter((ts) => now - ts < FLAP_WINDOW_MS);
+        heals.push(now);
+        flapHeals.set(peerId, heals);
+    }
+
+    function flapCount(peerId) {
+        const now = Date.now();
+        const heals = (flapHeals.get(peerId) || []).filter((ts) => now - ts < FLAP_WINDOW_MS);
+        if (heals.length) flapHeals.set(peerId, heals);
+        else flapHeals.delete(peerId);
+        return heals.length;
     }
 
     function escalatePeerRecovery(peerId) {
@@ -183,7 +226,10 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // still land). The cooldown bounds probe traffic from a flapping link.
     // -------------------------------------------------------------------------
 
-    const PRESENCE_COOLDOWN_MS = 30000;
+    // per-round dedupe only (the probe is a cheap ack against a memoized
+    // server): every restart round may ask once, a flapping link still can't
+    // machine-gun it
+    const PRESENCE_COOLDOWN_MS = 2000;
     const presenceProbed = new Map(); // peerId -> ts of the last probe
 
     function probePeerPresence(peerId) {
@@ -272,6 +318,30 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         clearInterval(recoveryScanTimer);
         recoveryScanTimer = null;
     }
+
+    // -------------------------------------------------------------------------
+    // network-back fast path — 'online' and a return to a visible tab are the
+    // two moments the environment demonstrably changed. Scan every link at
+    // once (a throttled background tab may have missed state events), skip the
+    // grace for links already in the ladder (their ICE pairs went stale with
+    // the old route), and cut the socket backoff tail if the transport is
+    // still down (mobile wake: throttled heartbeats got it killed server-side;
+    // rejoining with the same uuid resumes the ghost before the grace ends).
+    // -------------------------------------------------------------------------
+
+    function onNetworkBack() {
+        if (!s.joined || !s.mesh) return;
+        if (s.socket && !s.socket.connected) s.socket.connect();
+        for (const [peerId, entry] of s.mesh.entries) {
+            notePeerState(peerId, entry.pc.connectionState);
+            if (peerRecovery.has(peerId)) scheduleRecoveryTick(peerId, 0);
+        }
+    }
+
+    window.addEventListener('online', onNetworkBack);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') onNetworkBack();
+    });
 
     /** Member card: red name/avatar while the link is broken, badge once recovery runs. */
     function updatePeerCardRecovery(peerId) {
@@ -457,7 +527,17 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     const JITTER_OK_MS = 25;
     const JITTER_BOOST_MILD_MS = 60;
     const JITTER_BOOST_MS = 120;
-    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost, jbLevel }
+    // zombie links: connected + the peer broadcasts that it's sending, yet
+    // exactly zero RTP bytes AND packets across this many polls → the media
+    // path is black-holed while ICE consent survives (some DPI/policy changes
+    // do exactly that). Opus DTX silence still emits comfort-noise packets
+    // (~every 400ms), a muted/PTT peer flips peer_audio_status off — a live
+    // sender never sits at exact zero for long, so the streak can't false-fire
+    // on quiet talkers. The cooldown keeps a truly dead path from looping
+    // restarts forever; ICE consent eventually failing hands it to the ladder.
+    const ZOMBIE_POLLS = 6; // ~30s at the 5s poll cadence
+    const ZOMBIE_COOLDOWN_MS = 60000;
+    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -476,6 +556,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             jgood: 0,
             jbBoost: false,
             jbLevel: 0,
+            zombie: 0,
+            zombieAt: 0,
         };
         const inbound = info?.inbound;
         if (inbound) {
@@ -499,6 +581,9 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                         rec.good += 1;
                         rec.bad = 0;
                     }
+                    noteZombie(peerId, rec, info, inbound.bytesReceived - prev.bytesReceived, dRecv);
+                } else {
+                    rec.zombie = 0; // SSRC/counter reset (rebuild): rebase the streak
                 }
             }
             rec.last = inbound;
@@ -510,6 +595,27 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         if (was !== rec.unstable) updatePeerUnstable(peerId);
         noteOutboundAdaptation(peerId, info, rec);
         noteJitterBoost(peerId, rec);
+    }
+
+    /** Zero-RTP streak on a link that claims to be alive (see ZOMBIE_POLLS). */
+    function noteZombie(peerId, rec, info, dBytes, dPackets) {
+        if (info.state !== 'connected' || members.get(peerId)?.peer_audio_status !== true) {
+            rec.zombie = 0;
+            return;
+        }
+        if (dBytes !== 0 || dPackets !== 0) {
+            rec.zombie = 0;
+            return;
+        }
+        rec.zombie += 1;
+        if (rec.zombie < ZOMBIE_POLLS || Date.now() - rec.zombieAt < ZOMBIE_COOLDOWN_MS) return;
+        rec.zombie = 0;
+        rec.zombieAt = Date.now();
+        // same arbitration as the restart rounds: the lower session id acts
+        if (s.selfUuid && s.selfUuid < peerId) {
+            console.warn('[mesh] zombie link: connected but no inbound RTP, restarting ICE', peerId);
+            s.mesh?.restartIce(peerId).catch(() => {});
+        }
     }
 
     /**
@@ -727,7 +833,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         relayUpgrades.delete(peerId);
     }
 
-    /** Forget every per-peer record of a departing member (all six maps). */
+    /** Forget every per-peer record of a departing member (all seven maps). */
     function forgetPeer(peerId) {
         cancelPeerRecovery(peerId);
         cancelRelayUpgrade(peerId);
@@ -737,6 +843,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         connPaths.delete(peerId);
         lossStreaks.delete(peerId);
         presenceProbed.delete(peerId);
+        flapHeals.delete(peerId);
     }
 
     function showOutageBanner(mode) {
@@ -756,6 +863,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         for (const timer of connectingTimers.values()) clearTimeout(timer);
         connectingTimers.clear();
         stuckConnecting.clear();
+        flapHeals.clear();
         hideOutageBanner();
         b1Attempts = 0;
         b1InFlight = false;
