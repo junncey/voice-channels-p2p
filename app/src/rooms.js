@@ -22,12 +22,13 @@ const { toJson } = require('./payload');
 // Abnormal disconnects (VPN/accelerator switch, Wi-Fi flap, sleep) park the
 // session as a GHOST: the peers entry (and presenter role) survive a grace
 // window so the same uuid can rejoin and resume. Only when the grace expires
-// do the remaining members get the removePeer broadcast. Ping-timeout deaths
-// were already unreachable for ~pingInterval+pingTimeout, so their window is
-// shorter (the recovery ladder on the other members' side escalates into its
-// own signaling reconnect long before detection+15s).
+// do the remaining members get the removePeer broadcast. Transport-level drops
+// usually reconnect within seconds, so their window is shorter (15s); ping-
+// timeout deaths are the signature of a throttled background tab (mobile lock
+// screen) whose wakeup needs a longer window to land an in-place resume
+// instead of a full mesh rebuild.
 const GHOST_GRACE_MS = Number(process.env.GHOST_GRACE_MS) || 15000;
-const GHOST_GRACE_LATE_MS = Number(process.env.GHOST_GRACE_LATE_MS) || 5000;
+const GHOST_GRACE_LATE_MS = Number(process.env.GHOST_GRACE_LATE_MS) || 30000;
 
 function createRooms({ channelStore, chatStore, audit, log }) {
     const channels = {}; // channelId -> { socketId: socket } (live signaling sockets)
