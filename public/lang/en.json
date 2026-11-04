@@ -68,6 +68,7 @@
     "channel.errors.micDenied": "Microphone unavailable, joining as text only",
     "channel.errors.micPending": "Microphone permission not answered — joined as text only, click the mic button to grant it",
     "channel.errors.micLost": "Microphone disconnected — click the mic button to retry",
+    "channel.micFallback": "Selected microphone unavailable, switched back to the default device",
     "channel.micRecovered": "Microphone reconnected",
     "channel.errors.disconnected": "Connection lost, reconnecting…",
     "channel.offline": "You are offline — the channel reconnects automatically…",

@@ -60,17 +60,20 @@ describe('test-opusFmtp', () => {
     it('should negotiate both stereo declarations in music mode (sprop-stereo)', () => {
         // Chrome only encodes true stereo when the decoder (stereo=1) AND the
         // sent stream (sprop-stereo=1) are both declared — mirror the exact
-        // param set channel.js opusFmtp() emits for music mode
+        // param set channel.js opusFmtp() emits for music mode with a stereo
+        // capture. FEC rides in music mode too (cheap at high rates), DTX stays
+        // off.
         const music = mungeOpusFmtp(SDP, {
             maxaveragebitrate: 192000,
             stereo: 1,
             'sprop-stereo': 1,
             usedtx: null,
-            useinbandfec: null,
+            useinbandfec: 1,
         });
-        music.should.containEql('a=fmtp:111 minptime=10;maxaveragebitrate=192000;stereo=1;sprop-stereo=1');
+        music.should.containEql(
+            'a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000;stereo=1;sprop-stereo=1'
+        );
         music.should.not.containEql('usedtx');
-        music.should.not.containEql('useinbandfec');
         // …and back to voice: BOTH stereo declarations must leave together
         const voice = mungeOpusFmtp(music, {
             maxaveragebitrate: 64000,
@@ -79,14 +82,42 @@ describe('test-opusFmtp', () => {
             stereo: null,
             'sprop-stereo': null,
         });
-        voice.should.containEql('a=fmtp:111 minptime=10;maxaveragebitrate=64000;usedtx=1;useinbandfec=1');
+        voice.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=64000;usedtx=1');
         voice.should.not.containEql('stereo');
     });
 
-    it('should negotiate voice-mode FEC and drop it in music mode', () => {
+    it('should drop both stereo declarations in music mode when the mic is mono', () => {
+        // watchMicHealth flips settings.micChannels to 1 for mono captures:
+        // the music dict then states stereo:null/'sprop-stereo':null so the
+        // encoder ships mono at full per-channel rate instead of dual-mono
+        const monoMusic = mungeOpusFmtp(SDP, {
+            maxaveragebitrate: 192000,
+            stereo: null,
+            'sprop-stereo': null,
+            usedtx: null,
+            useinbandfec: 1,
+        });
+        monoMusic.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000');
+        monoMusic.should.not.containEql('stereo');
+        monoMusic.should.not.containEql('usedtx');
+        // …a stereo mic lands mid-call: both declarations must arrive together
+        const stereoMusic = mungeOpusFmtp(monoMusic, {
+            maxaveragebitrate: 192000,
+            stereo: 1,
+            'sprop-stereo': 1,
+            usedtx: null,
+            useinbandfec: 1,
+        });
+        stereoMusic.should.containEql(
+            'a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000;stereo=1;sprop-stereo=1'
+        );
+    });
+
+    it('should keep FEC across the voice↔music mode switch', () => {
         // Chrome only sends Opus inband FEC when the receiving side negotiated
         // useinbandfec — mirror the exact voice dict from channel.js opusFmtp()
-        // applied to an SDP that never carried the parameter
+        // applied to an SDP that never carried the parameter; music mode keeps
+        // it (a sliver of 192k headroom buys continuity on lossy links)
         const noFec = SDP.replace(';useinbandfec=1', '');
         const voice = mungeOpusFmtp(noFec, {
             maxaveragebitrate: 64000,
@@ -96,16 +127,18 @@ describe('test-opusFmtp', () => {
             'sprop-stereo': null,
         });
         voice.should.containEql('a=fmtp:111 minptime=10;maxaveragebitrate=64000;usedtx=1;useinbandfec=1');
-        // …music on the SAME connection: the whole voice set leaves together
+        // …music on the SAME connection: DTX leaves, FEC and stereo stay
         const music = mungeOpusFmtp(voice, {
             maxaveragebitrate: 192000,
             stereo: 1,
             'sprop-stereo': 1,
             usedtx: null,
-            useinbandfec: null,
+            useinbandfec: 1,
         });
-        music.should.containEql('a=fmtp:111 minptime=10;maxaveragebitrate=192000;stereo=1;sprop-stereo=1');
-        music.should.not.containEql('useinbandfec');
+        music.should.containEql(
+            'a=fmtp:111 minptime=10;maxaveragebitrate=192000;useinbandfec=1;stereo=1;sprop-stereo=1'
+        );
+        music.should.not.containEql('usedtx');
     });
 
     it('should leave non-opus fmtp lines untouched', () => {

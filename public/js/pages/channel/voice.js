@@ -283,7 +283,21 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
      */
     async function reacquireMic() {
         const hadStream = !!s.localStream;
-        const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
+        } catch (err) {
+            // the configured device vanished between enumeration and open — a
+            // stale exact deviceId fails with OverconstrainedError forever, so
+            // drop it and fall back to the default device ONCE (recoverMicDevice
+            // only covers the track-onended path; this covers the settings UI)
+            const staleDevice = settings.micDeviceId && ['OverconstrainedError', 'NotFoundError'].includes(err?.name);
+            if (!staleDevice) throw err;
+            settings.micDeviceId = '';
+            x.refreshDeviceSelects();
+            stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints());
+            x.toast(t('channel.micFallback'), 'warn');
+        }
         const track = stream.getAudioTracks()[0];
         // a device/processing change keeps the current mute state; enabling voice turns the mic on
         s.micOn = hadStream ? s.micOn : true;
@@ -340,6 +354,16 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     /** Watch the raw capture for device death; re-armed per reacquireMic. */
     function watchMicHealth(stream) {
         if (!stream) return;
+        // stereo fmtp must match what the capture ACTUALLY delivers (music mode
+        // asks for ideal:2, mono mics still produce mono): a mismatch makes the
+        // encoder ship dual-mono at half the per-channel rate. A mid-call flip
+        // (device switch) needs one plain renegotiation to push the new dict.
+        const channels = stream.getAudioTracks()[0]?.getSettings?.().channelCount;
+        const next = channels >= 2 ? 2 : 1;
+        if (next !== settings.micChannels) {
+            settings.micChannels = next;
+            if (s.joined) s.mesh?.renegotiateAll();
+        }
         for (const track of stream.getAudioTracks()) {
             track.onended = () => recoverMicDevice();
         }

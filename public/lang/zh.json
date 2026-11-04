@@ -68,6 +68,7 @@
     "channel.errors.micDenied": "无法访问麦克风，将以仅文字模式加入",
     "channel.errors.micPending": "麦克风授权未响应，已以仅文字模式加入；点击麦克风按钮可授权",
     "channel.errors.micLost": "麦克风已断开，点击麦克风按钮可重试",
+    "channel.micFallback": "所选麦克风不可用，已切换回默认设备",
     "channel.micRecovered": "麦克风已重新连接",
     "channel.errors.disconnected": "连接已断开，正在尝试重连…",
     "channel.offline": "网络已离线，恢复后将自动重连…",

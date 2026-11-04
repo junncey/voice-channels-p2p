@@ -1,8 +1,8 @@
 /**
  * Audio level monitoring — one shared AudioContext, one analyser per stream.
  * Analyser taps do NOT route audio to the speakers by themselves; playback is
- * either a per-peer GainNode (supports boosting past 100%) or a dedicated
- * <audio> element owned by the channel page.
+ * either a per-peer GainNode (supports boosting past 100%, into a shared peak
+ * limiter) or a dedicated <audio> element owned by the channel page.
  */
 
 export class AudioHub {
@@ -16,6 +16,8 @@ export class AudioHub {
         this.watchers = new Map(); // key -> { src, analyser, data, speaking, cb }
         /** key -> { src, gain } audible playback chains (remote peers only) */
         this.players = new Map();
+        /** shared DynamicsCompressor all peer gains feed into (see _outChain) */
+        this.master = null;
         /** key -> muted <audio> keeping remote track delivery alive (see _prime) */
         this.primers = new Map();
         /** local mic pipeline: { raw, src, gain, dest, stream } or null */
@@ -30,8 +32,15 @@ export class AudioHub {
             const AC = window.AudioContext || window.webkitAudioContext;
             // 'interactive' asks for the smallest output buffer — platforms that
             // would otherwise default to a playout buffer of 100ms+ get their
-            // remote-voice latency cut for free
-            this.ctx = new AC({ latencyHint: 'interactive' });
+            // remote-voice latency cut for free. WebRTC tracks run at 48kHz:
+            // pinning the context to the same rate sidesteps the Chromium
+            // resampler (and its MediaStreamSource bug family on rate mismatch).
+            // Browsers that refuse the explicit rate fall back to the default.
+            try {
+                this.ctx = new AC({ latencyHint: 'interactive', sampleRate: 48000 });
+            } catch {
+                this.ctx = new AC({ latencyHint: 'interactive' });
+            }
         }
         if (this.ctx.state === 'suspended') {
             // Never block the caller on autoplay policy: without a user gesture
@@ -96,7 +105,7 @@ export class AudioHub {
             const src = this.ctx.createMediaStreamSource(stream);
             const gain = this.ctx.createGain();
             gain.gain.value = 0;
-            src.connect(gain).connect(this.ctx.destination);
+            src.connect(gain).connect(this._outChain());
             gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.03); // fade in, no pop
             this.players.set(key, { src, gain });
             this._prime(key, stream);
@@ -104,6 +113,28 @@ export class AudioHub {
         } catch {
             return false;
         }
+    }
+
+    /**
+     * Shared output node for remote playback: a peak limiter just below
+     * full scale. Peer gains boost up to 300% × master volume, so anything
+     * above unity clips hard at the destination — the send side has had its
+     * own limiter since the beginning, this is the receive-side twin. It only
+     * shaves overshoots, and one node is shared by every peer chain.
+     * @returns {AudioNode}
+     */
+    _outChain() {
+        if (!this.master) {
+            const limiter = this.ctx.createDynamicsCompressor();
+            limiter.threshold.value = -3;
+            limiter.knee.value = 1;
+            limiter.ratio.value = 20;
+            limiter.attack.value = 0.003;
+            limiter.release.value = 0.1;
+            limiter.connect(this.ctx.destination);
+            this.master = { limiter };
+        }
+        return this.master.limiter;
     }
 
     /**
@@ -294,6 +325,14 @@ export class AudioHub {
         this._stop();
         for (const key of [...this.watchers.keys()]) this.unwatch(key);
         for (const key of [...this.players.keys()]) this.stopPeer(key);
+        if (this.master) {
+            try {
+                this.master.limiter.disconnect();
+            } catch {
+                /* already disconnected */
+            }
+            this.master = null;
+        }
         this.detachShare();
         this.detachMic();
         if (this.ctx) this.ctx.close().catch(() => {});

@@ -81,6 +81,7 @@ const defaultAudioSettings = {
     ptt: false,
     musicMode: false,
     opusBitrate: 64, // encoder cap in kbps (BITRATE_MIN..BITRATE_MAX)
+    micChannels: 1, // channels the CURRENT capture actually delivers (1|2, refreshed by watchMicHealth)
 };
 
 // Opus send caps stamped onto every local offer/answer and live senders:
@@ -129,23 +130,32 @@ function opusFmtp() {
     const raw = Math.round(Number(settings.opusBitrate));
     const kbps = Math.min(BITRATE_MAX, Math.max(BITRATE_MIN, raw || 64));
     const maxaveragebitrate = kbps * 1000;
+    // FEC rides in music mode too: at 192k the inband redundancy costs a sliver
+    // of headroom but keeps lossy links from chopping the music.
     if (shareSound.active()) {
         // shared music needs bandwidth and stereo. The mic's processing
         // toggles stay untouched on purpose: on speakers, AEC is what keeps
         // the shared audio from leaking back in through the mic. The fmtp side
         // (stereo) is pushed out by share.js via renegotiateAll; the bitrate
-        // half applies at once via setParameters.
+        // half applies at once via setParameters. Stereo stays unconditional
+        // here — the share mix is stereo even when the mic itself is mono.
         return {
             maxaveragebitrate: Math.max(maxaveragebitrate, 192000),
             stereo: 1,
             'sprop-stereo': 1,
             usedtx: null,
-            useinbandfec: null,
+            useinbandfec: 1,
         };
     }
-    return settings.musicMode
-        ? { maxaveragebitrate, stereo: 1, 'sprop-stereo': 1, usedtx: null, useinbandfec: null }
-        : { maxaveragebitrate, usedtx: 1, useinbandfec: 1, stereo: null, 'sprop-stereo': null };
+    if (settings.musicMode) {
+        // declare stereo only when the capture actually delivers two channels:
+        // a mono mic + stereo fmtp makes the encoder ship dual-mono, halving
+        // the per-channel bandwidth at the same cap (watchMicHealth tracks it)
+        const stereo =
+            settings.micChannels === 2 ? { stereo: 1, 'sprop-stereo': 1 } : { stereo: null, 'sprop-stereo': null };
+        return { maxaveragebitrate, ...stereo, usedtx: null, useinbandfec: 1 };
+    }
+    return { maxaveragebitrate, usedtx: 1, useinbandfec: 1, stereo: null, 'sprop-stereo': null };
 }
 
 let settings = loadAudioSettings();
