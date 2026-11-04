@@ -217,8 +217,26 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             noiseSuppression: settings.musicMode ? false : settings.noiseSuppression,
             autoGainControl: settings.musicMode ? false : settings.autoGainControl,
         };
+        if (settings.musicMode) {
+            // stereo capture when the device offers it (ideal: mono mics keep
+            // working) — the link's stereo=1/sprop-stereo=1 fmtp is pointless
+            // if capture itself got downmixed to one channel
+            audio.channelCount = { ideal: 2 };
+        }
         if (settings.micDeviceId) audio.deviceId = { exact: settings.micDeviceId };
         return { audio };
+    }
+
+    /**
+     * Encoder hint for the outgoing track: 'speech' lets Chrome lean harder on
+     * DTX/FEC trade-offs, 'music' (music mode or a running share) keeps the
+     * fidelity-first behavior. Zero-cost, ignored by browsers without support.
+     */
+    function refreshOutgoingHint() {
+        const hint = settings.musicMode || x.shareSound?.active() ? 'music' : 'speech';
+        for (const track of [...(s.rawMicStream?.getAudioTracks() || []), ...(s.localStream?.getAudioTracks() || [])]) {
+            if ('contentHint' in track) track.contentHint = hint;
+        }
     }
 
     /**
@@ -237,12 +255,14 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             s.localStream = processed;
             micProcessed = true;
             applyTrackGate(live); // before the swap: gate the mixed stream (or the raw mic while sharing)
+            refreshOutgoingHint(); // the outgoing track object changed with the pipeline
             s.mesh?.replaceAudioTrack(processed.getAudioTracks()[0], processed);
         } else {
             s.hub?.detachMic();
             s.rawMicStream.getAudioTracks().forEach((track) => (track.enabled = live));
             s.localStream = s.rawMicStream;
             micProcessed = false;
+            refreshOutgoingHint();
             s.mesh?.replaceAudioTrack(s.rawMicStream.getAudioTracks()[0], s.rawMicStream);
         }
         if (s.hub?.ctx) s.hub.watch('self', s.localStream, x.localLevelCb);
@@ -271,6 +291,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         micProcessed = false;
         s.rawMicStream = stream;
         s.localStream = stream;
+        refreshOutgoingHint(); // mode/device toggles re-capture — the hint may have flipped
         syncMicPipeline(); // upgrades to the processed track when possible
         if (!micProcessed) s.mesh?.replaceAudioTrack(track, stream);
         if (s.hub?.ctx) s.hub.watch('self', s.localStream, x.localLevelCb);
@@ -417,6 +438,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         bindPttHoldButton,
         syncPttHoldButton,
         buildAudioConstraints,
+        refreshOutgoingHint,
         syncMicPipeline,
         reacquireMic,
         enableVoice,

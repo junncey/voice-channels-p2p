@@ -84,11 +84,14 @@ const defaultAudioSettings = {
 
 // Opus send caps stamped onto every local offer/answer and live senders:
 // voice favors bandwidth discipline (usedtx stops sending during silence),
-// music favors fidelity (stereo). null deletes the key — each dict states the
-// FULL desired state so switching modes on a live connection can't leave the
-// other mode's params behind in re-offers. The bitrate ceiling is the user's
-// slider (settings.opusBitrate, kbps); toggling music mode re-seeds it with
-// the mode's default (192 / 64), after which it stays hand-tunable.
+// music favors fidelity (stereo + sprop-stereo — stereo declares our decoder
+// accepts stereo, sprop-stereo declares the stream we SEND is stereo; Chrome
+// needs both before its encoder actually encodes two channels). null deletes
+// the key — each dict states the FULL desired state so switching modes on a
+// live connection can't leave the other mode's params behind in re-offers.
+// The bitrate ceiling is the user's slider (settings.opusBitrate, kbps);
+// toggling music mode re-seeds it with the mode's default (192 / 64), after
+// which it stays hand-tunable.
 const BITRATE_MIN = 24;
 const BITRATE_MAX = 256;
 
@@ -125,14 +128,14 @@ function opusFmtp() {
     if (shareSound.active()) {
         // shared music needs bandwidth and stereo. The mic's processing
         // toggles stay untouched on purpose: on speakers, AEC is what keeps
-        // the shared audio from leaking back in through the mic. Stereo
-        // engages on the next SDP round (reverse offer / ICE restart); the
-        // bitrate half applies at once via setParameters.
-        return { maxaveragebitrate: Math.max(maxaveragebitrate, 192000), stereo: 1, usedtx: null };
+        // the shared audio from leaking back in through the mic. The fmtp side
+        // (stereo) is pushed out by share.js via renegotiateAll; the bitrate
+        // half applies at once via setParameters.
+        return { maxaveragebitrate: Math.max(maxaveragebitrate, 192000), stereo: 1, 'sprop-stereo': 1, usedtx: null };
     }
     return settings.musicMode
-        ? { maxaveragebitrate, stereo: 1, usedtx: null }
-        : { maxaveragebitrate, usedtx: 1, stereo: null };
+        ? { maxaveragebitrate, stereo: 1, 'sprop-stereo': 1, usedtx: null }
+        : { maxaveragebitrate, usedtx: 1, stereo: null, 'sprop-stereo': null };
 }
 
 let settings = loadAudioSettings();
@@ -313,7 +316,14 @@ const shareSound = createShareSound({
     pipelineReady: () => voice.micProcessed && hub?.ctx?.state === 'running',
     applyGate: () => x.applyMicState(),
     broadcast: (on) => x.broadcastShare(on),
-    refreshBitrate: () => mesh?.setSendBitrate(),
+    refreshBitrate: () => {
+        // the share's fmtp dict (stereo/usedtx) needs an SDP round — force one
+        // so the music caps apply on live links instead of waiting for a
+        // restart that may never come; the outgoing content hint follows suit
+        mesh?.setSendBitrate();
+        mesh?.renegotiateAll();
+        voice.refreshOutgoingHint();
+    },
     toast,
 });
 
@@ -864,6 +874,7 @@ function teardownMedia() {
     rec.stopPathMonitor();
     rec.resetForTeardown();
     se.clearDisconnectToast();
+    se.stopIceRefresh();
     screenLock.release();
     shareSound.stop({ silent: true }); // releases the capture + tells the room before the socket goes
     settingsUi.stopMicTest();

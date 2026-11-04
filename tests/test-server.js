@@ -20,6 +20,12 @@ process.env.GHOST_GRACE_MS = '1200';
 process.env.GHOST_GRACE_LATE_MS = '600';
 process.env.TEMP_ROOMS_ENABLED = 'true';
 process.env.AUTO_INIT_CHANNELS = 'true';
+// REST/HMAC TURN mode: every addPeer / refreshIceServers payload must carry
+// the minted credentials (exercised by the "fresh TURN REST credentials" case)
+process.env.TURN_SERVER_ENABLED = 'true';
+process.env.TURN_SERVER_URL = 'turn:t1.example.com:3478,turn:t2.example.com:3478';
+process.env.TURN_SERVER_SECRET = 'test-turn-secret';
+process.env.TURN_CREDENTIAL_TTL_SEC = '7200';
 
 require('should');
 const fs = require('fs');
@@ -224,6 +230,37 @@ describe('test-server (signaling integration)', function () {
             const toB = await gotToAddPeer;
             toB.peer_id.should.equal(ua);
             toB.should_create_offer.should.equal(true);
+        });
+
+        it('should serve fresh TURN REST credentials on addPeer and refreshIceServers', async () => {
+            const room = freshRoom('ice');
+            const ua = crypto.randomUUID();
+            const ub = crypto.randomUUID();
+            const a = track(connect());
+            a.emit('join', joinPayload(room, ua, 'alice'));
+            await once(a, 'serverInfo');
+            const b = track(connect());
+            const gotAddPeer = once(a, 'addPeer');
+            b.emit('join', joinPayload(room, ub, 'bob'));
+            const toA = await gotAddPeer;
+
+            // the addPeer payload carries the minted HMAC set: a numeric (unix
+            // expiry) username, one entry per comma-separated TURN URL, and the
+            // documented coturn REST password = base64(hmac-sha1(secret, username))
+            const turn = (toA.iceServers || []).filter((server) => String(server.urls || '').startsWith('turn:'));
+            turn.should.have.length(2);
+            const expiresAtSec = Number(turn[0].username);
+            Number.isFinite(expiresAtSec).should.be.true();
+            expiresAtSec.should.be.greaterThan(Date.now() / 1000);
+            turn[0].username.should.equal(turn[1].username);
+            const expected = crypto.createHmac('sha1', 'test-turn-secret').update(turn[0].username).digest('base64');
+            turn[0].credential.should.equal(expected);
+
+            // the ack-based refresh hands out the SAME cached set until half-life
+            const refreshed = await new Promise((resolve, reject) => {
+                a.timeout(4000).emit('refreshIceServers', null, (err, list) => (err ? reject(err) : resolve(list)));
+            });
+            JSON.stringify(refreshed).should.equal(JSON.stringify(toA.iceServers));
         });
 
         it('should relay SDP only between members of a shared room', async () => {

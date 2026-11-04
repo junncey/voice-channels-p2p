@@ -142,7 +142,13 @@ const turnServerUsername = config.webrtc.turn.username;
 const turnServerCredential = config.webrtc.turn.credential;
 const turnSecret = config.webrtc.turn.secret; // REST/HMAC mode (overrides static TURN auth)
 const turnTtlSec = config.webrtc.turn.credentialTtlSec || 12 * 3600;
-if (config.webrtc.stun.enabled && stunServerUrl) iceServers.push({ urls: stunServerUrl });
+// STUN_SERVER_URL may hold comma-separated URLs (several resolvers as mutual
+// backups, mirroring the TURN handling below)
+const stunServerUrls = (stunServerUrl || '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+if (config.webrtc.stun.enabled) stunServerUrls.forEach((url) => iceServers.push({ urls: url }));
 // TURN_SERVER_URL may hold several comma-separated URLs -> one RTCIceServer per relay
 // (multiple coturn instances act as mutual backups; the browser collects a relay
 // candidate per server and ICE picks whichever answers first)

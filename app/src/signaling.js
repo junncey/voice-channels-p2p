@@ -503,6 +503,20 @@ function registerSignaling(
         });
 
         /**
+         * Fresh ICE server list on demand (ack-based). Long sessions outlive
+         * their TURN REST credentials: the list is baked into every
+         * RTCPeerConnection at addPeer time, so a client whose credentials
+         * near their expiry asks for a new set and feeds it to
+         * setConfiguration — its recovery iceRestarts then authenticate
+         * against coturn again. Cheap by design: the list is process-global
+         * and memoized in getIceServers.
+         */
+        socket.on('refreshIceServers', async (unused, ack) => {
+            if (typeof ack !== 'function') return;
+            ack(getIceServers());
+        });
+
+        /**
          * Handle Room action (presenter gated): lock/unlock/joinLock.
          * (A former `checkPassword` action was removed: nothing in the client used
          * it and it let any socket probe the room password unauthenticated.)

@@ -69,7 +69,9 @@ export class Mesh {
         this.handlers = handlers;
         this.getOpusFmtp = getOpusFmtp;
         this.localStream = null;
-        /** peerId -> { pc, dc, pendingIce, queue, tracksAdded, offering } */
+        /** newest iceServers payload (TURN REST credentials age out mid-session) */
+        this.iceServers = [];
+        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor } */
         this.entries = new Map();
     }
 
@@ -109,9 +111,13 @@ export class Mesh {
      * @param {Array}   iceServers from the addPeer payload
      */
     addPeer(peerId, shouldCreateOffer, iceServers = []) {
+        // a fresh credential set rides on EVERY addPeer (rejoin storms too) —
+        // keep it even when the peer is already known: updateIceServers may
+        // already have applied it to the live PeerConnections
+        if (iceServers?.length) this.iceServers = iceServers;
         if (this.entries.has(peerId)) return;
 
-        const pc = new RTCPeerConnection({ iceServers });
+        const pc = new RTCPeerConnection({ iceServers: iceServers.length ? iceServers : this.iceServers });
         const entry = { pc, dc: null, pendingIce: [], queue: [], tracksAdded: false, offering: false };
         this.entries.set(peerId, entry);
 
@@ -218,25 +224,68 @@ export class Mesh {
      * @returns {Promise<boolean>} true when a re-offer went out
      */
     async restartIce(peerId) {
+        return this._sendOffer(peerId, { iceRestart: true });
+    }
+
+    /**
+     * Renegotiate a live link WITHOUT touching ICE (e.g. an fmtp-only change
+     * such as stereo/usedtx after a music-mode toggle — setParameters cannot
+     * move those, and a healthy link never produces another SDP round on its
+     * own). Reuses the fmtp munging and glare guards of the offer path.
+     * @param {string} peerId
+     * @returns {Promise<boolean>} true when the offer went out
+     */
+    async renegotiate(peerId) {
+        return this._sendOffer(peerId, {});
+    }
+
+    /** Renegotiate every stable link — mode toggles apply to the whole mesh. */
+    renegotiateAll() {
+        for (const peerId of this.entries.keys()) this.renegotiate(peerId).catch(() => {});
+    }
+
+    /** Offer core shared by ice restarts and plain renegotiations. */
+    async _sendOffer(peerId, offerOptions) {
         const entry = this.entries.get(peerId);
         if (!entry) return false;
         const pc = entry.pc;
         // mid-negotiation (reverse offer in flight): let that settle first,
-        // the recovery ladder retries on its next tick
+        // the caller's cadence retries on its next tick
         if (pc.connectionState === 'closed' || pc.signalingState !== 'stable') return false;
         entry.offering = true;
         try {
-            const offer = await pc.createOffer({ iceRestart: true });
+            const offer = await pc.createOffer(offerOptions);
             this._mungeLocalSdp(offer);
             await pc.setLocalDescription(offer);
             this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
-            console.log('[mesh] ice restart offer sent', peerId);
+            if (offerOptions.iceRestart) console.log('[mesh] ice restart offer sent', peerId);
             return true;
         } catch (err) {
-            console.error('[mesh] ice restart failed', peerId, err);
+            console.error('[mesh] offer failed', peerId, err);
             return false;
         } finally {
             entry.offering = false;
+        }
+    }
+
+    /**
+     * Swap in a fresh ICE server list (TURN REST credentials age out — in that
+     * mode the username IS the expiry timestamp). setConfiguration feeds the
+     * ICE agent of every live connection, so the NEXT iceRestart gathers relay
+     * candidates with credentials that still authenticate; established
+     * allocations keep running on the old ones either way.
+     * @param {Array} iceServers
+     */
+    updateIceServers(iceServers) {
+        if (!Array.isArray(iceServers) || !iceServers.length) return;
+        this.iceServers = iceServers;
+        for (const entry of this.entries.values()) {
+            if (entry.pc.connectionState === 'closed') continue;
+            try {
+                entry.pc.setConfiguration({ iceServers });
+            } catch {
+                /* browser refuses (rare mid-negotiation edge) — the next refresh retries */
+            }
         }
     }
 
@@ -260,9 +309,11 @@ export class Mesh {
      * hole punching succeeded), 'relay' when media flows through a TURN
      * server (either end sits on a relay candidate). The inbound audio RTP
      * report rides along (cumulative counters — the caller diffs between
-     * polls for loss % and bitrate).
+     * polls for loss % and bitrate), plus the OUTBOUND loss the peer's
+     * receiver report attributes to our stream (fractionLost, as %) — the
+     * signal any send-side adaptation must react to.
      * @param {string} peerId
-     * @returns {Promise<?object>} { state, type, local, remote, rtt, inbound } — null when the peer is unknown
+     * @returns {Promise<?object>} { state, type, local, remote, rtt, inbound, outboundLoss } — null when the peer is unknown
      */
     async connPath(peerId) {
         const entry = this.entries.get(peerId);
@@ -270,13 +321,14 @@ export class Mesh {
         const pc = entry.pc;
         const state = pc.connectionState;
         if (state !== 'connected') {
-            return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: null };
+            return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: null, outboundLoss: null };
         }
         const stats = await pc.getStats();
         const candidates = new Map();
         let pair = null; // explicit selected marker (standard/Firefox)…
         let fallback = null; // …Chromium: the newest succeeded + nominated pair
         let inbound = null; // inbound audio RTP (one audio track per connection)
+        let outboundLoss = null; // % of OUR stream the peer reports lost (0..1 → %)
         stats.forEach((report) => {
             if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
                 candidates.set(report.id, report);
@@ -290,6 +342,15 @@ export class Mesh {
                     bytesReceived: report.bytesReceived ?? 0,
                     timestamp: report.timestamp ?? Date.now(),
                 };
+                return;
+            }
+            if (report.type === 'remote-inbound-rtp') {
+                // RTCP receiver report about our (single) outbound audio track;
+                // some browsers omit the field — null means "no verdict", the
+                // caller must treat it as neither good nor bad
+                if (typeof report.fractionLost === 'number') {
+                    outboundLoss = Math.round(report.fractionLost * 1000) / 10;
+                }
                 return;
             }
             if (report.type !== 'candidate-pair') return;
@@ -307,19 +368,21 @@ export class Mesh {
         });
         const inboundOut = inbound ?? null;
         if (!pair) pair = fallback;
-        if (!pair) return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: inboundOut };
+        if (!pair)
+            return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: inboundOut, outboundLoss };
         const local = candidates.get(pair.localCandidateId)?.candidateType ?? null;
         const remote = candidates.get(pair.remoteCandidateId)?.candidateType ?? null;
         const rtt = typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null;
         // without both candidate reports the path is unproven — never claim 'p2p'
-        if (!local || !remote) return { state, type: 'unknown', local, remote, rtt, inbound: inboundOut };
+        if (!local || !remote) return { state, type: 'unknown', local, remote, rtt, inbound: inboundOut, outboundLoss };
         const type = local === 'relay' || remote === 'relay' ? 'relay' : 'p2p';
-        return { state, type, local, remote, rtt, inbound: inboundOut };
+        return { state, type, local, remote, rtt, inbound: inboundOut, outboundLoss };
     }
 
     removePeer(peerId) {
         const entry = this.entries.get(peerId);
         if (!entry) return;
+        clearTimeout(entry.dcTimer);
         try {
             entry.pc.close();
         } catch {
@@ -377,12 +440,13 @@ export class Mesh {
     }
 
     /**
-     * Push maxaveragebitrate onto a connection's audio sender via
-     * setParameters — takes effect WITHOUT a renegotiation (music-mode toggle
-     * mid-call); the SDP fmtp cap covers new senders at negotiation time.
+     * Push the effective send bitrate onto a connection's audio sender via
+     * setParameters — takes effect WITHOUT a renegotiation. The value is the
+     * configured fmtp cap, or a temporary loss-driven floor the recovery
+     * engine placed on this link (see setPeerBitrateFloor).
      */
     _applySendBitrate(entry) {
-        const maxBitrate = this.getOpusFmtp?.()?.maxaveragebitrate;
+        const maxBitrate = entry.bitrateFloor || this.getOpusFmtp?.()?.maxaveragebitrate;
         if (!maxBitrate) return;
         const sender = entry.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
         if (!sender) return;
@@ -398,12 +462,34 @@ export class Mesh {
         }
     }
 
-    /** Re-apply the configured send bitrate on every live connection. */
+    /**
+     * Temporary per-link send-bitrate floor, set by the recovery engine when
+     * the peer's receiver report shows sustained outbound loss (a smaller
+     * offered load helps congestion even though Opus sits near its cap).
+     * Pass null to lift the floor and re-apply the configured cap.
+     * @param {string} peerId
+     * @param {?number} bps floor in bit/s, or null
+     */
+    setPeerBitrateFloor(peerId, bps) {
+        const entry = this.entries.get(peerId);
+        if (!entry) return;
+        entry.bitrateFloor = bps || null;
+        this._applySendBitrate(entry);
+    }
+
+    /**
+     * Re-apply the configured send bitrate on every live connection. A user
+     * action (slider / mode toggle) — any adaptive floor is dropped in its favor.
+     */
     setSendBitrate() {
-        for (const entry of this.entries.values()) this._applySendBitrate(entry);
+        for (const entry of this.entries.values()) {
+            entry.bitrateFloor = null;
+            this._applySendBitrate(entry);
+        }
     }
 
     _attachChat(peerId, entry, dc) {
+        clearTimeout(entry.dcTimer); // a peer-recreated channel just landed
         entry.dc = dc;
         dc.onopen = () => {
             const queued = entry.queue.splice(0);
@@ -422,6 +508,18 @@ export class Mesh {
         };
         dc.onclose = () => {
             if (entry.dc === dc) entry.dc = null;
+            // PC alive but SCTP dead (rare transport reset): chat and image
+            // transfer would silently die while voice keeps flowing, and the
+            // recovery ladder only watches connectionState. Give a recreating
+            // peer a moment to land its own channel, then rebuild ours — the
+            // renegotiation that follows re-establishes it on both ends.
+            if (entry.pc.connectionState !== 'connected' || this.entries.get(peerId) !== entry) return;
+            clearTimeout(entry.dcTimer);
+            entry.dcTimer = setTimeout(() => {
+                if (entry.dc || entry.pc.connectionState !== 'connected' || this.entries.get(peerId) !== entry) return;
+                console.warn('[mesh] chat channel died on a live link, renegotiating', peerId);
+                this._attachChat(peerId, entry, entry.pc.createDataChannel(CHAT_DC_LABEL));
+            }, 1000);
         };
     }
 }

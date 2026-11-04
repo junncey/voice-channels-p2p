@@ -47,6 +47,50 @@ export function createSocketEvents({
     const DISCONNECT_TOAST_MS = 3000;
     let disconnectToastTimer = null;
 
+    // TURN REST credentials expire (the username IS the unix expiry timestamp)
+    // but the list is baked into each RTCPeerConnection at addPeer time — a
+    // session that outlives its credentials would send every recovery
+    // iceRestart at a coturn that no longer authenticates it. Re-arm a fetch
+    // shortly before the earliest expiry lands in a payload; the fresh set
+    // goes to setConfiguration via mesh.updateIceServers.
+    const ICE_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+    const ICE_REFRESH_MIN_DELAY_MS = 60000;
+    const ICE_REFRESH_RETRY_MS = 10 * 60 * 1000;
+    let iceRefreshTimer = null;
+
+    /** (Re)schedule the next credential fetch from the newest addPeer payload. */
+    function scheduleIceRefresh(iceServers) {
+        // only REST-mode entries carry a numeric expiry username; static
+        // accounts and bare STUN never age out — nothing to schedule
+        let expiresAtSec = null;
+        for (const server of iceServers || []) {
+            const expiry = Number(server?.username);
+            if (Number.isFinite(expiry) && expiry > 0 && (expiresAtSec === null || expiry < expiresAtSec)) {
+                expiresAtSec = expiry;
+            }
+        }
+        clearTimeout(iceRefreshTimer);
+        iceRefreshTimer = null;
+        if (expiresAtSec === null) return;
+        const delay = Math.max(ICE_REFRESH_MARGIN_MS + expiresAtSec * 1000 - Date.now(), ICE_REFRESH_MIN_DELAY_MS);
+        iceRefreshTimer = setTimeout(refreshIceServers, delay);
+    }
+
+    function refreshIceServers() {
+        iceRefreshTimer = null;
+        const socket = s.socket;
+        // not in a live session: the next addPeer (join / new peer) reschedules
+        if (!socket?.connected || !s.joined) return;
+        socket.timeout(8000).emit('refreshIceServers', null, (err, iceServers) => {
+            if (err || !Array.isArray(iceServers) || !iceServers.length) {
+                iceRefreshTimer = setTimeout(refreshIceServers, ICE_REFRESH_RETRY_MS);
+                return;
+            }
+            s.mesh?.updateIceServers(iceServers);
+            scheduleIceRefresh(iceServers);
+        });
+    }
+
     /** Server history rows -> renderable rows (shared by join + paging). */
     function parseHistoryRows(messages) {
         const rows = [];
@@ -195,6 +239,7 @@ export function createSocketEvents({
 
         socket.on('addPeer', (cfg) => {
             const known = s.mesh.entries.has(cfg.peer_id);
+            scheduleIceRefresh(cfg.iceServers); // freshest credential expiry rides on every addPeer
             s.mesh.addPeer(cfg.peer_id, cfg.should_create_offer, cfg.iceServers || []);
             mem.syncMembers(cfg.peers || {});
             // should_create_offer=false means: WE are the old member and someone
@@ -433,6 +478,10 @@ export function createSocketEvents({
         clearDisconnectToast: () => {
             clearTimeout(disconnectToastTimer);
             disconnectToastTimer = null;
+        },
+        stopIceRefresh: () => {
+            clearTimeout(iceRefreshTimer);
+            iceRefreshTimer = null;
         },
     };
 }

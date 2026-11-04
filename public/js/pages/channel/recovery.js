@@ -5,6 +5,8 @@ Signaling/media self-healing — the recovery engine for the channel page.
   - "connecting…" badge for ghost members whose offer will never be answered
   - connection path monitor (P2P vs TURN relay badge + rtt)
   - inbound link quality (loss/jitter diffing → "unstable" badge)
+  - outbound loss adaptation (the peer's receiver report floors OUR send
+    bitrate for that link until the report cleans up)
   - relay upgrade: re-punch a connected-but-relayed link while direct checks
     may still succeed
 
@@ -379,7 +381,12 @@ export function createRecovery({ s, x, members, $, el, t }) {
     const LOSS_OK_PCT = 5; // at/below this counts as good (in between: neither)
     const UNSTABLE_BAD_POLLS = 3; // ~15s at the 5s poll cadence → badge on
     const UNSTABLE_GOOD_POLLS = 2; // clean polls before the badge clears
-    // peerId -> { last, loss, jitter, kbps, bad, good, unstable }
+    // outbound loss (the peer's receiver report about OUR stream) → send-side
+    // adaptation, same thresholds/hysteresis shape as the badge
+    const ADAPT_BAD_POLLS = 3;
+    const ADAPT_GOOD_POLLS = 2;
+    const ADAPT_FLOOR_MIN_BPS = 24000; // never adapt below the voice bitrate floor
+    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -391,6 +398,9 @@ export function createRecovery({ s, x, members, $, el, t }) {
             bad: 0,
             good: 0,
             unstable: false,
+            obad: 0,
+            ogood: 0,
+            adapted: false,
         };
         const inbound = info?.inbound;
         if (inbound) {
@@ -423,6 +433,44 @@ export function createRecovery({ s, x, members, $, el, t }) {
         else if (rec.unstable && rec.good >= UNSTABLE_GOOD_POLLS) rec.unstable = false;
         lossStreaks.set(peerId, rec);
         if (was !== rec.unstable) updatePeerUnstable(peerId);
+        noteOutboundAdaptation(peerId, info, rec);
+    }
+
+    /**
+     * Send-side answer to sustained OUTBOUND loss (mesh links are
+     * independent: the inbound badge says the peer is hard to hear, while
+     * fractionLost in the peer's receiver report says OUR stream is the one
+     * dropping). Floor this link's encoder cap at half the configured bitrate
+     * until the report cleans up — setParameters, no renegotiation involved.
+     * Speech mode only (usedtx caps): music/share fidelity is an explicit user
+     * choice, the badge alone tells them the link is bad.
+     */
+    function noteOutboundAdaptation(peerId, info, rec) {
+        const fmtp = s.mesh?.getOpusFmtp?.();
+        const outbound = info?.outboundLoss;
+        if (fmtp?.usedtx === 1 && fmtp?.maxaveragebitrate && outbound !== null && outbound !== undefined) {
+            if (outbound >= LOSS_BAD_PCT) {
+                rec.obad += 1;
+                rec.ogood = 0;
+            } else if (outbound <= LOSS_OK_PCT) {
+                rec.ogood += 1;
+                rec.obad = 0;
+            }
+            if (!rec.adapted && rec.obad >= ADAPT_BAD_POLLS) {
+                rec.adapted = true;
+                const floor = Math.max(ADAPT_FLOOR_MIN_BPS, Math.floor(fmtp.maxaveragebitrate / 2));
+                s.mesh.setPeerBitrateFloor(peerId, floor);
+                console.warn('[mesh] loss adaptation: send bitrate floored', peerId, `${floor / 1000}kbps`);
+            } else if (rec.adapted && rec.ogood >= ADAPT_GOOD_POLLS) {
+                rec.adapted = false;
+                s.mesh.setPeerBitrateFloor(peerId, null);
+                console.log('[mesh] loss adaptation: bitrate restored', peerId);
+            }
+        } else if (rec.adapted && fmtp?.usedtx !== 1) {
+            // mode left speech (music/share): the user's caps rule the link again
+            rec.adapted = false;
+            s.mesh.setPeerBitrateFloor(peerId, null);
+        }
     }
 
     function updatePeerUnstable(peerId) {

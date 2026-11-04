@@ -92,9 +92,11 @@ export function createSettings({
             reflectBitrate();
             // re-capture under the overridden processing constraints (hot-swaps the
             // outgoing track) and push the new bitrate onto live senders at once;
-            // the fmtp side (stereo) lands with the next SDP round
+            // stereo/usedtx live in the fmtp, so also force a plain renegotiation —
+            // a healthy link never produces another SDP round on its own
             if (s.localStream) x.reacquireMicOrToast();
             s.mesh?.setSendBitrate();
+            s.mesh?.renegotiateAll();
         });
 
         $('#pttToggle').addEventListener('change', (event) => {
