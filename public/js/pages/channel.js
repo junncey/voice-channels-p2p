@@ -731,7 +731,10 @@ async function joinInner({ textOnly: asTextOnly }) {
         // page load with no user gesture): peers play through <audio> elements
         // until the first interaction resumes it, then upgrade to the gain path
         hub.ctx.addEventListener('statechange', voice.onCtxStateChange);
-        const resume = () => hub?.ctx?.resume().catch(() => {});
+        const resume = () => {
+            hub?.ctx?.resume().catch(() => {});
+            voice.retryPendingPlays(); // autoplay-refused fallback elements get their gesture now
+        };
         window.addEventListener('pointerdown', resume, { once: true });
         window.addEventListener('keydown', resume, { once: true });
     }

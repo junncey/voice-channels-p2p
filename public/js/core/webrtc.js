@@ -71,7 +71,7 @@ export class Mesh {
         this.localStream = null;
         /** newest iceServers payload (TURN REST credentials age out mid-session) */
         this.iceServers = [];
-        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor } */
+        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor, jitterTarget } */
         this.entries = new Map();
     }
 
@@ -275,18 +275,21 @@ export class Mesh {
      * candidates with credentials that still authenticate; established
      * allocations keep running on the old ones either way.
      * @param {Array} iceServers
+     * @returns {number} how many live connections refused setConfiguration
      */
     updateIceServers(iceServers) {
-        if (!Array.isArray(iceServers) || !iceServers.length) return;
+        if (!Array.isArray(iceServers) || !iceServers.length) return 0;
         this.iceServers = iceServers;
+        let refused = 0;
         for (const entry of this.entries.values()) {
             if (entry.pc.connectionState === 'closed') continue;
             try {
                 entry.pc.setConfiguration({ iceServers });
             } catch {
-                /* browser refuses (rare mid-negotiation edge) — the next refresh retries */
+                refused += 1; // rare mid-negotiation edge — caller re-applies shortly
             }
         }
+        return refused;
     }
 
     async handleIceCandidate({ peer_id, ice_candidate }) {
@@ -486,6 +489,29 @@ export class Mesh {
             entry.bitrateFloor = null;
             this._applySendBitrate(entry);
         }
+    }
+
+    /**
+     * Receive-side playout smoothing for one link: raise the audio jitter
+     * buffer target while the path poll sees sustained jitter/loss, drop back
+     * to the browser's adaptive default (null) once it settles. Feature-detected
+     * — browsers without receiver buffer control are left on their defaults.
+     * @param {string} peerId
+     * @param {?number} ms target depth in milliseconds, or null for browser auto
+     */
+    setPeerJitterTarget(peerId, ms) {
+        const entry = this.entries.get(peerId);
+        if (!entry || entry.jitterTarget === ms) return;
+        for (const receiver of entry.pc.getReceivers()) {
+            if (receiver.track?.kind !== 'audio') continue;
+            try {
+                if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms;
+                else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms;
+            } catch {
+                /* refusal keeps the browser default for this receiver */
+            }
+        }
+        entry.jitterTarget = ms;
     }
 
     _attachChat(peerId, entry, dc) {

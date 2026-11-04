@@ -54,9 +54,14 @@ export function createSocketEvents({
     // shortly before the earliest expiry lands in a payload; the fresh set
     // goes to setConfiguration via mesh.updateIceServers.
     const ICE_REFRESH_MARGIN_MS = 5 * 60 * 1000;
-    const ICE_REFRESH_MIN_DELAY_MS = 60000;
-    const ICE_REFRESH_RETRY_MS = 10 * 60 * 1000;
+    // cheap ack against a memoized server — retry soon rather than sit out a
+    // long window with credentials that may already be aging out
+    const ICE_REFRESH_RETRY_MS = 60 * 1000;
+    // setConfiguration refused mid-negotiation (rare): re-apply the SAME list
+    // shortly instead of waiting for the next fetch cycle
+    const ICE_APPLY_RETRY_MS = 30 * 1000;
     let iceRefreshTimer = null;
+    let iceApplyRetryTimer = null;
 
     /** (Re)schedule the next credential fetch from the newest addPeer payload. */
     function scheduleIceRefresh(iceServers) {
@@ -72,7 +77,10 @@ export function createSocketEvents({
         clearTimeout(iceRefreshTimer);
         iceRefreshTimer = null;
         if (expiresAtSec === null) return;
-        const delay = Math.max(ICE_REFRESH_MARGIN_MS + expiresAtSec * 1000 - Date.now(), ICE_REFRESH_MIN_DELAY_MS);
+        // no artificial floor: a payload already inside the margin window
+        // (short-lived credentials) must fetch NOW — a floor could arm the
+        // refresh after the expiry it is meant to beat
+        const delay = Math.max(0, ICE_REFRESH_MARGIN_MS + expiresAtSec * 1000 - Date.now());
         iceRefreshTimer = setTimeout(refreshIceServers, delay);
     }
 
@@ -86,7 +94,13 @@ export function createSocketEvents({
                 iceRefreshTimer = setTimeout(refreshIceServers, ICE_REFRESH_RETRY_MS);
                 return;
             }
-            s.mesh?.updateIceServers(iceServers);
+            const refused = s.mesh?.updateIceServers(iceServers) || 0;
+            if (refused > 0) {
+                // some live PCs refused setConfiguration (mid-negotiation edge):
+                // re-apply the same fresh list shortly — no new fetch needed
+                clearTimeout(iceApplyRetryTimer);
+                iceApplyRetryTimer = setTimeout(() => s.mesh?.updateIceServers(iceServers), ICE_APPLY_RETRY_MS);
+            }
             scheduleIceRefresh(iceServers);
         });
     }
@@ -482,6 +496,8 @@ export function createSocketEvents({
         stopIceRefresh: () => {
             clearTimeout(iceRefreshTimer);
             iceRefreshTimer = null;
+            clearTimeout(iceApplyRetryTimer);
+            iceApplyRetryTimer = null;
         },
     };
 }

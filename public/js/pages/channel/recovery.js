@@ -386,7 +386,13 @@ export function createRecovery({ s, x, members, $, el, t }) {
     const ADAPT_BAD_POLLS = 3;
     const ADAPT_GOOD_POLLS = 2;
     const ADAPT_FLOOR_MIN_BPS = 24000; // never adapt below the voice bitrate floor
-    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted }
+    // receive-side playout boost: NetEQ self-tunes but minimizes delay, so a
+    // jittery link keeps glitching — sustained trouble justifies asking for a
+    // deeper jitter buffer target until the path calms down again
+    const JITTER_BAD_MS = 40;
+    const JITTER_OK_MS = 25;
+    const JITTER_BOOST_MS = 120;
+    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -401,6 +407,9 @@ export function createRecovery({ s, x, members, $, el, t }) {
             obad: 0,
             ogood: 0,
             adapted: false,
+            jbad: 0,
+            jgood: 0,
+            jbBoost: false,
         };
         const inbound = info?.inbound;
         if (inbound) {
@@ -434,6 +443,7 @@ export function createRecovery({ s, x, members, $, el, t }) {
         lossStreaks.set(peerId, rec);
         if (was !== rec.unstable) updatePeerUnstable(peerId);
         noteOutboundAdaptation(peerId, info, rec);
+        noteJitterBoost(peerId, rec);
     }
 
     /**
@@ -470,6 +480,39 @@ export function createRecovery({ s, x, members, $, el, t }) {
             // mode left speech (music/share): the user's caps rule the link again
             rec.adapted = false;
             s.mesh.setPeerBitrateFloor(peerId, null);
+        }
+    }
+
+    /**
+     * Receive-side answer to a jittery/lossy inbound link: raise that link's
+     * audio playout buffer target while the trouble lasts (mesh.
+     * setPeerJitterTarget — receiver-side, no renegotiation), restore the
+     * browser's adaptive default once it calms. Same hysteresis shape as the
+     * other engines; unlike the send-side bitrate floor this carries no
+     * fidelity trade, so it runs in every mode (music glitches cut worse).
+     */
+    function noteJitterBoost(peerId, rec) {
+        const jitterBad = rec.jitter !== null && rec.jitter >= JITTER_BAD_MS;
+        const lossBad = rec.loss !== null && rec.loss >= LOSS_BAD_PCT;
+        const calm =
+            (rec.jitter === null || rec.jitter <= JITTER_OK_MS) && (rec.loss === null || rec.loss <= LOSS_OK_PCT);
+        if (jitterBad || lossBad) {
+            rec.jbad += 1;
+            rec.jgood = 0;
+        } else if (calm) {
+            rec.jgood += 1;
+            rec.jbad = 0;
+        } else {
+            return; // in between: hold the current state
+        }
+        if (!rec.jbBoost && rec.jbad >= ADAPT_BAD_POLLS) {
+            rec.jbBoost = true;
+            s.mesh?.setPeerJitterTarget(peerId, JITTER_BOOST_MS);
+            console.warn('[mesh] jitter boost: playout target raised', peerId, `${JITTER_BOOST_MS}ms`);
+        } else if (rec.jbBoost && rec.jgood >= ADAPT_GOOD_POLLS) {
+            rec.jbBoost = false;
+            s.mesh?.setPeerJitterTarget(peerId, null);
+            console.log('[mesh] jitter boost: playout target restored', peerId);
         }
     }
 

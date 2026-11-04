@@ -17,6 +17,9 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     let lastOnAir = false; // last peerStatus(audio) we broadcast
     let lastDeafenSent = null; // last peerStatus(deafen) we broadcast
     let micProcessed = false; // outgoing track comes from the gain pipeline
+    // fallback <audio> elements whose play() was refused by autoplay policy —
+    // retried on the first user gesture / context state flip (see retryPendingPlays)
+    const pendingPlays = new Set();
 
     /** mic is actually transmitting right now */
     function onAir() {
@@ -359,6 +362,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
                 const stream = player.src.mediaStream;
                 if (stream) attachRemoteAudio(peerId, stream);
             }
+            retryPendingPlays(); // the state flip may have unblocked element playback
         }
         syncMicPipeline(); // raw track <-> gain-processed track
     }
@@ -374,6 +378,28 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             audio.srcObject = null;
             audio.remove();
             audioEls.delete(peerId);
+        }
+        pendingPlays.delete(peerId);
+    }
+
+    /**
+     * Re-run play() on fallback elements autoplay policy had refused (no user
+     * gesture yet — auto-join on load, or Firefox where the element path is
+     * permanent). Called from the first pointerdown/keydown and context state
+     * flips; without it a refused element stays silent until the next
+     * attachRemoteAudio, which may never come on a quiet link.
+     */
+    function retryPendingPlays() {
+        for (const peerId of [...pendingPlays]) {
+            const audio = audioEls.get(peerId);
+            if (!audio || !audio.srcObject) {
+                pendingPlays.delete(peerId);
+                continue;
+            }
+            audio
+                .play()
+                .then(() => pendingPlays.delete(peerId))
+                .catch(() => {}); // still blocked — keep for the next trigger
         }
     }
 
@@ -395,7 +421,10 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         }
         audio.srcObject = stream;
         audio.volume = Math.min(1, total);
-        audio.play().catch(() => {});
+        audio
+            .play()
+            .then(() => pendingPlays.delete(peerId))
+            .catch(() => pendingPlays.add(peerId)); // refused: retry on gesture/state flip
     }
 
     function reapplyPeerVolume(peerId) {
@@ -446,6 +475,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         updateVoiceControls,
         webAudioPlayback,
         onCtxStateChange,
+        retryPendingPlays,
         removeAudioEl,
         attachRemoteAudio,
         reapplyPeerVolume,

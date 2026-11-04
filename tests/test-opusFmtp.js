@@ -57,6 +57,21 @@ describe('test-opusFmtp', () => {
         voiceAgain.should.not.containEql('stereo');
     });
 
+    it('should negotiate both stereo declarations in music mode (sprop-stereo)', () => {
+        // Chrome only encodes true stereo when the decoder (stereo=1) AND the
+        // sent stream (sprop-stereo=1) are both declared — mirror the exact
+        // param set channel.js opusFmtp() emits for music mode
+        const music = mungeOpusFmtp(SDP, { maxaveragebitrate: 192000, stereo: 1, 'sprop-stereo': 1, usedtx: null });
+        music.should.containEql(
+            'a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000;stereo=1;sprop-stereo=1'
+        );
+        music.should.not.containEql('usedtx');
+        // …and back to voice: BOTH stereo declarations must leave together
+        const voice = mungeOpusFmtp(music, { maxaveragebitrate: 64000, usedtx: 1, stereo: null, 'sprop-stereo': null });
+        voice.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=64000;usedtx=1');
+        voice.should.not.containEql('stereo');
+    });
+
     it('should leave non-opus fmtp lines untouched', () => {
         const out = mungeOpusFmtp(SDP, { maxaveragebitrate: 64000 });
         out.should.containEql('a=fmtp:0 annexb=no');

@@ -28,7 +28,10 @@ export class AudioHub {
     async ensureContext() {
         if (!this.ctx) {
             const AC = window.AudioContext || window.webkitAudioContext;
-            this.ctx = new AC();
+            // 'interactive' asks for the smallest output buffer — platforms that
+            // would otherwise default to a playout buffer of 100ms+ get their
+            // remote-voice latency cut for free
+            this.ctx = new AC({ latencyHint: 'interactive' });
         }
         if (this.ctx.state === 'suspended') {
             // Never block the caller on autoplay policy: without a user gesture
@@ -58,7 +61,7 @@ export class AudioHub {
         this.watchers.set(key, {
             src,
             analyser,
-            data: new Uint8Array(analyser.frequencyBinCount),
+            data: new Float32Array(analyser.fftSize), // time-domain samples for _tick
             speaking: false,
             cb,
         });
@@ -150,7 +153,8 @@ export class AudioHub {
         this._unprime(key);
     }
 
-    // ----- local mic input gain (0..2 = 0%..200% of the captured level) -----
+    // ----- local mic input gain (0..2 = 0%..200% of the captured level),
+    // followed by a peak limiter so boosted input can't clip digitally -----
 
     /**
      * Route the raw capture through a gain node and return the processed
@@ -166,9 +170,19 @@ export class AudioHub {
             const src = this.ctx.createMediaStreamSource(rawStream);
             const gain = this.ctx.createGain();
             gain.gain.value = gainValue;
+            // soft limiter AFTER the gain stage: micVolume up to 200% can push
+            // peaks past full scale — hard digital clipping. Threshold just
+            // below 0dBFS with a near-zero knee keeps sub-threshold signal
+            // untouched and only shaves the overshoot.
+            const limiter = this.ctx.createDynamicsCompressor();
+            limiter.threshold.value = -3;
+            limiter.knee.value = 1;
+            limiter.ratio.value = 20;
+            limiter.attack.value = 0.001;
+            limiter.release.value = 0.1;
             const dest = this.ctx.createMediaStreamDestination();
-            src.connect(gain).connect(dest);
-            this.mic = { raw: rawStream, src, gain, dest, stream: dest.stream };
+            src.connect(gain).connect(limiter).connect(dest);
+            this.mic = { raw: rawStream, src, gain, limiter, dest, stream: dest.stream };
             // a share captured under a previous mic pipeline (or before one
             // existed) rides the rebuilt destination — re-hook it here
             if (this.share) this.share.src.connect(this.share.gain).connect(dest);
@@ -189,6 +203,7 @@ export class AudioHub {
         try {
             this.mic.src.disconnect();
             this.mic.gain.disconnect();
+            this.mic.limiter.disconnect();
         } catch {
             /* already disconnected */
         }
@@ -258,10 +273,13 @@ export class AudioHub {
 
     _tick() {
         for (const watcher of this.watchers.values()) {
-            watcher.analyser.getByteFrequencyData(watcher.data);
+            // float time-domain RMS (a plain level meter): the byte-quantized
+            // frequency bins used before had coarse resolution near the speech
+            // threshold, so quiet talkers flickered in and out of the ring
+            watcher.analyser.getFloatTimeDomainData(watcher.data);
             let sum = 0;
             for (let i = 0; i < watcher.data.length; i++) sum += watcher.data[i] * watcher.data[i];
-            const level = Math.sqrt(sum / watcher.data.length) / 255;
+            const level = Math.sqrt(sum / watcher.data.length);
             watcher.lastLevel = level;
 
             // hysteresis so the ring doesn't flicker at the threshold
