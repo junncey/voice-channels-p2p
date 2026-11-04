@@ -22,7 +22,7 @@ export class AudioHub {
         this.primers = new Map();
         /** local mic pipeline: { raw, src, gain, dest, stream } or null */
         this.mic = null;
-        /** "listen together" share: { raw, src, gain } mixed into the mic dest, or null */
+        /** "listen together" share: { raw, src, gain } mixed into the mic limiter, or null */
         this.share = null;
         this.timer = null;
     }
@@ -215,8 +215,9 @@ export class AudioHub {
             src.connect(gain).connect(limiter).connect(dest);
             this.mic = { raw: rawStream, src, gain, limiter, dest, stream: dest.stream };
             // a share captured under a previous mic pipeline (or before one
-            // existed) rides the rebuilt destination — re-hook it here
-            if (this.share) this.share.src.connect(this.share.gain).connect(dest);
+            // existed) rides the rebuilt output — re-hook it here, into the
+            // SAME limiter as the mic (see attachShare for why)
+            if (this.share) this.share.src.connect(this.share.gain).connect(limiter);
             return dest.stream;
         } catch {
             this.mic = null;
@@ -246,9 +247,14 @@ export class AudioHub {
     // into the outgoing mic destination — same audio m-line, no renegotiation) -----
 
     /**
-     * Mix a captured share stream into the mic pipeline's destination. The
-     * caller owns the stream lifecycle (stops its tracks on end); a share
-     * started before the mic pipeline exists is hooked by the next attachMic.
+     * Mix a captured share stream into the mic pipeline's OUTPUT — through the
+     * same limiter as the mic, not straight into the destination. Both sources
+     * near full scale sum past ±1.0 and the destination hard-clips before the
+     * encoder ever sees the mix (talking over loud music = distortion); the
+     * shared limiter shaves the summed peaks instead, doubling as gentle
+     * ducking. The caller owns the stream lifecycle (stops its tracks on end);
+     * a share started before the mic pipeline exists is hooked by the next
+     * attachMic.
      * @param {MediaStream} rawStream audio track(s) from getDisplayMedia
      * @returns {boolean} whether the graph was built
      */
@@ -260,7 +266,7 @@ export class AudioHub {
             const gain = this.ctx.createGain(); // unity — a handle for level control later
             src.connect(gain);
             this.share = { raw: rawStream, src, gain };
-            if (this.mic) gain.connect(this.mic.dest);
+            if (this.mic) gain.connect(this.mic.limiter);
             return true;
         } catch {
             this.share = null;

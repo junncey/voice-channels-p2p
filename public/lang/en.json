@@ -70,6 +70,7 @@
     "channel.errors.micLost": "Microphone disconnected — click the mic button to retry",
     "channel.micFallback": "Selected microphone unavailable, switched back to the default device",
     "channel.micRecovered": "Microphone reconnected",
+    "channel.spkFallback": "Selected speaker disconnected — switched back to the default output",
     "channel.errors.disconnected": "Connection lost, reconnecting…",
     "channel.offline": "You are offline — the channel reconnects automatically…",
     "channel.kicked": "You were removed from the channel by the host",

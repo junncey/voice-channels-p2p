@@ -20,6 +20,11 @@
  */
 
 const CHAT_DC_LABEL = 'mirotalk_chat_channel';
+// renegotiation retry ladder: the first delay clears the usual reverse-offer
+// window, the second one catches a slow settle — after that the change waits
+// for whatever SDP round comes naturally
+const RENEGOTIATE_RETRIES = 2;
+const RENEGOTIATE_RETRY_DELAYS = [2500, 7000];
 
 /**
  * Merge Opus fmtp parameters into every opus/48000/2 fmtp line of an SDP.
@@ -85,7 +90,7 @@ export class Mesh {
         this.iceServers = [];
         /** identity of the current iceServers payload (dedupes join storms) */
         this.iceStamp = '';
-        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor, jitterTarget } */
+        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor, jitterTarget, renegotiateTimer } */
         this.entries = new Map();
     }
 
@@ -272,11 +277,35 @@ export class Mesh {
      * such as stereo/usedtx after a music-mode toggle — setParameters cannot
      * move those, and a healthy link never produces another SDP round on its
      * own). Reuses the fmtp munging and glare guards of the offer path.
+     * A refusal (mid-negotiation: the reverse offer from the answer side is
+     * still in flight) retries on a short ladder — unlike the recovery paths
+     * there is no cadence that would retry by itself, and a lost round here
+     * strands the link in the wrong mode (music caps with speech DTX…) until
+     * some unrelated SDP event.
      * @param {string} peerId
      * @returns {Promise<boolean>} true when the offer went out
      */
     async renegotiate(peerId) {
-        return this._sendOffer(peerId, {});
+        const sent = await this._sendOffer(peerId, {});
+        if (!sent) this._scheduleRenegotiateRetry(peerId, 1);
+        return sent;
+    }
+
+    /** Bounded retry for a renegotiation the offer path refused (see renegotiate). */
+    _scheduleRenegotiateRetry(peerId, attempt) {
+        if (attempt > RENEGOTIATE_RETRIES) return;
+        const entry = this.entries.get(peerId);
+        if (!entry || entry.renegotiateTimer) return;
+        entry.renegotiateTimer = setTimeout(
+            () => {
+                entry.renegotiateTimer = null;
+                if (!this.entries.has(peerId)) return; // peer left while waiting
+                this._sendOffer(peerId, {}).then((sent) => {
+                    if (!sent) this._scheduleRenegotiateRetry(peerId, attempt + 1);
+                });
+            },
+            RENEGOTIATE_RETRY_DELAYS[attempt - 1]
+        );
     }
 
     /** Renegotiate every stable link — mode toggles apply to the whole mesh. */
@@ -471,6 +500,7 @@ export class Mesh {
         const entry = this.entries.get(peerId);
         if (!entry) return;
         clearTimeout(entry.dcTimer);
+        clearTimeout(entry.renegotiateTimer);
         try {
             entry.pc.close();
         } catch {

@@ -144,6 +144,7 @@ export function createSettings({
         navigator.mediaDevices?.addEventListener?.('devicechange', () => {
             refreshDeviceSelects();
             x.recoverMicDevice();
+            recoverSpeakerDevice();
         });
     }
 
@@ -226,12 +227,41 @@ export function createSettings({
     }
 
     async function applySink(audioEl) {
-        if (!sinkSupported || !settings.spkDeviceId) return;
+        if (!sinkSupported) return;
         try {
-            await audioEl.setSinkId(settings.spkDeviceId);
+            // '' is the default output — a cleared choice actively RESETS an
+            // element that still points at a device that vanished mid-call
+            await audioEl.setSinkId(settings.spkDeviceId || '');
         } catch {
             /* device vanished — keep the default output */
         }
+    }
+
+    /** Configured speaker still enumerated? No explicit choice counts as present. */
+    async function speakerDevicePresent() {
+        if (!settings.spkDeviceId) return true;
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            return devices.some((d) => d.kind === 'audiooutput' && d.deviceId === settings.spkDeviceId);
+        } catch {
+            return true; // enumeration refused: assume present, let setSinkId decide
+        }
+    }
+
+    /**
+     * A hot-unplugged output device (USB/Bluetooth headset) leaves a dead
+     * choice behind: every later setSinkId on it throws, the dropdown keeps
+     * listing a ghost device, and playback may stay parked on a sink nothing
+     * renders to. Clear the choice and steer both playback paths back to the
+     * default output — like the mic fallback, the cleared choice is
+     * session-only (the device may well come back).
+     */
+    async function recoverSpeakerDevice() {
+        if (await speakerDevicePresent()) return;
+        settings.spkDeviceId = '';
+        saveAudioSettings();
+        await x.applySpeaker();
+        toast(t('channel.spkFallback'), 'warn');
     }
 
     async function playTestBeep() {
