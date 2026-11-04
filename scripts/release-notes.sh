@@ -10,6 +10,7 @@
 #   IMAGE_SIZE    镜像体积，默认留待回填
 #   BUILD_ID      前端内容指纹，默认按当前 public/ 现算（补发旧版本说明时需显式指定）
 #   TEST_COUNT    测试通过数，默认用 mocha --dry-run 统计（补发旧版本说明时需显式指定）
+#   DIGEST        镜像 digest，默认从 GHCR 匿名 HEAD 取；GHCR 不可用时可传 ACR 的 digest
 #   GHCR_REPO     GHCR 仓库路径，默认 junncey/voice-channels
 #
 # 示例：
@@ -65,12 +66,15 @@ if [ -z "$TEST_COUNT" ]; then
 fi
 [ -n "$TEST_COUNT" ] && [ "$TEST_COUNT" != "0" ] || TEST_COUNT="待回填"
 
-# --- 镜像 digest（GHCR 匿名 HEAD） -------------------------------------
-DIGEST=""
-token="$(curl -fsS --max-time 15 \
-    "https://ghcr.io/token?scope=repository:${GHCR_REPO}:pull&service=ghcr.io" 2>/dev/null |
-    sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)"
-if [ -n "$token" ]; then
+# --- 镜像 digest（GHCR 匿名 HEAD；DIGEST 可显式覆盖） -------------------
+DIGEST="${DIGEST:-}"
+token=""
+if [ -z "$DIGEST" ]; then
+    token="$(curl -fsS --max-time 15 \
+        "https://ghcr.io/token?scope=repository:${GHCR_REPO}:pull&service=ghcr.io" 2>/dev/null |
+        sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)"
+fi
+if [ -z "$DIGEST" ] && [ -n "$token" ]; then
     # 版本未推送时 HEAD 返回 404，pipefail 下必须兜底，否则脚本直接退出
     DIGEST="$(curl -fsS --max-time 20 -I \
         -H "Authorization: Bearer ${token}" \
