@@ -104,6 +104,9 @@ jobs:
           password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
 
       - name: Login to GHCR
+        # 可选归档通道：包的 Manage Actions access 未授予本仓库 Write 时，
+        # 这里的登录仍会成功、推送才被拒。失败不应阻塞发布（主产物在 ACR）。
+        continue-on-error: true
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -133,7 +136,7 @@ jobs:
           fi
           echo "CUSTOM_TAG=${CUSTOM_TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push image
+      - name: Build and push image (ACR)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -146,18 +149,37 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Mirror to GHCR (optional archive)
+        # GHCR 是归档副本，不是部署来源。包级写权限（Package settings →
+        # Manage Actions access → 本仓库 Write）缺失时会报
+        # `denied: permission_denied: write_package`；此时只把这一步标红，
+        # 不让整个发布失败。修好授权后重跑即可自动补上。
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
             ${{ env.GHCR_IMAGE }}:${{ steps.tags.outputs.CUSTOM_TAG }}
             ${{ env.GHCR_IMAGE }}:latest
           cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Summary
         run: |
           {
             echo "## 构建完成 🎉"
-            echo "- ACR: \`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
-            echo "- GHCR: \`${{ env.GHCR_IMAGE }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
+            echo "- ACR（部署来源）: \`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
+            echo "- GHCR（可选归档）: \`${{ env.GHCR_IMAGE }}:${{ steps.tags.outputs.CUSTOM_TAG }}\`"
             echo "- 两边同时更新 \`latest\`"
+            echo ""
+            echo "> GHCR 步骤若为红色，说明该包的 Manage Actions access 未授予本仓库 Write；"
+            echo "> 不影响 ACR 与线上发布，修好授权后重跑本工作流即可补上。"
             echo ""
             echo "服务器拉取（ACR，国内快）："
             echo '```bash'
