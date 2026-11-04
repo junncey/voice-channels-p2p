@@ -14,6 +14,9 @@
  *  - The other side answers WITHOUT local tracks, then attaches its mic after
  *    the connection reaches 'connected' — which triggers a clean reverse
  *    renegotiation offer from a stable state.
+ *  - Colliding offers (both sides recovering at once) break the tie with
+ *    perfect-negotiation roles: the LOWER session uuid is impolite (keeps its
+ *    offer), the higher rolls back and answers (see handleSessionDescription).
  */
 
 const CHAT_DC_LABEL = 'mirotalk_chat_channel';
@@ -56,6 +59,12 @@ export function mungeOpusFmtp(sdp, params) {
     });
 }
 
+/** Identity of an iceServers payload: URLs + credential username. REST-mode
+ *  usernames are unix expiry timestamps, so a minted set always differs. */
+function iceServersStamp(iceServers) {
+    return iceServers.map((server) => `${server?.urls}|${server?.username || ''}`).join(';');
+}
+
 export class Mesh {
     /**
      * @param {object}   options
@@ -63,14 +72,19 @@ export class Mesh {
      * @param {object}   options.handlers      { onRemoteStream, onChat, onPeerState }
      * @param {function} [options.getOpusFmtp] () => Opus fmtp params for OUR local
      *                                            offer/answer (null = leave defaults)
+     * @param {function} [options.getSelfId]   () => our session uuid — enables the
+     *                                            polite/impolite glare roles below
      */
-    constructor({ signaling, handlers = {}, getOpusFmtp = null }) {
+    constructor({ signaling, handlers = {}, getOpusFmtp = null, getSelfId = null }) {
         this.signaling = signaling;
         this.handlers = handlers;
         this.getOpusFmtp = getOpusFmtp;
+        this.getSelfId = getSelfId;
         this.localStream = null;
         /** newest iceServers payload (TURN REST credentials age out mid-session) */
         this.iceServers = [];
+        /** identity of the current iceServers payload (dedupes join storms) */
+        this.iceStamp = '';
         /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor, jitterTarget } */
         this.entries = new Map();
     }
@@ -115,12 +129,19 @@ export class Mesh {
      */
     addPeer(peerId, shouldCreateOffer, iceServers = []) {
         // a fresh credential set rides on EVERY addPeer (rejoin storms too) —
-        // keep it even when the peer is already known: updateIceServers may
-        // already have applied it to the live PeerConnections
-        if (iceServers?.length) this.iceServers = iceServers;
+        // apply it at once to every live connection (a recovery iceRestart
+        // racing the refresh timer would otherwise gather with credentials
+        // that already age out), deduped so a join storm doesn't churn
+        // setConfiguration O(n²)
+        if (iceServers?.length && iceServersStamp(iceServers) !== this.iceStamp) this.updateIceServers(iceServers);
         if (this.entries.has(peerId)) return;
 
-        const pc = new RTCPeerConnection({ iceServers: iceServers.length ? iceServers : this.iceServers });
+        // iceCandidatePoolSize pre-allocates host candidates: first join and
+        // every restart gather a beat faster (audio-only — the cost is negligible)
+        const pc = new RTCPeerConnection({
+            iceServers: iceServers.length ? iceServers : this.iceServers,
+            iceCandidatePoolSize: 2,
+        });
         const entry = { pc, dc: null, pendingIce: [], queue: [], tracksAdded: false, offering: false };
         this.entries.set(peerId, entry);
 
@@ -131,6 +152,11 @@ export class Mesh {
         };
 
         pc.ontrack = (event) => {
+            // a rebuild carried a jitter-buffer target over but the fresh PC had
+            // no receivers yet — apply it to the track's receiver as it lands
+            if (entry.jitterTarget !== null && entry.jitterTarget !== undefined && event.receiver) {
+                this._applyJitterTarget(event.receiver, entry.jitterTarget);
+            }
             const stream = event.streams[0];
             if (stream && this.handlers.onRemoteStream) this.handlers.onRemoteStream(peerId, stream);
         };
@@ -183,9 +209,20 @@ export class Mesh {
             await this._applySessionDescription(peer_id, entry, session_description);
         } catch (err) {
             // Glare: both sides may re-offer at once (e.g. both recovering a
-            // dead link). Roll back our local offer and answer theirs instead —
-            // one deterministic answer wins, the negotiation stays consistent.
+            // dead link). Perfect-negotiation roles keep it deterministic —
+            // the LOWER session uuid (the side the recovery ladder already
+            // trusts to initiate) is impolite: it IGNORES the colliding offer
+            // and waits for the answer to its own. The higher uuid rolls back
+            // and answers. Without roles both sides would roll back, each
+            // answer would land on a rolled-back offer, and BOTH negotiations
+            // die (the old always-polite behavior). Without getSelfId the
+            // polite rollback stays as the safe default.
             if (session_description.type === 'offer' && pc.signalingState === 'have-local-offer') {
+                const selfId = this.getSelfId?.();
+                if (selfId && selfId < peer_id) {
+                    console.log('[mesh] glare: impolite, keeping our offer', peer_id);
+                    return;
+                }
                 try {
                     await pc.setLocalDescription({ type: 'rollback' });
                     await this._applySessionDescription(peer_id, entry, session_description);
@@ -259,9 +296,22 @@ export class Mesh {
      * @returns {boolean} whether a fresh entry (and its offer) went out
      */
     rebuildPeer(peerId) {
-        if (!this.entries.has(peerId)) return false;
+        const prev = this.entries.get(peerId);
+        if (!prev) return false;
+        // carry the adaptive state over: a rebuilt link is at its most fragile
+        // right after the swap — losing a boosted jitter target or a loss-driven
+        // bitrate floor here would fall back to browser defaults exactly when
+        // the deep buffer was earned (the recovery engine's streak records
+        // survive, but they only re-apply on the next state CHANGE, which may
+        // never come). jitterTarget is re-applied per receiver in ontrack.
+        const carry = { jitterTarget: prev.jitterTarget ?? null, bitrateFloor: prev.bitrateFloor || null };
         this.removePeer(peerId);
         this.addPeer(peerId, true, this.iceServers);
+        const entry = this.entries.get(peerId);
+        if (entry) {
+            entry.bitrateFloor = carry.bitrateFloor;
+            entry.jitterTarget = carry.jitterTarget;
+        }
         return this.entries.has(peerId);
     }
 
@@ -301,6 +351,7 @@ export class Mesh {
     updateIceServers(iceServers) {
         if (!Array.isArray(iceServers) || !iceServers.length) return 0;
         this.iceServers = iceServers;
+        this.iceStamp = iceServersStamp(iceServers);
         let refused = 0;
         for (const entry of this.entries.values()) {
             if (entry.pc.connectionState === 'closed') continue;
@@ -525,14 +576,19 @@ export class Mesh {
         if (!entry || entry.jitterTarget === ms) return;
         for (const receiver of entry.pc.getReceivers()) {
             if (receiver.track?.kind !== 'audio') continue;
-            try {
-                if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms;
-                else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms;
-            } catch {
-                /* refusal keeps the browser default for this receiver */
-            }
+            this._applyJitterTarget(receiver, ms);
         }
         entry.jitterTarget = ms;
+    }
+
+    /** Push a playout-buffer target onto ONE receiver — feature-detected. */
+    _applyJitterTarget(receiver, ms) {
+        try {
+            if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms;
+            else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms;
+        } catch {
+            /* refusal keeps the browser default for this receiver */
+        }
     }
 
     _attachChat(peerId, entry, dc) {

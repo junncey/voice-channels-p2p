@@ -781,7 +781,7 @@ async function joinInner({ textOnly: asTextOnly }) {
         randomizationFactor: 0.3,
         timeout: 8000,
     });
-    mesh = new Mesh({ signaling: socket, handlers: meshHandlers(), getOpusFmtp: opusFmtp });
+    mesh = new Mesh({ signaling: socket, handlers: meshHandlers(), getOpusFmtp: opusFmtp, getSelfId: () => selfUuid });
     if (localStream) mesh.setLocalStream(localStream);
 
     se.registerSocketHandlers();
