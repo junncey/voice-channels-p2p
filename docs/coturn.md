@@ -19,6 +19,13 @@
 ```conf
 use-auth-secret
 static-auth-secret=换成足够长的随机串   # 与 .env 的 TURN_SERVER_SECRET 一致
+listening-port=3478
+# TCP/TLS 兜底：纯 UDP 被企业防火墙/对称 NAT 封掉时，relay 分配与媒体中转
+# 都走这条备用路（443 上的 turns 穿透性最好，TLS 需要证书）
+tcp-listening-port=3478
+# tls-listening-port=443
+# cert=/path/to/fullchain.pem
+# pkey=/path/to/privkey.pem
 # 其余监听/证书/Realm 配置不变
 ```
 
@@ -26,7 +33,8 @@ static-auth-secret=换成足够长的随机串   # 与 .env 的 TURN_SERVER_SECR
 
 ```env
 TURN_SERVER_ENABLED=true
-TURN_SERVER_URL=turn:turn.example.com:3478
+# UDP 优先，同机 TCP 兜底；UDP 被封的网络里浏览器自动落到 ?transport=tcp
+TURN_SERVER_URL=turn:turn.example.com:3478,turn:turn.example.com:3478?transport=tcp,turns:turn.example.com:443
 TURN_SERVER_SECRET=换成足够长的随机串    # 与 coturn 的 static-auth-secret 一致
 TURN_CREDENTIAL_TTL_SEC=43200           # 凭据有效期，默认 12 小时
 ```
