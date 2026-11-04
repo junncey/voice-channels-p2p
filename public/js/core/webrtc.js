@@ -101,7 +101,10 @@ export class Mesh {
             if (!entry.tracksAdded) continue; // will pick the current stream on connect
             const sender = entry.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
             if (sender) sender.replaceTrack(track).catch((err) => console.error('[mesh] replaceTrack failed', err));
-            else entry.pc.addTrack(track, this.localStream);
+            else {
+                entry.pc.addTrack(track, this.localStream);
+                this._applySendBitrate(entry); // a fresh sender must not sit at the browser default
+            }
         }
     }
 
@@ -242,6 +245,24 @@ export class Mesh {
     /** Renegotiate every stable link — mode toggles apply to the whole mesh. */
     renegotiateAll() {
         for (const peerId of this.entries.keys()) this.renegotiate(peerId).catch(() => {});
+    }
+
+    /**
+     * Last rung before a signaling reconnect: rebuild ONE link — close the old
+     * PeerConnection (fresh ICE + DTLS) and re-offer through the normal joiner
+     * path. The remote keeps its entry and simply answers: an offer from a new
+     * PC carries new ice-ufrag, which forces both agents to regenerate their
+     * credentials — a full re-check, the same negotiation shape as a
+     * leave+rejoin without the server round-trip. ontrack fires again on this
+     * side, so the existing attachRemoteAudio re-hooks playback.
+     * @param {string} peerId
+     * @returns {boolean} whether a fresh entry (and its offer) went out
+     */
+    rebuildPeer(peerId) {
+        if (!this.entries.has(peerId)) return false;
+        this.removePeer(peerId);
+        this.addPeer(peerId, true, this.iceServers);
+        return this.entries.has(peerId);
     }
 
     /** Offer core shared by ice restarts and plain renegotiations. */

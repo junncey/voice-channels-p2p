@@ -1,7 +1,9 @@
 /*
 Signaling/media self-healing — the recovery engine for the channel page.
 
-  - recovery ladder: per-peer ICE-restart rounds → signaling reconnect (B1)
+  - recovery ladder: per-peer ICE-restart rounds → per-link PC rebuild →
+    signaling reconnect (B1)
+  - presence probe: server-confirmed dead sessions drop out of the ladder
   - "connecting…" badge for ghost members whose offer will never be answered
   - connection path monitor (P2P vs TURN relay badge + rtt)
   - inbound link quality (loss/jitter diffing → "unstable" badge)
@@ -17,7 +19,9 @@ half-broken):
   disconnected → 5s grace (ICE often self-heals; acting sooner breaks it)
   failed       → act at once
   → up to 3 ICE-restart rounds (3/6/12s backoff, lower session id initiates
-    so both sides never re-offer at once) → signaling reconnect (rebuilds
+    so both sides never re-offer at once) → when the rest of the mesh is
+    healthy, ONE fresh PeerConnection for just that link (new ICE+DTLS, the
+    remote answers through the normal path) → signaling reconnect (rebuilds
     every link) → after 2 silent reconnects: visible "reload" prompt.
 A 10s scan re-checks every connectionState in case a webview swallows the
 connectionstatechange event.
@@ -32,7 +36,7 @@ selfUuid…) arrives via the `s` accessor object, cross-module calls via the
 late-bound `x` surface, both owned by channel.js.
 */
 
-export function createRecovery({ s, x, members, $, el, t }) {
+export function createRecovery({ s, x, members, channelId, $, el, t }) {
     const RECOVERY_GRACE_MS = 5000;
     const RECOVERY_ROUND_DELAYS = [3000, 6000, 12000];
     const RECOVERY_TOTAL_MS = 20000; // per-peer window before the signaling reconnect (round3 +12s = 21s)
@@ -113,6 +117,7 @@ export function createRecovery({ s, x, members, $, el, t }) {
         if (state === 'disconnected' || state === 'failed') {
             if (rec.attempts < RECOVERY_ROUND_DELAYS.length) {
                 rec.attempts += 1;
+                if (rec.attempts === 1) probePeerPresence(peerId); // maybe nobody is there at all
                 // glare arbitration: with both sides broken, only the lower
                 // session id re-offers; the other just answers
                 if (s.selfUuid < peerId) {
@@ -135,10 +140,64 @@ export function createRecovery({ s, x, members, $, el, t }) {
     function escalatePeerRecovery(peerId) {
         const rec = peerRecovery.get(peerId);
         if (!rec || rec.escalated) return;
+        // Final per-link rung before the B1 sledgehammer: one broken link in a
+        // healthy mesh gets a fresh PeerConnection (full ICE+DTLS re-check) —
+        // B1 would tear down every OTHER link of the mesh to heal this one.
+        // Two or more links failing at once smells mesh-wide: B1 stays the tool.
+        if (!rec.rebuilt && onlyBrokenLink(peerId)) {
+            rec.rebuilt = true;
+            rec.brokenAt = Date.now(); // fresh settle window for the rebuilt link
+            // same arbitration as the restart rounds: the lower session id rebuilds
+            if (s.selfUuid < peerId) {
+                if (s.mesh?.rebuildPeer(peerId)) {
+                    console.warn('[mesh] recovery: rebuilding the peer connection', peerId);
+                    scheduleRecoveryTick(peerId, 3000);
+                    return;
+                }
+            } else {
+                console.log('[mesh] recovery: waiting for peer to rebuild its link', peerId);
+                scheduleRecoveryTick(peerId, 3000);
+                return;
+            }
+            // rebuildPeer refused (entry already gone) — fall through to B1
+        }
         rec.escalated = true;
         console.warn('[mesh] recovery: ICE restarts exhausted, falling back to signaling reconnect', peerId);
         showOutageBanner('recovering');
         attemptSignalingReconnect();
+    }
+
+    /** peerId is the ONLY link under active recovery — a per-link rebuild can
+     *  heal it; several failing together point at our own network instead. */
+    function onlyBrokenLink(peerId) {
+        for (const id of peerRecovery.keys()) if (id !== peerId) return false;
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // presence probe — a removePeer broadcast missed inside a disconnect window
+    // (our socket down longer than the target's ghost grace) leaves a member
+    // card no ladder can heal: every offer relays into the void until B1 nukes
+    // the whole mesh. One cheap server ack settles it: 'gone' = no session at
+    // all → drop the card now; 'ghost'/'live' = keep healing (a resume may
+    // still land). The cooldown bounds probe traffic from a flapping link.
+    // -------------------------------------------------------------------------
+
+    const PRESENCE_COOLDOWN_MS = 30000;
+    const presenceProbed = new Map(); // peerId -> ts of the last probe
+
+    function probePeerPresence(peerId) {
+        if (!s.socket?.connected || !s.joined) return;
+        const last = presenceProbed.get(peerId) || 0;
+        if (Date.now() - last < PRESENCE_COOLDOWN_MS) return;
+        presenceProbed.set(peerId, Date.now());
+        s.socket.timeout(5000).emit('peerPresence', { room_id: channelId, peer_id: peerId }, (err, res) => {
+            if (err || res?.present !== 'gone') return; // live/ghost/no answer: the ladder keeps trying
+            const name = members.get(peerId)?.peer_name || '';
+            x.dropPeer(peerId);
+            if (s.joined && name) s.chat?.add({ text: t('chat.left', { name }), system: true });
+            console.warn('[mesh] recovery: session gone server-side, member dropped', peerId);
+        });
     }
 
     /** Drop every remote peer + mesh entry locally (before intentional
@@ -241,6 +300,9 @@ export function createRecovery({ s, x, members, $, el, t }) {
                 if (!members.has(peerId) || state === 'connected' || state === 'closed') return;
                 stuckConnecting.add(peerId);
                 updatePeerCardConnecting(peerId, true);
+                // the offer may simply have nowhere to land (member left while we
+                // were offline) — ask the server before showing an unanswerable badge
+                probePeerPresence(peerId);
             }, CONNECTING_BADGE_MS)
         );
     }
@@ -388,11 +450,14 @@ export function createRecovery({ s, x, members, $, el, t }) {
     const ADAPT_FLOOR_MIN_BPS = 24000; // never adapt below the voice bitrate floor
     // receive-side playout boost: NetEQ self-tunes but minimizes delay, so a
     // jittery link keeps glitching — sustained trouble justifies asking for a
-    // deeper jitter buffer target until the path calms down again
+    // deeper jitter buffer target until the path calms down again. Two stages:
+    // mild first (less added latency when a moderate target already suffices),
+    // deep only when the mild one rode along and the glitches persisted
     const JITTER_BAD_MS = 40;
     const JITTER_OK_MS = 25;
+    const JITTER_BOOST_MILD_MS = 60;
     const JITTER_BOOST_MS = 120;
-    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost }
+    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost, jbLevel }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -410,6 +475,7 @@ export function createRecovery({ s, x, members, $, el, t }) {
             jbad: 0,
             jgood: 0,
             jbBoost: false,
+            jbLevel: 0,
         };
         const inbound = info?.inbound;
         if (inbound) {
@@ -507,10 +573,16 @@ export function createRecovery({ s, x, members, $, el, t }) {
         }
         if (!rec.jbBoost && rec.jbad >= ADAPT_BAD_POLLS) {
             rec.jbBoost = true;
+            rec.jbLevel = 1;
+            s.mesh?.setPeerJitterTarget(peerId, JITTER_BOOST_MILD_MS);
+            console.warn('[mesh] jitter boost: playout target raised', peerId, `${JITTER_BOOST_MILD_MS}ms`);
+        } else if (rec.jbBoost && rec.jbLevel === 1 && rec.jbad >= ADAPT_BAD_POLLS * 2) {
+            rec.jbLevel = 2;
             s.mesh?.setPeerJitterTarget(peerId, JITTER_BOOST_MS);
-            console.warn('[mesh] jitter boost: playout target raised', peerId, `${JITTER_BOOST_MS}ms`);
+            console.warn('[mesh] jitter boost: sustained trouble, deep target', peerId, `${JITTER_BOOST_MS}ms`);
         } else if (rec.jbBoost && rec.jgood >= ADAPT_GOOD_POLLS) {
             rec.jbBoost = false;
+            rec.jbLevel = 0;
             s.mesh?.setPeerJitterTarget(peerId, null);
             console.log('[mesh] jitter boost: playout target restored', peerId);
         }
@@ -655,7 +727,7 @@ export function createRecovery({ s, x, members, $, el, t }) {
         relayUpgrades.delete(peerId);
     }
 
-    /** Forget every per-peer record of a departing member (all five maps). */
+    /** Forget every per-peer record of a departing member (all six maps). */
     function forgetPeer(peerId) {
         cancelPeerRecovery(peerId);
         cancelRelayUpgrade(peerId);
@@ -664,6 +736,7 @@ export function createRecovery({ s, x, members, $, el, t }) {
         pathEarlyTimers.delete(peerId);
         connPaths.delete(peerId);
         lossStreaks.delete(peerId);
+        presenceProbed.delete(peerId);
     }
 
     function showOutageBanner(mode) {

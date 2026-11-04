@@ -139,7 +139,12 @@ export function createSettings({
         $('#notifySection').classList.toggle('hidden', !x.notifySupported);
         $('#notifyToggle').addEventListener('change', x.onNotifyToggle);
 
-        navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceSelects);
+        // device churn: refresh the dropdowns, and if the LIVE capture died with
+        // its device (hot-unplugged headset), voice.js re-acquires the mic
+        navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+            refreshDeviceSelects();
+            x.recoverMicDevice();
+        });
     }
 
     function openSettings() {

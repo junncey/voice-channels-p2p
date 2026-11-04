@@ -83,12 +83,15 @@ const defaultAudioSettings = {
 };
 
 // Opus send caps stamped onto every local offer/answer and live senders:
-// voice favors bandwidth discipline (usedtx stops sending during silence),
-// music favors fidelity (stereo + sprop-stereo — stereo declares our decoder
-// accepts stereo, sprop-stereo declares the stream we SEND is stereo; Chrome
-// needs both before its encoder actually encodes two channels). null deletes
-// the key — each dict states the FULL desired state so switching modes on a
-// live connection can't leave the other mode's params behind in re-offers.
+// voice favors bandwidth discipline (usedtx stops sending during silence) and
+// loss resilience (useinbandfec — Chrome only sends Opus FEC when the receiver
+// negotiated it, which pairs with the recovery engine's loss-driven bitrate
+// floor freeing headroom for the redundancy), music favors fidelity (stereo +
+// sprop-stereo — stereo declares our decoder accepts stereo, sprop-stereo
+// declares the stream we SEND is stereo; Chrome needs both before its encoder
+// actually encodes two channels). null deletes the key — each dict states the
+// FULL desired state so switching modes on a live connection can't leave the
+// other mode's params behind in re-offers.
 // The bitrate ceiling is the user's slider (settings.opusBitrate, kbps);
 // toggling music mode re-seeds it with the mode's default (192 / 64), after
 // which it stays hand-tunable.
@@ -131,11 +134,17 @@ function opusFmtp() {
         // the shared audio from leaking back in through the mic. The fmtp side
         // (stereo) is pushed out by share.js via renegotiateAll; the bitrate
         // half applies at once via setParameters.
-        return { maxaveragebitrate: Math.max(maxaveragebitrate, 192000), stereo: 1, 'sprop-stereo': 1, usedtx: null };
+        return {
+            maxaveragebitrate: Math.max(maxaveragebitrate, 192000),
+            stereo: 1,
+            'sprop-stereo': 1,
+            usedtx: null,
+            useinbandfec: null,
+        };
     }
     return settings.musicMode
-        ? { maxaveragebitrate, stereo: 1, 'sprop-stereo': 1, usedtx: null }
-        : { maxaveragebitrate, usedtx: 1, stereo: null, 'sprop-stereo': null };
+        ? { maxaveragebitrate, stereo: 1, 'sprop-stereo': 1, usedtx: null, useinbandfec: null }
+        : { maxaveragebitrate, usedtx: 1, useinbandfec: 1, stereo: null, 'sprop-stereo': null };
 }
 
 let settings = loadAudioSettings();
@@ -350,7 +359,7 @@ const imageReceiver = createImageReceiver({
 // submodule wiring
 // ---------------------------------------------------------------------------
 
-const rec = createRecovery({ s, x, members, $, el, t });
+const rec = createRecovery({ s, x, members, channelId, $, el, t });
 const mem = createMembers({
     s,
     x,
@@ -467,6 +476,7 @@ Object.assign(x, {
     broadcastShare: voice.broadcastShare,
     enableVoice: voice.enableVoice,
     reacquireMicOrToast: voice.reacquireMicOrToast,
+    recoverMicDevice: voice.recoverMicDevice,
     applySpeaker: voice.applySpeaker,
     reapplyAllVolumes: voice.reapplyAllVolumes,
     applySink: settingsUi.applySink,
@@ -717,7 +727,10 @@ async function joinInner({ textOnly: asTextOnly }) {
             toast(t('channel.errors.micDenied'), 'warn');
         }
     }
-    if (rawMicStream) rawMicStream.getTracks().forEach((track) => (track.enabled = true));
+    if (rawMicStream) {
+        rawMicStream.getTracks().forEach((track) => (track.enabled = true));
+        voice.watchMicHealth(rawMicStream); // hot-unplug recovery starts watching the capture
+    }
     localStream = rawMicStream;
 
     hub = new AudioHub();

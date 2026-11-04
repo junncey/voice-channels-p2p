@@ -46,6 +46,12 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             enableVoice();
             return;
         }
+        // capture died (device unplugged, auto-recovery failed): re-acquire
+        // instead of toggling a mute gate nobody would hear anyway
+        if (micTrackDead()) {
+            recoverMicDevice();
+            return;
+        }
         setMic(!s.micOn);
     }
 
@@ -294,6 +300,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         micProcessed = false;
         s.rawMicStream = stream;
         s.localStream = stream;
+        watchMicHealth(stream); // the new capture carries its own death watch
         refreshOutgoingHint(); // mode/device toggles re-capture — the hint may have flipped
         syncMicPipeline(); // upgrades to the processed track when possible
         if (!micProcessed) s.mesh?.replaceAudioTrack(track, stream);
@@ -316,6 +323,61 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     /** Settings-modal callers: re-acquire the mic, toasting the shared denial. */
     function reacquireMicOrToast() {
         return reacquireMic().catch(() => x.toast(t('channel.errors.micDenied'), 'warn'));
+    }
+
+    // ----- mic device health: a hot-unplugged USB/Bluetooth headset (or the OS
+    // revoking the mic) ends the capture track mid-call — without recovery the
+    // room just goes silent on our side while we keep talking -----
+
+    let micRecovering = false;
+
+    /** The raw capture is fully dead (all tracks ended). */
+    function micTrackDead() {
+        const tracks = s.rawMicStream?.getAudioTracks() || [];
+        return tracks.length > 0 && tracks.every((track) => track.readyState === 'ended');
+    }
+
+    /** Watch the raw capture for device death; re-armed per reacquireMic. */
+    function watchMicHealth(stream) {
+        if (!stream) return;
+        for (const track of stream.getAudioTracks()) {
+            track.onended = () => recoverMicDevice();
+        }
+    }
+
+    /**
+     * Re-acquire the mic after its device vanished. Falls back to the default
+     * device when the configured one is gone (a stale exact deviceId would fail
+     * getUserMedia with OverconstrainedError forever) — the cleared choice
+     * stays session-only, the device may well come back.
+     */
+    async function recoverMicDevice() {
+        if (micRecovering || !s.rawMicStream) return;
+        if (!micTrackDead()) return; // speakers changed / devices added — capture untouched
+        micRecovering = true;
+        try {
+            if (settings.micDeviceId && !(await micDevicePresent())) {
+                settings.micDeviceId = '';
+                x.refreshDeviceSelects();
+            }
+            await reacquireMic(); // keeps the mute state, hot-swaps the outgoing track
+            x.toast(t('channel.micRecovered'), 'ok');
+        } catch {
+            x.toast(t('channel.errors.micLost'), 'warn');
+        } finally {
+            micRecovering = false;
+        }
+    }
+
+    /** Configured mic still enumerated? No explicit device counts as present. */
+    async function micDevicePresent() {
+        if (!settings.micDeviceId) return true;
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            return devices.some((d) => d.kind === 'audioinput' && d.deviceId === settings.micDeviceId);
+        } catch {
+            return true; // enumeration refused: assume present, let getUserMedia decide
+        }
     }
 
     function updateVoiceControls() {
@@ -468,6 +530,8 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         syncPttHoldButton,
         buildAudioConstraints,
         refreshOutgoingHint,
+        watchMicHealth,
+        recoverMicDevice,
         syncMicPipeline,
         reacquireMic,
         enableVoice,

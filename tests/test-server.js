@@ -460,6 +460,38 @@ describe('test-server (signaling integration)', function () {
             evt.peer_id.should.equal(ua);
         });
 
+        it('should answer peerPresence probes: live / ghost / gone', async () => {
+            const room = freshRoom('present');
+            const ua = crypto.randomUUID();
+            const ub = crypto.randomUUID();
+            const a = track(connect());
+            const b = track(connect());
+            a.emit('join', joinPayload(room, ua, 'alice'));
+            await once(a, 'serverInfo');
+            b.emit('join', joinPayload(room, ub, 'bob'));
+            await once(b, 'serverInfo');
+            await wait(100);
+
+            const probe = (socket, peer_id) =>
+                new Promise((resolve, reject) =>
+                    socket
+                        .timeout(4000)
+                        .emit('peerPresence', { peer_id }, (err, res) => (err ? reject(err) : resolve(res)))
+                );
+
+            // both sessions live and deliverable
+            (await probe(b, ua)).present.should.equal('live');
+            // dead transport inside the grace window → ghost (a resume may still land)
+            abruptClose(a);
+            await wait(150);
+            (await probe(b, ua)).present.should.equal('ghost');
+            // grace expired, session really gone
+            await once(b, 'removePeer', GHOST_MS + 3000);
+            (await probe(b, ua)).present.should.equal('gone');
+            // a session that never existed
+            (await probe(b, crypto.randomUUID())).present.should.equal('gone');
+        });
+
         it('should remove immediately on an intentional leave', async () => {
             const room = freshRoom('leave');
             const ua = crypto.randomUUID();

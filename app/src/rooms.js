@@ -139,6 +139,16 @@ function createRooms({ channelStore, chatStore, audit, log }) {
         return sock && sock.connected ? sock : null;
     }
 
+    /** Presence verdict for a client recovery probe: 'live' = deliverable
+     *  session, 'ghost' = parked inside its resume grace (worth healing),
+     *  'gone' = no session at all (the prober missed its removePeer). */
+    function sessionPresence(channel, peerUuid) {
+        if (!isPeerInRoom(channel, peerUuid)) return 'gone';
+        const entry = peers[channel][peerUuid];
+        if (entry.ghost || !liveSessionSocket(channel, peerUuid)) return 'ghost';
+        return 'live';
+    }
+
     /** Send async data to all peers in the same room except yourself */
     async function sendToRoom(room_id, socket_id, msg, config = {}) {
         // Object.hasOwn keeps inherited keys ('constructor' etc.) out of the lookup
@@ -305,6 +315,7 @@ function createRooms({ channelStore, chatStore, audit, log }) {
         roomSender,
         sharedRoom,
         liveSessionSocket,
+        sessionPresence,
         sendToRoom,
         broadcastToRoom,
         sendToPeer,

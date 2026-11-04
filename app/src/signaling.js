@@ -97,6 +97,7 @@ function registerSignaling(
         roomSender,
         sharedRoom,
         liveSessionSocket,
+        sessionPresence,
         sendToRoom,
         sendToPeer,
         reapSession,
@@ -514,6 +515,20 @@ function registerSignaling(
         socket.on('refreshIceServers', async (unused, ack) => {
             if (typeof ack !== 'function') return;
             ack(getIceServers());
+        });
+
+        /**
+         * Recovery probe (ack-based): is the target session still a member of a
+         * room we share? A client whose socket missed the removePeer broadcast
+         * (disconnected longer than the target's ghost grace) would otherwise
+         * run its whole ICE-restart ladder against a peer that no longer
+         * exists. 'gone' lets it drop the member card at once; 'ghost' keeps
+         * the ladder healing — a resume may still land.
+         */
+        socket.on('peerPresence', async (config, ack) => {
+            if (typeof ack !== 'function' || !Validate.isValidData(config)) return;
+            const channel = sharedRoom(socket, config.peer_id);
+            ack({ present: channel ? sessionPresence(channel, config.peer_id) : 'gone' });
         });
 
         /**
