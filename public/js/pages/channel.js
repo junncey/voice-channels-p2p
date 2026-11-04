@@ -38,6 +38,7 @@ import { installDebugHooks } from '/js/pages/channel/debug.js';
 import { createRecovery } from '/js/pages/channel/recovery.js';
 import { createMembers } from '/js/pages/channel/members.js';
 import { createVoice } from '/js/pages/channel/voice.js';
+import { acquireMic } from '/js/pages/channel/micGrant.js';
 import { createSettings } from '/js/pages/channel/settings.js';
 import { createComposer } from '/js/pages/channel/composer.js';
 import { createNotify } from '/js/pages/channel/notify.js';
@@ -720,11 +721,13 @@ async function joinInner({ textOnly: asTextOnly }) {
     textOnly = asTextOnly;
 
     if (!textOnly) {
-        try {
-            rawMicStream = await navigator.mediaDevices.getUserMedia(voice.buildAudioConstraints());
-        } catch {
+        // an unanswered permission prompt must never hold the join hostage:
+        // the socket line below would never run (see ./channel/micGrant.js)
+        const grant = await acquireMic(voice.buildAudioConstraints());
+        rawMicStream = grant.stream;
+        if (!grant.stream) {
             textOnly = true;
-            toast(t('channel.errors.micDenied'), 'warn');
+            toast(t(grant.timedOut ? 'channel.errors.micPending' : 'channel.errors.micDenied'), 'warn');
         }
     }
     if (rawMicStream) {

@@ -66,6 +66,7 @@
     "channel.errors.nickRequired": "请先输入昵称（1-24 个字符）",
     "channel.errors.joinFailed": "加入失败，请重试",
     "channel.errors.micDenied": "无法访问麦克风，将以仅文字模式加入",
+    "channel.errors.micPending": "麦克风授权未响应，已以仅文字模式加入；点击麦克风按钮可授权",
     "channel.errors.micLost": "麦克风已断开，点击麦克风按钮可重试",
     "channel.micRecovered": "麦克风已重新连接",
     "channel.errors.disconnected": "连接已断开，正在尝试重连…",
