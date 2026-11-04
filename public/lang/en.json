@@ -89,6 +89,7 @@
     "channel.pathRtt": "RTT {n}ms",
     "channel.pathLoss": "loss {n}%",
     "channel.pathJitter": "jitter {n}ms",
+    "channel.pathConceal": "glitches {n}%",
     "channel.pathBitrate": "{n}kbps",
     "channel.peerUnstable": "Unstable",
     "channel.mutedByHost": "The host muted your microphone",

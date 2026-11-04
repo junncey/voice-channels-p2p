@@ -278,10 +278,50 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     }
 
     /**
+     * Settings-only change (NS/EC/AGC/music mode): reconfigure the LIVE track
+     * in place instead of opening the mic a second time — a second getUserMedia
+     * can fail outright on single-capture devices (Bluetooth HFP headsets) and
+     * disturbs the audio route everywhere else. The track object survives, so
+     * neither the WebAudio pipeline nor the senders' replaceTrack path is
+     * touched. Returns true when the new constraints are verifiably in effect;
+     * any refusal, timeout or mismatch falls back to the full re-acquisition.
+     */
+    async function tryApplyMicConstraints() {
+        const rawTrack = s.rawMicStream?.getAudioTracks()[0];
+        if (!rawTrack || rawTrack.readyState !== 'live' || typeof rawTrack.applyConstraints !== 'function') {
+            return false;
+        }
+        // a device switch must go through the full path (a reconfigured track
+        // could keep a stale route); an unreported deviceId is not proof either
+        if ((rawTrack.getSettings?.().deviceId || '') !== settings.micDeviceId) return false;
+        const audio = buildAudioConstraints().audio;
+        try {
+            await Promise.race([
+                rawTrack.applyConstraints(audio),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('mic-constraint-timeout')), 3000)),
+            ]);
+        } catch {
+            return false;
+        }
+        // a resolve is not proof the browser reconfigured: verify the toggles it
+        // reports back (ideal-valued fields like channelCount are not verifiable)
+        const applied = rawTrack.getSettings?.() || {};
+        for (const key of ['echoCancellation', 'noiseSuppression', 'autoGainControl']) {
+            if (typeof applied[key] === 'boolean' && applied[key] !== audio[key]) return false;
+        }
+        watchMicHealth(s.rawMicStream); // re-sync micChannels (stereo fmtp may need a renegotiation)
+        refreshOutgoingHint(); // music mode flips the encoder content hint
+        return true;
+    }
+
+    /**
      * Re-acquire the mic with the current settings (device switch or processing
      * toggle) and hot-swap the outgoing track — no renegotiation involved.
      */
     async function reacquireMic() {
+        // processing-only changes ride applyConstraints on the live track; the
+        // full path below stays the answer for device switches and dead captures
+        if (s.localStream && (await tryApplyMicConstraints())) return;
         const hadStream = !!s.localStream;
         let stream;
         try {

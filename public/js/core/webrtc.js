@@ -409,14 +409,27 @@ export class Mesh {
                 candidates.set(report.id, report);
                 return;
             }
-            if (report.type === 'inbound-rtp' && report.kind === 'audio') {
-                inbound = {
-                    packetsLost: report.packetsLost ?? 0,
-                    packetsReceived: report.packetsReceived ?? 0,
-                    jitter: typeof report.jitter === 'number' ? report.jitter : null,
-                    bytesReceived: report.bytesReceived ?? 0,
-                    timestamp: report.timestamp ?? Date.now(),
-                };
+            if (report.type === 'inbound-rtp' && !inbound) {
+                // links in this app are audio-only: the first inbound-rtp IS the
+                // audio stream even when the browser omits `kind` (older Firefox
+                // reported it as `mediaType`) — without the fallback the whole
+                // inbound quality monitor silently goes dark
+                const kind = report.kind || report.mediaType;
+                if (!kind || kind === 'audio') {
+                    inbound = {
+                        packetsLost: report.packetsLost ?? 0,
+                        packetsReceived: report.packetsReceived ?? 0,
+                        jitter: typeof report.jitter === 'number' ? report.jitter : null,
+                        bytesReceived: report.bytesReceived ?? 0,
+                        timestamp: report.timestamp ?? Date.now(),
+                        // cumulative NetEQ counters — the concealment-ratio ground
+                        // truth the recovery engine's jitter boost reacts to; null
+                        // where the browser doesn't report them
+                        concealedSamples: typeof report.concealedSamples === 'number' ? report.concealedSamples : null,
+                        totalSamplesReceived:
+                            typeof report.totalSamplesReceived === 'number' ? report.totalSamplesReceived : null,
+                    };
+                }
                 return;
             }
             if (report.type === 'remote-inbound-rtp') {

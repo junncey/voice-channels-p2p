@@ -15,7 +15,7 @@ Signaling/media self-healing — the recovery engine for the channel page.
   - presence probe: server-confirmed dead sessions drop out of the ladder
   - "connecting…" badge for ghost members whose offer will never be answered
   - connection path monitor (P2P vs TURN relay badge + rtt)
-  - inbound link quality (loss/jitter diffing → "unstable" badge)
+  - inbound link quality (loss/jitter/concealment diffing → "unstable" badge)
   - outbound loss adaptation (the peer's receiver report floors OUR send
     bitrate for that link until the report cleans up)
   - relay upgrade: re-punch a connected-but-relayed link while direct checks
@@ -495,6 +495,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         if (quality) {
             if (quality.loss !== null) parts.push(t('channel.pathLoss', { n: quality.loss }));
             if (quality.jitter !== null) parts.push(t('channel.pathJitter', { n: quality.jitter }));
+            if (quality.conceal !== null && quality.conceal > 0)
+                parts.push(t('channel.pathConceal', { n: quality.conceal }));
             if (quality.kbps !== null) parts.push(t('channel.pathBitrate', { n: quality.kbps }));
         }
         node.title = parts.join(' · ');
@@ -527,6 +529,12 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     const JITTER_OK_MS = 25;
     const JITTER_BOOST_MILD_MS = 60;
     const JITTER_BOOST_MS = 120;
+    // NetEQ concealment ratio: the fraction of received audio NetEQ had to
+    // synthesize (PLC) — the glitch the listener actually HEARS. Network jitter
+    // can look calm while a shallow buffer still conceals on bursts/reordering
+    // (Wi-Fi power save), so it joins as a ground-truth trigger for the boost.
+    const CONCEAL_BAD_PCT = 3;
+    const CONCEAL_OK_PCT = 1.5;
     // zombie links: connected + the peer broadcasts that it's sending, yet
     // exactly zero RTP bytes AND packets across this many polls → the media
     // path is black-holed while ICE consent survives (some DPI/policy changes
@@ -537,7 +545,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // restarts forever; ICE consent eventually failing hands it to the ladder.
     const ZOMBIE_POLLS = 6; // ~30s at the 5s poll cadence
     const ZOMBIE_COOLDOWN_MS = 60000;
-    // peerId -> { last, loss, jitter, kbps, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt }
+    // peerId -> { last, loss, jitter, kbps, conceal, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -546,6 +554,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             loss: null,
             jitter: null,
             kbps: null,
+            conceal: null,
             bad: 0,
             good: 0,
             unstable: false,
@@ -574,6 +583,20 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                     rec.loss = Math.round(loss * 10) / 10;
                     rec.kbps =
                         dSec > 0 ? Math.round(((inbound.bytesReceived - prev.bytesReceived) * 8) / dSec / 1000) : null;
+                    // NetEQ concealment ratio over the same window; either counter
+                    // unreported → null, which every consumer treats as "no verdict"
+                    rec.conceal =
+                        prev.concealedSamples !== null &&
+                        inbound.concealedSamples !== null &&
+                        prev.totalSamplesReceived !== null &&
+                        inbound.totalSamplesReceived !== null &&
+                        inbound.totalSamplesReceived - prev.totalSamplesReceived > 0
+                            ? Math.round(
+                                  ((inbound.concealedSamples - prev.concealedSamples) /
+                                      (inbound.totalSamplesReceived - prev.totalSamplesReceived)) *
+                                      1000
+                              ) / 10
+                            : null;
                     if (loss >= LOSS_BAD_PCT) {
                         rec.bad += 1;
                         rec.good = 0;
@@ -584,6 +607,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                     noteZombie(peerId, rec, info, inbound.bytesReceived - prev.bytesReceived, dRecv);
                 } else {
                     rec.zombie = 0; // SSRC/counter reset (rebuild): rebase the streak
+                    rec.conceal = null;
                 }
             }
             rec.last = inbound;
@@ -656,8 +680,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     }
 
     /**
-     * Receive-side answer to a jittery/lossy inbound link: raise that link's
-     * audio playout buffer target while the trouble lasts (mesh.
+     * Receive-side answer to a jittery/lossy/glitching inbound link: raise that
+     * link's audio playout buffer target while the trouble lasts (mesh.
      * setPeerJitterTarget — receiver-side, no renegotiation), restore the
      * browser's adaptive default once it calms. Same hysteresis shape as the
      * other engines; unlike the send-side bitrate floor this carries no
@@ -666,9 +690,14 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     function noteJitterBoost(peerId, rec) {
         const jitterBad = rec.jitter !== null && rec.jitter >= JITTER_BAD_MS;
         const lossBad = rec.loss !== null && rec.loss >= LOSS_BAD_PCT;
+        // concealment is the audible symptom the two network-level signals above
+        // can miss — it joins both sides of the hysteresis
+        const glitchBad = rec.conceal !== null && rec.conceal >= CONCEAL_BAD_PCT;
         const calm =
-            (rec.jitter === null || rec.jitter <= JITTER_OK_MS) && (rec.loss === null || rec.loss <= LOSS_OK_PCT);
-        if (jitterBad || lossBad) {
+            (rec.jitter === null || rec.jitter <= JITTER_OK_MS) &&
+            (rec.loss === null || rec.loss <= LOSS_OK_PCT) &&
+            (rec.conceal === null || rec.conceal <= CONCEAL_OK_PCT);
+        if (jitterBad || lossBad || glitchBad) {
             rec.jbad += 1;
             rec.jgood = 0;
         } else if (calm) {
