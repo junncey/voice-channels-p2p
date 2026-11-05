@@ -4,8 +4,9 @@
 //
 // Signaling integration tests: real server instance + socket.io-client pairs
 // covering join/addPeer, ghost grace + same-uuid resume, intentional leave,
-// capacity/password gates, chat history persistence (incl. the session-uuid
-// sender lookup) and the admin member list / kick endpoints.
+// capacity/password gates, join-throttle feedback, chat history persistence
+// (incl. the session-uuid sender lookup) and the admin member list / kick
+// endpoints.
 //
 // The suite runs in-process: env is pinned BEFORE server.js (and thus
 // config.js) loads. The repo's real channels.json / chat_history are backed
@@ -20,6 +21,9 @@ process.env.GHOST_GRACE_MS = '1200';
 process.env.GHOST_GRACE_LATE_MS = '600';
 process.env.TEMP_ROOMS_ENABLED = 'true';
 process.env.AUTO_INIT_CHANNELS = 'true';
+// the join-throttle test trips the auth-failure cooldown from a SPOOFED
+// x-forwarded-for IP so the 127.0.0.1 counter other tests share stays clean
+process.env.TRUST_PROXY = 'true';
 // REST/HMAC TURN mode: every addPeer / refreshIceServers payload must carry
 // the minted credentials (exercised by the "fresh TURN REST credentials" case)
 process.env.TURN_SERVER_ENABLED = 'true';
@@ -515,6 +519,33 @@ describe('test-server (signaling integration)', function () {
             const s = track(connect());
             s.emit('join', { channel: 'troom', peer_uuid: 'not-a-uuid', peer_name: 'x', peer_audio: true });
             await once(s, 'unauthorized');
+        });
+
+        it('should tell a throttled source instead of dropping the join silently', async () => {
+            // from a dedicated spoofed IP: tripping JOIN_FAIL_LIMIT (10) must
+            // not poison the shared 127.0.0.1 counter for the rest of the suite
+            const spoofed = () =>
+                track(
+                    io(URL, {
+                        transports: ['websocket'],
+                        reconnection: false,
+                        forceNew: true,
+                        extraHeaders: { 'x-forwarded-for': '203.0.113.7' },
+                    })
+                );
+            const s = spoofed();
+            for (let i = 0; i < 10; i++) {
+                s.emit('join', { channel: 'troom', peer_uuid: 'not-a-uuid', peer_name: 'x', peer_audio: true });
+                await once(s, 'unauthorized'); // each failure re-arms the counter
+            }
+            // a fully VALID join from that source now hits the cooldown: the
+            // server must say so (retryAfter seconds) instead of going quiet —
+            // the client's join-ack timeout keys off exactly this event
+            s.emit('join', joinPayload('zzthrottle', crypto.randomUUID(), 'hampered'));
+            const throttled = await once(s, 'joinThrottled');
+            throttled.retryAfter.should.be.a.Number();
+            throttled.retryAfter.should.be.within(1, 60);
+            (await emitted(s, 'serverInfo', 300)).should.equal(false);
         });
 
         it('should reject a wrong/missing channel password', async () => {

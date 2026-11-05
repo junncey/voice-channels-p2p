@@ -38,11 +38,18 @@ function joinFailKey(ip) {
 }
 
 function isJoinThrottled(ip) {
+    return joinThrottleRemainingMs(ip) > 0;
+}
+
+/** Milliseconds left in the join cooldown for this source (0 = free to try).
+ *  Doubles as the payload for the joinThrottled event so the client can tell
+ *  "dropped" apart from "lost" and back off to the exact second. */
+function joinThrottleRemainingMs(ip) {
     const entry = joinFailures.get(joinFailKey(ip));
-    if (!entry || entry.count < JOIN_FAIL_LIMIT) return false;
+    if (!entry || entry.count < JOIN_FAIL_LIMIT) return 0;
     // the window is measured from the last failure; once it elapses the source
     // gets a fresh attempt (a new failure re-arms the cooldown)
-    return Date.now() - entry.ts < JOIN_FAIL_COOLDOWN_MS;
+    return Math.max(0, JOIN_FAIL_COOLDOWN_MS - (Date.now() - entry.ts));
 }
 
 function recordJoinFailure(ip) {
@@ -168,10 +175,15 @@ function registerSignaling(
                 const { channel, peer_uuid } = config;
 
                 // Brute-force guard: a source with too many consecutive failed
-                // join authentications is silently ignored for the cooldown window
+                // join authentications is ignored for the cooldown window. The
+                // drop is TOLD to the client (retryAfter seconds) — a legitimate
+                // user behind a shared NAT that tripped the counter would
+                // otherwise wait for a serverInfo that never comes
                 if (isJoinThrottled(peer_ip)) {
                     log.warn('[' + socket.id + '] join dropped: auth-failure cooldown', { channel });
-                    return;
+                    return socket.emit('joinThrottled', {
+                        retryAfter: Math.ceil(joinThrottleRemainingMs(peer_ip) / 1000),
+                    });
                 }
 
                 if (!Validate.isValidRoomName(channel) || !channelStore.isValidId(channel)) {

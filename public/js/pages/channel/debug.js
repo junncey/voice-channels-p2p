@@ -174,7 +174,15 @@ export function installDebugHooks(getCtx) {
                     });
             });
             const path = await mesh.connPath(peerId).catch(() => null);
-            out.push({ peerId, state: entry.pc.connectionState, path, rows });
+            out.push({
+                peerId,
+                state: entry.pc.connectionState,
+                path,
+                // packet-level redundancy negotiated on this link (null = no
+                // remote description yet) — readback for the RED preference
+                red: typeof mesh.redNegotiated === 'function' ? mesh.redNegotiated(peerId) : undefined,
+                rows,
+            });
         }
         return out;
     };

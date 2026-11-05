@@ -405,8 +405,11 @@ export function createComposer({
         );
         for (const payload of payloads) {
             try {
-                sendImageData({
+                await sendImageData({
                     send: (frame) => s.mesh.sendChat(frame),
+                    // backpressure: pace the chunks to the SCTP buffers so the
+                    // burst doesn't starve the voice packets sharing the link
+                    ready: () => s.mesh?.drainChat?.(),
                     from: s.selfName,
                     mime: payload.mime,
                     dataUrl: payload.dataUrl,
@@ -414,8 +417,8 @@ export function createComposer({
                 });
             } catch {
                 // a DataChannel refused the frames (send buffer full / channel
-                // closing) — stop here instead of silently losing the remaining
-                // images of the batch
+                // closing / queue over budget) — stop here instead of silently
+                // losing the remaining images of the batch
                 toast(t('chat.imageSendFailed'), 'warn');
                 break;
             }

@@ -733,7 +733,15 @@ async function joinInner({ textOnly: asTextOnly }) {
     if (!textOnly) {
         // an unanswered permission prompt must never hold the join hostage:
         // the socket line below would never run (see ./channel/micGrant.js)
-        const grant = await acquireMic(voice.buildAudioConstraints());
+        let grant = await acquireMic(voice.buildAudioConstraints());
+        if (!grant.stream && !grant.timedOut && settings.micDeviceId) {
+            // the remembered mic vanished between sessions: a stale exact
+            // deviceId fails forever — clear it once, retry on the default
+            // device (session-only, same fallback voice.js uses mid-call)
+            settings.micDeviceId = '';
+            grant = await acquireMic(voice.buildAudioConstraints());
+            if (grant.stream) toast(t('channel.micFallback'), 'warn');
+        }
         rawMicStream = grant.stream;
         if (!grant.stream) {
             textOnly = true;
@@ -904,6 +912,7 @@ function teardownMedia() {
     rec.resetForTeardown();
     se.clearDisconnectToast();
     se.stopIceRefresh();
+    se.stopJoinAck();
     screenLock.release();
     shareSound.stop({ silent: true }); // releases the capture + tells the room before the socket goes
     settingsUi.stopMicTest();

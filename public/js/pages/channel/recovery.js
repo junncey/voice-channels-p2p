@@ -1,3 +1,5 @@
+import { createRelayUpgrade } from '/js/pages/channel/relay.js';
+
 /*
 Signaling/media self-healing — the recovery engine for the channel page.
 
@@ -19,7 +21,7 @@ Signaling/media self-healing — the recovery engine for the channel page.
   - outbound loss adaptation (the peer's receiver report floors OUR send
     bitrate for that link until the report cleans up)
   - relay upgrade: re-punch a connected-but-relayed link while direct checks
-    may still succeed
+    may still succeed (engine split into channel/relay.js — same family)
 
 A coturn restart destroys every TURN allocation while signaling stays up, so
 links die without the app noticing. Recovery runs per peer (a mesh can be
@@ -403,6 +405,9 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     const pathChecks = new Set(); // peers with a getStats round-trip in flight
     const pathEarlyTimers = new Map(); // peerId -> post-connect one-shot check
     let pathPollTimer = null;
+    // relay re-punch engine (see channel/relay.js) — reads the recovery state
+    // (peerRecovery) and this monitor's connPaths snapshot, both injected
+    const relayUpgrade = createRelayUpgrade({ s, peerRecovery, connPaths });
 
     function startPathMonitor() {
         if (pathPollTimer) return;
@@ -419,7 +424,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         pathEarlyTimers.clear();
         connPaths.clear();
         lossStreaks.clear();
-        for (const peerId of [...relayUpgrades.keys()]) cancelRelayUpgrade(peerId);
+        relayUpgrade.cancelAll();
     }
 
     function checkPeerPath(peerId, delay = 0) {
@@ -444,12 +449,12 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                 connPaths.set(peerId, info);
                 notePeerLoss(peerId, info);
                 updatePeerPathBadge(peerId);
-                noteRelayUpgrade(peerId, info);
+                relayUpgrade.note(peerId, info);
             })
             .catch(() => {
                 connPaths.delete(peerId);
                 updatePeerPathBadge(peerId); // don't leave a stale "P2P"/relay badge behind
-                cancelRelayUpgrade(peerId);
+                relayUpgrade.cancel(peerId);
             })
             .finally(() => pathChecks.delete(peerId));
     }
@@ -497,7 +502,17 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             if (quality.jitter !== null) parts.push(t('channel.pathJitter', { n: quality.jitter }));
             if (quality.conceal !== null && quality.conceal > 0)
                 parts.push(t('channel.pathConceal', { n: quality.conceal }));
+            // achieved playout-buffer depth — whether a boost target landed
+            if (quality.jbDelay !== null && quality.jbDelay > 0)
+                parts.push(t('channel.pathPlayout', { n: quality.jbDelay }));
             if (quality.kbps !== null) parts.push(t('channel.pathBitrate', { n: quality.kbps }));
+            // outbound twins (what the peer reports about OUR stream + our
+            // encoder's actual output) — the send-side half of the picture
+            if (quality.outLoss !== null && quality.outLoss > 0)
+                parts.push(t('channel.pathOutLoss', { n: quality.outLoss }));
+            if (quality.outJitter !== null && quality.outJitter >= 5)
+                parts.push(t('channel.pathOutJitter', { n: quality.outJitter }));
+            if (quality.outKbps !== null) parts.push(t('channel.pathOutBitrate', { n: quality.outKbps }));
         }
         node.title = parts.join(' · ');
     }
@@ -535,6 +550,21 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // (Wi-Fi power save), so it joins as a ground-truth trigger for the boost.
     const CONCEAL_BAD_PCT = 3;
     const CONCEAL_OK_PCT = 1.5;
+    // the deep boost scales with the measured jitter instead of a fixed 120ms —
+    // a 90ms-jitter link needs more than twice that to stop concealing
+    const JITTER_BOOST_MAX_MS = 240;
+    const JITTER_HONORED_TOL_MS = 15; // achieved delay within this of the target = honored
+    // quality restart: severe sustained loss on a link that STAYS connected —
+    // adaptation (bitrate floor / buffer boost) eases the symptoms, but when
+    // the route itself degraded only a re-punch helps. Both directions count:
+    // inbound severe loss, and the outbound black hole (the peer's receiver
+    // report says nearly everything we send dies — they hear nothing while ICE
+    // consent stays green; the zombie engine only catches EXACT zero inbound).
+    const LOSS_SEVERE_PCT = 20;
+    const SEVERE_BAD_POLLS = 6; // ~30s at the 5s poll cadence
+    const OUT_SEVERE_PCT = 90;
+    const OUT_BLACKHOLE_POLLS = 3; // ~15s
+    const QUALITY_RESTART_COOLDOWN_MS = 90000;
     // zombie links: connected + the peer broadcasts that it's sending, yet
     // exactly zero RTP bytes AND packets across this many polls → the media
     // path is black-holed while ICE consent survives (some DPI/policy changes
@@ -545,7 +575,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // restarts forever; ICE consent eventually failing hands it to the ladder.
     const ZOMBIE_POLLS = 6; // ~30s at the 5s poll cadence
     const ZOMBIE_COOLDOWN_MS = 60000;
-    // peerId -> { last, loss, jitter, kbps, conceal, bad, good, unstable, obad, ogood, adapted, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt }
+    // peerId -> { last, loss, jitter, kbps, conceal, jbDelay, outLoss, outJitter, outKbps, outLast, outTarget, bad, good, unstable, outTs, obad, ogood, adapted, probing, floorBps, floorWarned, rbad, osev, restartAt, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -555,12 +585,25 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             jitter: null,
             kbps: null,
             conceal: null,
+            jbDelay: null,
+            outLoss: null,
+            outJitter: null,
+            outKbps: null,
+            outLast: null,
+            outTarget: null,
             bad: 0,
             good: 0,
             unstable: false,
+            outTs: null,
             obad: 0,
             ogood: 0,
             adapted: false,
+            probing: false,
+            floorBps: null,
+            floorWarned: false,
+            rbad: 0,
+            osev: 0,
+            restartAt: 0,
             jbad: 0,
             jgood: 0,
             jbBoost: false,
@@ -597,6 +640,22 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                                       1000
                               ) / 10
                             : null;
+                    // achieved playout-buffer delay over the same window — closes
+                    // the jitter-boost loop: a target the browser actually honored
+                    // shows up here (delay is cumulative seconds, count cumulative
+                    // frames; their per-window ratio is the average depth in ms)
+                    rec.jbDelay =
+                        prev.jitterBufferDelay !== null &&
+                        inbound.jitterBufferDelay !== null &&
+                        prev.jitterBufferEmittedCount !== null &&
+                        inbound.jitterBufferEmittedCount !== null &&
+                        inbound.jitterBufferEmittedCount - prev.jitterBufferEmittedCount > 0
+                            ? Math.round(
+                                  ((inbound.jitterBufferDelay - prev.jitterBufferDelay) /
+                                      (inbound.jitterBufferEmittedCount - prev.jitterBufferEmittedCount)) *
+                                      1000
+                              )
+                            : null;
                     if (loss >= LOSS_BAD_PCT) {
                         rec.bad += 1;
                         rec.good = 0;
@@ -604,21 +663,61 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                         rec.good += 1;
                         rec.bad = 0;
                     }
+                    // severe-loss streak for the quality restart (see its constants)
+                    if (loss >= LOSS_SEVERE_PCT) rec.rbad += 1;
+                    else if (loss <= LOSS_OK_PCT) rec.rbad = 0;
                     noteZombie(peerId, rec, info, inbound.bytesReceived - prev.bytesReceived, dRecv);
                 } else {
                     rec.zombie = 0; // SSRC/counter reset (rebuild): rebase the streak
                     rec.conceal = null;
+                    rec.jbDelay = null;
+                    rec.rbad = 0;
                 }
             }
             rec.last = inbound;
+        }
+        // outbound loss (the peer's receiver report about OUR stream) rides RTCP
+        // and may REPEAT between path polls — the same stale report must not
+        // double-feed the streaks below. Each report counts once: a timestamp
+        // identical to the previous poll's is a re-read, not a new verdict.
+        const outTs = info?.outboundTs;
+        const freshReport = outTs === null || outTs === undefined || outTs !== rec.outTs;
+        if (outTs !== null && outTs !== undefined) rec.outTs = outTs;
+        const outbound = freshReport ? info?.outboundLoss : null;
+        if (freshReport && info?.outboundLoss !== null && info?.outboundLoss !== undefined) {
+            rec.outLoss = info.outboundLoss;
+        }
+        rec.outJitter = info?.outboundJitter ?? null;
+        // our encoder's actual output, diffed like the inbound counters — the
+        // ground truth for "did the bitrate floor actually land" (below)
+        const outb = info?.outbound;
+        if (outb) {
+            const prevOut = rec.outLast;
+            if (prevOut && outb.timestamp > prevOut.timestamp) {
+                const dBytes = outb.bytesSent - prevOut.bytesSent;
+                const dSec = (outb.timestamp - prevOut.timestamp) / 1000;
+                rec.outKbps = dBytes >= 0 && dSec > 0 ? Math.round((dBytes * 8) / dSec / 1000) : null;
+            }
+            rec.outLast = outb;
+            rec.outTarget = outb.targetBitrate;
+        } else {
+            rec.outKbps = null;
+            rec.outTarget = null;
+        }
+        // outbound black-hole streak — counted in EVERY mode: music/share links
+        // where the bitrate floor refuses to act still deserve the re-punch
+        if (outbound !== null && outbound !== undefined) {
+            if (outbound >= OUT_SEVERE_PCT) rec.osev += 1;
+            else if (outbound <= LOSS_OK_PCT) rec.osev = 0;
         }
         const was = rec.unstable;
         if (!rec.unstable && rec.bad >= UNSTABLE_BAD_POLLS) rec.unstable = true;
         else if (rec.unstable && rec.good >= UNSTABLE_GOOD_POLLS) rec.unstable = false;
         lossStreaks.set(peerId, rec);
         if (was !== rec.unstable) updatePeerUnstable(peerId);
-        noteOutboundAdaptation(peerId, info, rec);
+        noteOutboundAdaptation(peerId, outbound, rec);
         noteJitterBoost(peerId, rec);
+        noteQualityRestart(peerId, info, rec);
     }
 
     /** Zero-RTP streak on a link that claims to be alive (see ZOMBIE_POLLS). */
@@ -643,17 +742,50 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     }
 
     /**
+     * The last rung the quality engines can reach: a link that STAYS connected
+     * while loss runs severe has a route problem, not a load problem — the
+     * bitrate floor and buffer boost only ease the symptoms. One iceRestart
+     * re-runs the checks that nominated the pair (a degraded relay path or a
+     * rebindable NAT often has a better alternative). Fired for sustained
+     * inbound severe loss and for the outbound black hole; cooldown + lower-
+     * uuid arbitration mirror the zombie engine, and a link already riding the
+     * recovery ladder is left to it.
+     */
+    function noteQualityRestart(peerId, info, rec) {
+        if (info?.state !== 'connected' || peerRecovery.has(peerId)) return;
+        const now = Date.now();
+        if (now - rec.restartAt < QUALITY_RESTART_COOLDOWN_MS) return;
+        const inSevere = rec.rbad >= SEVERE_BAD_POLLS;
+        const outBlackhole = rec.osev >= OUT_BLACKHOLE_POLLS;
+        if (!inSevere && !outBlackhole) return;
+        rec.rbad = 0;
+        rec.osev = 0;
+        rec.restartAt = now;
+        // same arbitration as the restart rounds: the lower session id acts
+        if (s.selfUuid && s.selfUuid < peerId) {
+            console.warn(
+                '[mesh] quality restart: connected but path is unusable, re-punching',
+                peerId,
+                inSevere ? 'inbound loss' : 'outbound black hole'
+            );
+            s.mesh?.restartIce(peerId).catch(() => {});
+        }
+    }
+
+    /**
      * Send-side answer to sustained OUTBOUND loss (mesh links are
      * independent: the inbound badge says the peer is hard to hear, while
      * fractionLost in the peer's receiver report says OUR stream is the one
      * dropping). Floor this link's encoder cap at half the configured bitrate
      * until the report cleans up — setParameters, no renegotiation involved.
+     * The way back up is a probe ladder (floor → 3/4 cap → full cap): jumping
+     * straight from the floor to the configured cap is exactly the load that
+     * floored the link, and re-triggering it oscillates forever.
      * Speech mode only (usedtx caps): music/share fidelity is an explicit user
      * choice, the badge alone tells them the link is bad.
      */
-    function noteOutboundAdaptation(peerId, info, rec) {
+    function noteOutboundAdaptation(peerId, outbound, rec) {
         const fmtp = s.mesh?.getOpusFmtp?.();
-        const outbound = info?.outboundLoss;
         if (fmtp?.usedtx === 1 && fmtp?.maxaveragebitrate && outbound !== null && outbound !== undefined) {
             if (outbound >= LOSS_BAD_PCT) {
                 rec.obad += 1;
@@ -664,18 +796,54 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             }
             if (!rec.adapted && rec.obad >= ADAPT_BAD_POLLS) {
                 rec.adapted = true;
+                rec.probing = false;
                 const floor = Math.max(ADAPT_FLOOR_MIN_BPS, Math.floor(fmtp.maxaveragebitrate / 2));
+                rec.floorBps = floor;
                 s.mesh.setPeerBitrateFloor(peerId, floor);
                 console.warn('[mesh] loss adaptation: send bitrate floored', peerId, `${floor / 1000}kbps`);
-            } else if (rec.adapted && rec.ogood >= ADAPT_GOOD_POLLS) {
+            } else if (rec.adapted && !rec.probing && rec.ogood >= ADAPT_GOOD_POLLS) {
+                // clean long enough to risk a probe: step UP to 3/4 of the cap,
+                // one bad report puts the floor straight back
+                rec.probing = true;
+                rec.ogood = 0;
+                const probe = Math.floor((fmtp.maxaveragebitrate * 3) / 4);
+                rec.floorBps = probe;
+                s.mesh.setPeerBitrateFloor(peerId, probe);
+                console.log('[mesh] loss adaptation: probing higher bitrate', peerId, `${probe / 1000}kbps`);
+            } else if (rec.probing && rec.obad >= 1) {
+                rec.probing = false;
+                const floor = Math.max(ADAPT_FLOOR_MIN_BPS, Math.floor(fmtp.maxaveragebitrate / 2));
+                rec.floorBps = floor;
+                s.mesh.setPeerBitrateFloor(peerId, floor);
+                console.warn('[mesh] loss adaptation: probe failed, floor re-applied', peerId);
+            } else if (rec.probing && rec.ogood >= ADAPT_GOOD_POLLS) {
                 rec.adapted = false;
+                rec.probing = false;
+                rec.floorBps = null;
                 s.mesh.setPeerBitrateFloor(peerId, null);
                 console.log('[mesh] loss adaptation: bitrate restored', peerId);
             }
         } else if (rec.adapted && fmtp?.usedtx !== 1) {
             // mode left speech (music/share): the user's caps rule the link again
             rec.adapted = false;
+            rec.probing = false;
+            rec.floorBps = null;
             s.mesh.setPeerBitrateFloor(peerId, null);
+        }
+        // readback: while a floor/probe is in force the encoder's reported
+        // target should sit near it — a setParameters the browser resolved
+        // but ignored leaves this whole engine running on air. Warn-once per
+        // floor; the generous tolerance absorbs speech-mode RED roughly
+        // doubling the wire rate over the encoder's own target.
+        if (rec.floorBps && rec.outTarget !== null && rec.outTarget > rec.floorBps * 2.5 && !rec.floorWarned) {
+            rec.floorWarned = true;
+            console.warn(
+                '[mesh] loss adaptation: encoder target ignores the floor',
+                peerId,
+                `target=${Math.round(rec.outTarget / 1000)}kbps`
+            );
+        } else if (!rec.floorBps) {
+            rec.floorWarned = false;
         }
     }
 
@@ -712,9 +880,21 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             s.mesh?.setPeerJitterTarget(peerId, JITTER_BOOST_MILD_MS);
             console.warn('[mesh] jitter boost: playout target raised', peerId, `${JITTER_BOOST_MILD_MS}ms`);
         } else if (rec.jbBoost && rec.jbLevel === 1 && rec.jbad >= ADAPT_BAD_POLLS * 2) {
+            // closed loop via the achieved delay: only stack a deeper target
+            // when the mild one actually landed (or is unobservable) — a
+            // browser that ignored 60ms will ignore 120ms just the same
+            const honored = rec.jbDelay === null || rec.jbDelay >= JITTER_BOOST_MILD_MS - JITTER_HONORED_TOL_MS;
+            if (!honored) return;
             rec.jbLevel = 2;
-            s.mesh?.setPeerJitterTarget(peerId, JITTER_BOOST_MS);
-            console.warn('[mesh] jitter boost: sustained trouble, deep target', peerId, `${JITTER_BOOST_MS}ms`);
+            // scale the deep target with the measured jitter (rounded to 10ms),
+            // clamped to sane audio bounds — a 90ms-jitter link needs more than
+            // a fixed 120ms to stop concealing, a 35ms one doesn't need more
+            const deep = Math.min(
+                JITTER_BOOST_MAX_MS,
+                Math.max(JITTER_BOOST_MS, Math.ceil(((rec.jitter || 0) * 3) / 10) * 10)
+            );
+            s.mesh?.setPeerJitterTarget(peerId, deep);
+            console.warn('[mesh] jitter boost: sustained trouble, deep target', peerId, `${deep}ms`);
         } else if (rec.jbBoost && rec.jgood >= ADAPT_GOOD_POLLS) {
             rec.jbBoost = false;
             rec.jbLevel = 0;
@@ -729,143 +909,15 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     }
 
     // -------------------------------------------------------------------------
-    // relay upgrade — ICE nominates the first working pair, which can be the TURN
-    // relay when direct checks were still in flight (cold DNS, slow NAT binding,
-    // coturn auth round-trip); WebRTC never re-runs checks on a connected link, so
-    // a connected-but-relayed path stays relayed forever. Fed by the path poll:
-    // once a link sits on relay past RELAY_UPGRADE_GRACE_MS, re-punch with an
-    // iceRestart (chat DataChannel preserved). Glare arbitration mirrors the
-    // recovery ladder — only the lower session-id side initiates, and the restart
-    // re-runs checks on BOTH ends, so the peer needs no watchdog of its own.
-    // Attempts are capped: when direct is impossible (symmetric NAT, blocked UDP)
-    // another restart is pointless churn that only blips the audio.
-    //
-    // 🔴 The budget must survive everything the app reports about a healthy link:
-    // the 10s recovery scan re-emits 'connected' for every peer, and a restart makes
-    // the path read 'unknown' for a moment. Cancelling the record on either signal
-    // resets `since`/`attempts` from inside the attempt it is supposed to bound —
-    // which is how 1.1.5 ended up never firing (grace 12s > scan 10s).
-    // Only these clear it: path is p2p, peer left / link broken (peerRecovery), the
-    // peer left the room, or we left.
+    // (relay upgrade engine lives in channel/relay.js — injected above as
+    //  relayUpgrade; this file keeps only the wiring in checkPeerPath /
+    //  stopPathMonitor / forgetPeer)
     // -------------------------------------------------------------------------
 
-    const RELAY_UPGRADE_GRACE_MS = 12000; // relayed this long after connect → try re-punching
-    const RELAY_UPGRADE_RETRY_MS = 10000; // after a restart, let fresh checks settle before judging
-    const RELAY_UPGRADE_MAX_ATTEMPTS = 2;
-    const RELAY_UPGRADE_TOTAL_MS = 45000; // hard window, also bounds restartIce deferrals
-    // peerId -> { timer, attempts, since, done, busy }
-    //   done = attempts exhausted, tombstone so the poll stops re-arming
-    //   busy = our re-offer is in flight, don't stack a second one
-    const relayUpgrades = new Map();
-
-    function noteRelayUpgrade(peerId, info) {
-        if (!info || peerRecovery.has(peerId) || !s.selfUuid || s.selfUuid >= peerId) {
-            // link gone, or this side isn't the one allowed to re-punch
-            cancelRelayUpgrade(peerId);
-            return;
-        }
-        if (info.type === 'p2p') {
-            // direct — the upgrade landed (or was never needed): start clean next time
-            cancelRelayUpgrade(peerId);
-            return;
-        }
-        // 'unknown' is transitional: our own restart is re-checking, or the candidate
-        // reports aren't readable yet. Keep the budget — cancelling here would reset
-        // the attempt counter from inside the restart it is supposed to bound.
-        if (info.state !== 'connected' || info.type !== 'relay') return;
-
-        let rec = relayUpgrades.get(peerId);
-        if (!rec) {
-            rec = { timer: null, attempts: 0, since: Date.now(), done: false, busy: false };
-            relayUpgrades.set(peerId, rec);
-        }
-        if (rec.done || rec.timer || rec.busy) return; // exhausted / armed / offer in flight
-        const due = Math.max(RELAY_UPGRADE_GRACE_MS - (Date.now() - rec.since), 0);
-        rec.timer = setTimeout(() => relayUpgradeTick(peerId), due);
-    }
-
-    function relayUpgradeTick(peerId) {
-        const rec = relayUpgrades.get(peerId);
-        if (!rec) return;
-        rec.timer = null;
-        if (rec.busy) {
-            // the previous offer hasn't settled — let it, then judge again
-            scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-            return;
-        }
-        // Peer gone, broken link, or not our turn to initiate: nothing left to judge.
-        if (!s.mesh?.entries.has(peerId) || peerRecovery.has(peerId) || !s.selfUuid || s.selfUuid >= peerId) {
-            cancelRelayUpgrade(peerId);
-            return;
-        }
-        // connPaths is written only by the 5s path poll, so this snapshot can still
-        // describe the restart that just finished (state 'connecting', type
-        // 'unknown'). Only a proven 'p2p' ends the cycle — treating "no verdict yet"
-        // as "upgrade not needed" would drop the record and hand the link a fresh
-        // 2 attempts, which is how a slow-settling restart turns into an endless
-        // renegotiation loop. Unknown waits for the next poll instead.
-        const info = connPaths.get(peerId);
-        if (info?.type === 'p2p') {
-            cancelRelayUpgrade(peerId);
-            return;
-        }
-        const relayed = info?.state === 'connected' && info.type === 'relay';
-        if (rec.attempts >= RELAY_UPGRADE_MAX_ATTEMPTS || Date.now() - rec.since >= RELAY_UPGRADE_TOTAL_MS) {
-            if (relayed) console.warn('[mesh] relay upgrade: giving up, link stays on TURN', peerId);
-            // tombstone: stay in the map so the poll doesn't re-arm a fresh cycle
-            rec.done = true;
-            return;
-        }
-        if (!relayed) {
-            // no verdict yet (restart still settling / candidates unreadable): look again
-            scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-            return;
-        }
-        rec.busy = true;
-        // restartIce resolves false (never rejects) when the pc is mid-negotiation
-        // or closed; the catch arm only guards a future signature change.
-        s.mesh.restartIce(peerId).then(
-            (sent) => {
-                rec.busy = false;
-                if (!relayUpgrades.has(peerId)) return; // cancelled while the offer was in flight
-                if (!sent) {
-                    // mid-negotiation (reverse offer in flight): retry soon, don't burn an attempt
-                    scheduleRelayUpgradeRetry(peerId, 6000);
-                    return;
-                }
-                rec.attempts += 1;
-                console.log(
-                    '[mesh] relay upgrade: ice restart sent',
-                    peerId,
-                    `${rec.attempts}/${RELAY_UPGRADE_MAX_ATTEMPTS}`
-                );
-                scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-            },
-            () => {
-                rec.busy = false;
-                if (relayUpgrades.has(peerId)) scheduleRelayUpgradeRetry(peerId, RELAY_UPGRADE_RETRY_MS);
-            }
-        );
-    }
-
-    function scheduleRelayUpgradeRetry(peerId, delay) {
-        const rec = relayUpgrades.get(peerId);
-        if (!rec) return;
-        clearTimeout(rec.timer);
-        rec.timer = setTimeout(() => relayUpgradeTick(peerId), delay);
-    }
-
-    function cancelRelayUpgrade(peerId) {
-        const rec = relayUpgrades.get(peerId);
-        if (!rec) return;
-        clearTimeout(rec.timer);
-        relayUpgrades.delete(peerId);
-    }
-
-    /** Forget every per-peer record of a departing member (all seven maps). */
+    /** Forget every per-peer records of a departing member (all seven maps). */
     function forgetPeer(peerId) {
         cancelPeerRecovery(peerId);
-        cancelRelayUpgrade(peerId);
+        relayUpgrade.cancel(peerId);
         clearConnectingBadge(peerId);
         clearTimeout(pathEarlyTimers.get(peerId));
         pathEarlyTimers.delete(peerId);

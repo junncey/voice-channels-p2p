@@ -11,9 +11,12 @@
  * Negotiation model (avoids offer glare in an audio-only mesh):
  *  - The joiner (should_create_offer=true) creates the DataChannel and sends
  *    the initial offer.
- *  - The other side answers WITHOUT local tracks, then attaches its mic after
- *    the connection reaches 'connected' — which triggers a clean reverse
- *    renegotiation offer from a stable state.
+ *  - The other side attaches its mic BEFORE answering, so an offer with an
+ *    audio m-line gets a sendrecv answer and media flows as soon as ICE
+ *    connects (attaching after 'connected' cost a full reverse-offer round
+ *    before this side became audible). A text-only joiner's DC-only offer
+ *    stays DC-only; the later voice-enable rides the standard addTrack →
+ *    negotiationneeded → reverse-offer path (replaceAudioTrack/_addLocalTracks).
  *  - Colliding offers (both sides recovering at once) break the tie with
  *    perfect-negotiation roles: the LOWER session uuid is impolite (keeps its
  *    offer), the higher rolls back and answers (see handleSessionDescription).
@@ -25,6 +28,21 @@ const CHAT_DC_LABEL = 'mirotalk_chat_channel';
 // for whatever SDP round comes naturally
 const RENEGOTIATE_RETRIES = 2;
 const RENEGOTIATE_RETRY_DELAYS = [2500, 7000];
+// budget a not-yet-open DataChannel may buffer for ONE peer — an image
+// transfer into a link whose channel never opens must not sit in memory
+// until the peer finally leaves. Frames: one full image is ~137 12KB chunks,
+// so the cap must hold at least that burst. Bytes: frame caps alone don't
+// bound memory (image chunks are ~12k chars each) — the byte budget does.
+// Exceeding either refuses the frame (see sendChat) so a multi-frame image
+// batch aborts coherently instead of half-queueing.
+const DC_QUEUE_MAX_FRAMES = 512;
+const DC_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
+// SCTP low-water mark for the image-transfer pump (see drainChat): below it
+// the channel may be fed another burst of chunks, above it the pump waits —
+// the data shares its ICE 5-tuple (and its bandwidth) with the voice packets
+const DC_BUFFER_LOW = 128 * 1024;
+const DRAIN_WAIT_MS = 60; // pump poll cadence
+const DRAIN_MAX_MS = 5000; // one wait never stalls a transfer for long
 
 /**
  * Merge Opus fmtp parameters into every opus/48000/2 fmtp line of an SDP.
@@ -64,6 +82,26 @@ export function mungeOpusFmtp(sdp, params) {
     });
 }
 
+/**
+ * Reorder audio codec capabilities so audio/red (REDundant audio, RFC 2198
+ * style — Chrome ships it as the UEP wrapper around Opus) is offered FIRST.
+ * Codec order decides what a Chrome sender actually encodes with: RED in the
+ * lead means every packet re-carries the previous frame, so a single lost
+ * packet costs nothing audible — a much stronger loss defense than inband FEC
+ * (which only softens Opus-internal frame losses). Browsers without audio/red
+ * in their capabilities get the list back untouched, and negotiation stays
+ * safe either way: if the ANSWER omits red the sender falls back to plain
+ * Opus. Exported for tests (tests/test-red-codecs.js).
+ * @param {Array} codecs RTCRtpReceiver.getCapabilities('audio').codecs
+ * @returns {Array} new array, red entries first, everything else in order
+ */
+export function redFirstCodecs(codecs) {
+    if (!Array.isArray(codecs) || !codecs.length) return codecs || [];
+    const red = codecs.filter((codec) => codec?.mimeType?.toLowerCase() === 'audio/red');
+    if (!red.length) return codecs;
+    return [...red, ...codecs.filter((codec) => codec?.mimeType?.toLowerCase() !== 'audio/red')];
+}
+
 /** Identity of an iceServers payload: URLs + credential username. REST-mode
  *  usernames are unix expiry timestamps, so a minted set always differs. */
 function iceServersStamp(iceServers) {
@@ -90,7 +128,7 @@ export class Mesh {
         this.iceServers = [];
         /** identity of the current iceServers payload (dedupes join storms) */
         this.iceStamp = '';
-        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, tracksAdded, offering, bitrateFloor, jitterTarget, renegotiateTimer } */
+        /** peerId -> { pc, dc, dcTimer, pendingIce, queue, queueBytes, tracksAdded, offering, bitrateFloor, jitterTarget, renegotiateTimer } */
         this.entries = new Map();
     }
 
@@ -117,7 +155,18 @@ export class Mesh {
     replaceAudioTrack(track, stream) {
         if (stream) this.localStream = stream;
         for (const entry of this.entries.values()) {
-            if (!entry.tracksAdded) continue; // will pick the current stream on connect
+            if (entry.pc.connectionState === 'closed') continue;
+            if (!entry.tracksAdded) {
+                // this link came up while we were text-only and voice got
+                // enabled since (the on-connect attach already ran with no
+                // stream to add) — attach NOW: addTrack fires
+                // negotiationneeded and the standard reverse-offer round
+                // carries the track to the peer. Skipping here (the old
+                // "will pick the current stream on connect") left a
+                // mid-call voice enabler transmitting to nobody.
+                this._addLocalTracks(entry);
+                continue;
+            }
             const sender = entry.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
             if (sender) sender.replaceTrack(track).catch((err) => console.error('[mesh] replaceTrack failed', err));
             else {
@@ -147,7 +196,7 @@ export class Mesh {
             iceServers: iceServers.length ? iceServers : this.iceServers,
             iceCandidatePoolSize: 2,
         });
-        const entry = { pc, dc: null, pendingIce: [], queue: [], tracksAdded: false, offering: false };
+        const entry = { pc, dc: null, pendingIce: [], queue: [], queueBytes: 0, tracksAdded: false, offering: false };
         this.entries.set(peerId, entry);
 
         pc.onicecandidate = (event) => {
@@ -167,8 +216,9 @@ export class Mesh {
         };
 
         pc.onconnectionstatechange = () => {
-            // Answer side: attach the local mic once the link is up — this fires
-            // onnegotiationneeded from a stable state and produces a reverse offer.
+            // Fallback attach: a stream that arrived after the answer (voice
+            // enabled on a link that connected while we were text-only) hooks
+            // in here — idempotent when the pre-answer attach already ran.
             if (pc.connectionState === 'connected') this._addLocalTracks(entry);
             if (this.handlers.onPeerState) this.handlers.onPeerState(peerId, pc.connectionState);
         };
@@ -177,6 +227,7 @@ export class Mesh {
             if (entry.offering || pc.signalingState !== 'stable') return;
             entry.offering = true;
             try {
+                this._preferCodecs(pc);
                 const offer = await pc.createOffer();
                 this._mungeLocalSdp(offer);
                 await pc.setLocalDescription(offer);
@@ -253,6 +304,17 @@ export class Mesh {
             }
         }
         if (session_description.type === 'offer') {
+            // attach our mic BEFORE answering: an offer that carries an audio
+            // m-line is answered sendrecv at once, so media flows the moment
+            // ICE connects — no reverse-offer round (≈ one extra signaling
+            // RTT + renegotiation settle, 1-3s) before this side is audible.
+            // A DC-only offer (text-only joiner) gains no m-line in the answer;
+            // addTrack queues its negotiationneeded until after the answer,
+            // which produces exactly that reverse offer through the normal
+            // path. The on-connect attach below remains as the idempotent
+            // fallback for streams that arrive later.
+            this._addLocalTracks(entry);
+            this._preferCodecs(pc);
             const answer = await pc.createAnswer();
             this._mungeLocalSdp(answer);
             await pc.setLocalDescription(answer);
@@ -354,6 +416,7 @@ export class Mesh {
         if (pc.connectionState === 'closed' || pc.signalingState !== 'stable') return false;
         entry.offering = true;
         try {
+            this._preferCodecs(pc);
             const offer = await pc.createOffer(offerOptions);
             this._mungeLocalSdp(offer);
             await pc.setLocalDescription(offer);
@@ -417,7 +480,7 @@ export class Mesh {
      * receiver report attributes to our stream (fractionLost, as %) — the
      * signal any send-side adaptation must react to.
      * @param {string} peerId
-     * @returns {Promise<?object>} { state, type, local, remote, rtt, inbound, outboundLoss } — null when the peer is unknown
+     * @returns {Promise<?object>} { state, type, local, remote, rtt, inbound, outboundLoss, outboundTs, outboundJitter, outbound } — null when the peer is unknown
      */
     async connPath(peerId) {
         const entry = this.entries.get(peerId);
@@ -425,7 +488,18 @@ export class Mesh {
         const pc = entry.pc;
         const state = pc.connectionState;
         if (state !== 'connected') {
-            return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: null, outboundLoss: null };
+            return {
+                state,
+                type: 'unknown',
+                local: null,
+                remote: null,
+                rtt: null,
+                inbound: null,
+                outboundLoss: null,
+                outboundTs: null,
+                outboundJitter: null,
+                outbound: null,
+            };
         }
         const stats = await pc.getStats();
         const candidates = new Map();
@@ -433,6 +507,9 @@ export class Mesh {
         let fallback = null; // …Chromium: the newest succeeded + nominated pair
         let inbound = null; // inbound audio RTP (one audio track per connection)
         let outboundLoss = null; // % of OUR stream the peer reports lost (0..1 → %)
+        let outboundTs = null; // timestamp of that receiver report (dedupe identity)
+        let outboundJitter = null; // the peer's view of OUR stream's jitter (ms)
+        let outbound = null; // OUR outbound audio RTP counters (diffed by the caller)
         stats.forEach((report) => {
             if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
                 candidates.set(report.id, report);
@@ -457,6 +534,15 @@ export class Mesh {
                         concealedSamples: typeof report.concealedSamples === 'number' ? report.concealedSamples : null,
                         totalSamplesReceived:
                             typeof report.totalSamplesReceived === 'number' ? report.totalSamplesReceived : null,
+                        // cumulative playout-buffer counters — diffed into the
+                        // achieved delay that CLOSES the jitter-boost loop (did the
+                        // raised target actually land?)
+                        jitterBufferDelay:
+                            typeof report.jitterBufferDelay === 'number' ? report.jitterBufferDelay : null,
+                        jitterBufferEmittedCount:
+                            typeof report.jitterBufferEmittedCount === 'number'
+                                ? report.jitterBufferEmittedCount
+                                : null,
                     };
                 }
                 return;
@@ -467,6 +553,29 @@ export class Mesh {
                 // caller must treat it as neither good nor bad
                 if (typeof report.fractionLost === 'number') {
                     outboundLoss = Math.round(report.fractionLost * 1000) / 10;
+                    // report identity: RRs repeat across path polls (audio's
+                    // reporting interval can exceed the 5s cadence) — a stale
+                    // read must not double-feed the caller's loss streaks
+                    outboundTs = typeof report.timestamp === 'number' ? report.timestamp : null;
+                }
+                // the peer's view of our stream's jitter — the outbound twin
+                // of the inbound signal the jitter boost reacts to
+                if (typeof report.jitter === 'number') outboundJitter = Math.round(report.jitter * 1000);
+                return;
+            }
+            if (report.type === 'outbound-rtp') {
+                // OUR encoder's actual output (same audio-only first-report
+                // fallback as inbound): the caller diffs bytesSent into the
+                // real send bitrate, and targetBitrate says whether an
+                // adaptive floor (setParameters) actually landed — the one
+                // readback the loss adaptation never had
+                const kind = report.kind || report.mediaType;
+                if (!kind || kind === 'audio') {
+                    outbound = {
+                        bytesSent: report.bytesSent ?? 0,
+                        timestamp: report.timestamp ?? Date.now(),
+                        targetBitrate: typeof report.targetBitrate === 'number' ? report.targetBitrate : null,
+                    };
                 }
                 return;
             }
@@ -486,14 +595,48 @@ export class Mesh {
         const inboundOut = inbound ?? null;
         if (!pair) pair = fallback;
         if (!pair)
-            return { state, type: 'unknown', local: null, remote: null, rtt: null, inbound: inboundOut, outboundLoss };
+            return {
+                state,
+                type: 'unknown',
+                local: null,
+                remote: null,
+                rtt: null,
+                inbound: inboundOut,
+                outboundLoss,
+                outboundTs,
+                outboundJitter,
+                outbound,
+            };
         const local = candidates.get(pair.localCandidateId)?.candidateType ?? null;
         const remote = candidates.get(pair.remoteCandidateId)?.candidateType ?? null;
         const rtt = typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null;
         // without both candidate reports the path is unproven — never claim 'p2p'
-        if (!local || !remote) return { state, type: 'unknown', local, remote, rtt, inbound: inboundOut, outboundLoss };
+        if (!local || !remote)
+            return {
+                state,
+                type: 'unknown',
+                local,
+                remote,
+                rtt,
+                inbound: inboundOut,
+                outboundLoss,
+                outboundTs,
+                outboundJitter,
+                outbound,
+            };
         const type = local === 'relay' || remote === 'relay' ? 'relay' : 'p2p';
-        return { state, type, local, remote, rtt, inbound: inboundOut, outboundLoss };
+        return {
+            state,
+            type,
+            local,
+            remote,
+            rtt,
+            inbound: inboundOut,
+            outboundLoss,
+            outboundTs,
+            outboundJitter,
+            outbound,
+        };
     }
 
     removePeer(peerId) {
@@ -512,13 +655,14 @@ export class Mesh {
     /**
      * Broadcast a JSON payload over every chat DataChannel (queued until open).
      * @throws {Error} 'dc-send-failed' when an open channel refused the frame
-     *         (send buffer full / channel closing) — callers abort multi-frame
-     *         transfers instead of silently losing the remaining frames.
+     *         (send buffer full / channel closing) OR a connecting channel's
+     *         queue is over budget — callers abort multi-frame transfers
+     *         instead of silently losing the remaining frames.
      */
     sendChat(payload) {
         const raw = JSON.stringify(payload);
         let failed = false;
-        for (const entry of this.entries.values()) {
+        for (const [peerId, entry] of this.entries) {
             if (!entry.dc) continue;
             if (entry.dc.readyState === 'open') {
                 try {
@@ -526,7 +670,21 @@ export class Mesh {
                 } catch {
                     failed = true;
                 }
-            } else if (entry.dc.readyState === 'connecting') entry.queue.push(raw);
+            } else if (
+                entry.dc.readyState === 'connecting' &&
+                entry.queue.length < DC_QUEUE_MAX_FRAMES &&
+                entry.queueBytes + raw.length <= DC_QUEUE_MAX_BYTES
+            ) {
+                entry.queue.push(raw);
+                entry.queueBytes += raw.length;
+            } else if (entry.dc.readyState === 'connecting') {
+                // channel that never opens (zombie link): refuse instead of
+                // buffering without bound — chat text has the server copy, but
+                // a half-queued image batch would render as a corrupt transfer,
+                // so the shared abort path (the throw below) is the honest move
+                console.warn('[mesh] dc send queue over budget, refusing frame', peerId);
+                failed = true;
+            }
         }
         if (failed) throw new Error('dc-send-failed');
     }
@@ -534,6 +692,26 @@ export class Mesh {
     /** Close all peer connections but keep the instance usable (reconnect scenario). */
     clear() {
         for (const peerId of [...this.entries.keys()]) this.removePeer(peerId);
+    }
+
+    /**
+     * Wait until every OPEN chat channel's SCTP buffer is below the low-water
+     * mark (bounded — a stuck buffer releases the pump, sendChat's throw path
+     * is the real failure mode). The image-transfer pump calls this between
+     * chunk bursts: an unpaced ~1.6MB dump competes with the voice packets
+     * sharing the same transport and audibly glitches the call on weak links.
+     * @returns {Promise<void>}
+     */
+    async drainChat() {
+        const deadline = Date.now() + DRAIN_MAX_MS;
+        for (;;) {
+            let busy = false;
+            for (const entry of this.entries.values()) {
+                if (entry.dc?.readyState === 'open' && entry.dc.bufferedAmount > DC_BUFFER_LOW) busy = true;
+            }
+            if (!busy || Date.now() >= deadline) return;
+            await new Promise((resolve) => setTimeout(resolve, DRAIN_WAIT_MS));
+        }
     }
 
     close() {
@@ -555,6 +733,62 @@ export class Mesh {
     _mungeLocalSdp(desc) {
         const fmtp = this.getOpusFmtp?.();
         if (fmtp && desc?.sdp) desc.sdp = mungeOpusFmtp(desc.sdp, fmtp);
+    }
+
+    /**
+     * Codec preference for the audio transceivers of a connection, applied
+     * before every offer/answer this side generates: speech mode (fmtp dict
+     * carries usedtx=1 — the same signal the loss adaptation gates on) puts
+     * audio/red first for packet-level redundancy; every other mode restores
+     * the browser's default order so music/share bandwidth isn't doubled.
+     * Re-running at each SDP round keeps a mid-call mode toggle honest — the
+     * renegotiation it already triggers reorders codecs both ways. Browsers
+     * without transceiver.setCodecPreferences or without audio/red in their
+     * capabilities are silently left on defaults.
+     */
+    _preferCodecs(pc) {
+        for (const transceiver of pc.getTransceivers()) {
+            const kind = transceiver.sender?.track?.kind || transceiver.receiver?.track?.kind;
+            if (kind !== 'audio' || typeof transceiver.setCodecPreferences !== 'function') continue;
+            try {
+                const codecs = RTCRtpReceiver?.getCapabilities?.('audio')?.codecs;
+                if (!Array.isArray(codecs) || !codecs.length) continue;
+                if (this.getOpusFmtp?.()?.usedtx === 1) {
+                    const red = redFirstCodecs(codecs);
+                    if (red !== codecs) transceiver.setCodecPreferences(red); // no red → leave untouched
+                } else {
+                    // restore the browser's default order by handing back the
+                    // UNTOUCHED capability list (it IS that order) — the spec's
+                    // undefined/empty-list resets are newer surface some engines
+                    // reject, and a swallowed refusal here would strand a
+                    // speech→music toggle on RED's doubled bandwidth
+                    transceiver.setCodecPreferences(codecs);
+                }
+            } catch {
+                /* invalid preference (apt chain the browser rejects): defaults stay */
+            }
+        }
+    }
+
+    /** Whether OUR negotiated audio section leads with audio/red — i.e. the
+     *  encoder actually wraps packets in redundancy (Chrome lists red in the
+     *  m-line by default; only when it is the FIRST payload does the sender
+     *  use it. getStats' outbound codecId misleadingly reports the wrapped
+     *  opus — bytes-per-packet ~2× the cap is the wire-level tell). */
+    redNegotiated(peerId) {
+        const sdp = this.entries.get(peerId)?.pc.localDescription?.sdp;
+        if (typeof sdp !== 'string') return null;
+        let firstPayload = null; // first payload type of the audio section
+        for (const line of sdp.split(/\r?\n/)) {
+            if (line.startsWith('m=audio')) {
+                firstPayload = line.split(' ')[3] ?? null;
+            } else if (line.startsWith('m=')) {
+                if (firstPayload !== null) break; // audio section ended without a red rtpmap
+            } else if (firstPayload !== null && new RegExp(`^a=rtpmap:${firstPayload} red/`).test(line)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -639,6 +873,7 @@ export class Mesh {
         entry.dc = dc;
         dc.onopen = () => {
             const queued = entry.queue.splice(0);
+            entry.queueBytes = 0;
             for (const item of queued) {
                 if (dc.readyState === 'open') dc.send(item);
             }

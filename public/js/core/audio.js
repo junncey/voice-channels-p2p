@@ -216,8 +216,17 @@ export class AudioHub {
             this.mic = { raw: rawStream, src, gain, limiter, dest, stream: dest.stream };
             // a share captured under a previous mic pipeline (or before one
             // existed) rides the rebuilt output — re-hook it here, into the
-            // SAME limiter as the mic (see attachShare for why)
-            if (this.share) this.share.src.connect(this.share.gain).connect(limiter);
+            // SAME limiter as the mic (see attachShare for why). Its gain
+            // node disconnects first: without that every rebuild leaves an
+            // orphan edge to the dead limiter on the graph
+            if (this.share) {
+                try {
+                    this.share.gain.disconnect();
+                } catch {
+                    /* no prior edge yet */
+                }
+                this.share.src.connect(this.share.gain).connect(limiter);
+            }
             return dest.stream;
         } catch {
             this.mic = null;

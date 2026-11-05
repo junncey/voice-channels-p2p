@@ -80,8 +80,12 @@ async function compressToJpeg(dataUrl) {
  * Split a data URL into protocol frames and push them through `send`
  * (typically Mesh.sendChat, one broadcast per frame). An optional `batch`
  * id ties the transfer to a merged text+images bubble on the receiver.
+ * The optional async `ready` hook is the backpressure pump: awaited every
+ * few chunks (Mesh.drainChat) so an image burst yields to the SCTP buffers —
+ * the data shares its transport (and its bandwidth) with the voice packets,
+ * and an unpaced dump audibly glitches the call on weak links.
  */
-export function sendImageData({ send, from, mime, dataUrl, batch = '' }) {
+export async function sendImageData({ send, from, mime, dataUrl, batch = '', ready }) {
     const id = crypto.randomUUID();
     const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
     const total = Math.ceil(base64.length / CHUNK_CHARS);
@@ -89,6 +93,10 @@ export function sendImageData({ send, from, mime, dataUrl, batch = '' }) {
     send({ type: 'img-start', id, from, mime, size: base64.length, total, batch: tag });
     for (let i = 0; i < total; i++) {
         send({ type: 'img-chunk', id, i, d: base64.substr(i * CHUNK_CHARS, CHUNK_CHARS) });
+        // pump: every 4 chunks (~48KB) let the buffers drain below the mesh's
+        // low-water mark; a hook that resolves instantly (no congestion, or no
+        // mesh support) keeps the loop effectively synchronous
+        if (typeof ready === 'function' && (i & 3) === 3) await ready();
     }
     send({ type: 'img-end', id, from, batch: tag });
 }
@@ -98,13 +106,20 @@ export function sendImageData({ send, from, mime, dataUrl, batch = '' }) {
  * DOM: mime whitelist, size caps, chunk bounds — a malicious peer can at worst
  * waste bandwidth up to the cap, never inject markup.
  *
+ * The per-transfer timeout is a NO-PROGRESS window: every previously-unseen
+ * chunk re-arms it, so a slow-but-alive transfer survives (a max-size image on
+ * a ~500kbps link takes well over the old fixed 20s) while a stalled one still
+ * fails promptly. Duplicate chunk replays don't re-arm — a malicious resend
+ * loop can't keep a dead transfer alive forever.
+ *
  * @param {object} options
  * @param {function({from:string, dataUrl:string, batch:string, peerId:string}):void} options.onDone
  *        `peerId` is the DataChannel peer the frames arrived from — trust it
  *        over the self-declared `from` field when picking a display name.
  * @param {function(reason:string):void} [options.onFail]
+ * @param {number} [options.stallMs] no-progress timeout (default 20s)
  */
-export function createImageReceiver({ onDone, onFail }) {
+export function createImageReceiver({ onDone, onFail, stallMs = 20000 }) {
     /** id -> { from, mime, size, total, parts, got, timer } */
     const incoming = new Map();
 
@@ -136,7 +151,7 @@ export function createImageReceiver({ onDone, onFail }) {
                 batch: typeof msg.batch === 'string' && msg.batch.length <= 64 ? msg.batch : '',
                 parts: new Array(total),
                 got: 0,
-                timer: setTimeout(() => fail(id, 'timeout'), 20000),
+                timer: setTimeout(() => fail(id, 'timeout'), stallMs),
             });
             return;
         }
@@ -151,6 +166,8 @@ export function createImageReceiver({ onDone, onFail }) {
             if (!entry.parts[i]) {
                 entry.parts[i] = d;
                 entry.got += d.length;
+                clearTimeout(entry.timer); // progress: restart the no-progress window
+                entry.timer = setTimeout(() => fail(msg.id, 'timeout'), stallMs);
                 if (entry.got > entry.size) fail(msg.id, 'overflow');
             }
             return;

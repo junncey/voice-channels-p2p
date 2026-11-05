@@ -47,6 +47,52 @@ export function createSocketEvents({
     const DISCONNECT_TOAST_MS = 3000;
     let disconnectToastTimer = null;
 
+    // join acknowledgment: the join event has NO built-in ack, and the server
+    // drops a join without a word in exactly one place (the auth-failure
+    // cooldown — see signaling.js joinThrottled). Without a timeout a silently
+    // dropped join leaves the page waiting for a serverInfo that never comes,
+    // which is the one dead-end the recovery ladder cannot see. serverInfo
+    // clears the timer; a timeout re-sends (bounded), then says so.
+    const JOIN_ACK_MS = 10000;
+    const JOIN_ACK_MAX_RETRIES = 3;
+    let joinAckTimer = null;
+    let joinAckRetries = 0;
+    let joinThrottleUntil = 0; // epoch ms — server-told cooldown, join re-sends wait it out
+
+    function clearJoinAck() {
+        clearTimeout(joinAckTimer);
+        joinAckTimer = null;
+    }
+
+    function armJoinAck() {
+        clearJoinAck();
+        joinAckTimer = setTimeout(onJoinAckTimeout, JOIN_ACK_MS);
+    }
+
+    function onJoinAckTimeout() {
+        joinAckTimer = null;
+        if (s.joined || !s.socket) return;
+        if (!s.socket.connected) {
+            armJoinAck(); // offline: the reconnect handler re-emits join for us
+            return;
+        }
+        const waitLeft = joinThrottleUntil - Date.now();
+        if (waitLeft > 0) {
+            joinAckTimer = setTimeout(onJoinAckTimeout, waitLeft + 500); // server-told cooldown rules
+            return;
+        }
+        if (joinAckRetries < JOIN_ACK_MAX_RETRIES) {
+            joinAckRetries += 1;
+            console.warn('[socket] join not acknowledged, re-sending', joinAckRetries);
+            emitJoin();
+            armJoinAck();
+            return;
+        }
+        joinAckRetries = 0; // a later reconnect cycle gets a fresh budget
+        toast(t('channel.errors.joinTimeout'), 'warn');
+        armJoinAck(); // keep watching — the next serverInfo ends this quietly
+    }
+
     // TURN REST credentials expire (the username IS the unix expiry timestamp)
     // but the list is baked into each RTCPeerConnection at addPeer time — a
     // session that outlives its credentials would send every recovery
@@ -183,6 +229,7 @@ export function createSocketEvents({
             channel_password: s.channelPassword || undefined,
             peer_audio: x.onAir(),
         });
+        armJoinAck();
     }
 
     function peerIdSafe(id) {
@@ -200,8 +247,11 @@ export function createSocketEvents({
         });
 
         socket.on('serverInfo', (cfg) => {
-            // a successful (re)join resolves any pending self-reconnect
+            // a successful (re)join resolves any pending self-reconnect and
+            // any pending join-ack timeout
             rec.markSessionRestored();
+            clearJoinAck();
+            joinAckRetries = 0;
             if (!s.joined) {
                 s.joined = true;
                 rec.startRecoveryScan();
@@ -463,8 +513,19 @@ export function createSocketEvents({
         socket.on('joinError', () => {
             // server-side fault mid-join (the handler logs the details) — the
             // session state was rolled back there, so start over cleanly
+            clearJoinAck();
             x.showJoinError(t('channel.errors.joinFailed'));
             x.setOverlayBusy(false);
+        });
+        socket.on('joinThrottled', ({ retryAfter } = {}) => {
+            // the auth-failure cooldown dropped this join (shared NATs trip it
+            // for innocent users too) — told instead of silent, so hold the
+            // re-send loop to the exact second and say why the join is stuck
+            const seconds = Math.max(1, Math.min(600, Number(retryAfter) || 60));
+            joinThrottleUntil = Date.now() + seconds * 1000;
+            clearJoinAck();
+            joinAckTimer = setTimeout(onJoinAckTimeout, seconds * 1000 + 500);
+            toast(t('channel.errors.joinThrottled', { n: seconds }), 'warn');
         });
 
         socket.on('disconnect', (reason) => {
@@ -499,5 +560,6 @@ export function createSocketEvents({
             clearTimeout(iceApplyRetryTimer);
             iceApplyRetryTimer = null;
         },
+        stopJoinAck: clearJoinAck,
     };
 }
