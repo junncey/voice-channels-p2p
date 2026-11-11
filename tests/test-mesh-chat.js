@@ -274,4 +274,32 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             should(receiver.jitterBufferTarget).be.null();
         });
     });
+
+    describe('legacy playoutDelayHint conversion', () => {
+        /** Entry whose receiver predates jitterBufferTarget (pre-M110
+         *  Chromium webviews) — only the deprecated hint exists there. */
+        function legacyMesh() {
+            const mesh = bareMesh();
+            const receiver = { track: { kind: 'audio' }, playoutDelayHint: null };
+            mesh.entries.set('p1', { pc: { getReceivers: () => [receiver] }, jitterTarget: null });
+            return { mesh, receiver };
+        }
+
+        it('should convert milliseconds to SECONDS for the legacy hint', () => {
+            const { mesh, receiver } = legacyMesh();
+            mesh.setPeerJitterTarget('p1', 60);
+            // the hint is clamped to [0,10] SECONDS — an unconverted 60 pins
+            // playout at the ceiling instead of asking for 60ms
+            receiver.playoutDelayHint.should.equal(0.06);
+        });
+
+        it('should keep null as the adaptive default (not zero)', () => {
+            const { mesh, receiver } = legacyMesh();
+            mesh.setPeerJitterTarget('p1', 120);
+            mesh.setPeerJitterTarget('p1', null);
+            // null / 1000 === 0 would PIN the minimum delay — null must
+            // hand control back to the browser's adaptive buffer
+            should(receiver.playoutDelayHint).be.null();
+        });
+    });
 });

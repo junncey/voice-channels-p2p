@@ -176,6 +176,14 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             pttActive = false;
             applyMicState();
         });
+        // focus lost mid-press (Alt+Tab, an OS dialog, a second monitor): the
+        // keyup never arrives on a blurred window — release PTT instead of
+        // transmitting into the void until the next key round-trip
+        window.addEventListener('blur', () => {
+            if (!pttActive) return;
+            pttActive = false;
+            applyMicState();
+        });
     }
 
     // ----- touch push-to-talk: a hold-to-talk button for devices with no keyboard -----

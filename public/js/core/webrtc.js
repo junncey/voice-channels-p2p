@@ -879,11 +879,15 @@ export class Mesh {
         }
     }
 
-    /** Push a playout-buffer target onto ONE receiver — feature-detected. */
+    /** Push a playout-buffer target onto ONE receiver — feature-detected.
+     *  The standard property takes MILLISECONDS, the legacy Chromium hint it
+     *  deprecates took SECONDS (clamped [0,10] — an unconverted 60 pinned the
+     *  playout at the clamp ceiling on pre-jitterBufferTarget webviews), and
+     *  null means "browser adaptive default" on both, not zero. */
     _applyJitterTarget(receiver, ms) {
         try {
             if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms;
-            else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms;
+            else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = ms === null ? null : ms / 1000;
         } catch {
             /* refusal keeps the browser default for this receiver */
         }
