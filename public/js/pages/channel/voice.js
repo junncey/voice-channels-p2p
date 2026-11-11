@@ -509,6 +509,25 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     }
 
     /**
+     * Persistent gesture hook: resume a mid-session-suspended AudioContext
+     * and retry autoplay-refused fallback elements. A { once: true } pair
+     * at join time gets consumed by the first click and leaves a context
+     * that suspends LATER (iOS call interruption, OS audio-session loss)
+     * with no way back — playback would stay parked on the degraded
+     * <audio> fallback and the mic gain pipeline would stay off. While the
+     * context runs each gesture costs one state check and a usually-empty
+     * retry set.
+     */
+    function bindResumeOnGesture() {
+        const resume = () => {
+            if (s.hub?.ctx?.state === 'suspended') s.hub.ctx.resume().catch(() => {});
+            retryPendingPlays();
+        };
+        window.addEventListener('pointerdown', resume);
+        window.addEventListener('keydown', resume);
+    }
+
+    /**
      * Re-run play() on fallback elements autoplay policy had refused (no user
      * gesture yet — auto-join on load, or Firefox where the element path is
      * permanent). Called from the first pointerdown/keydown and context state
@@ -604,6 +623,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         webAudioPlayback,
         onCtxStateChange,
         retryPendingPlays,
+        bindResumeOnGesture,
         removeAudioEl,
         attachRemoteAudio,
         reapplyPeerVolume,

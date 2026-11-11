@@ -575,7 +575,9 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // restarts forever; ICE consent eventually failing hands it to the ladder.
     const ZOMBIE_POLLS = 6; // ~30s at the 5s poll cadence
     const ZOMBIE_COOLDOWN_MS = 60000;
-    // peerId -> { last, loss, jitter, kbps, conceal, jbDelay, outLoss, outJitter, outKbps, outLast, outTarget, bad, good, unstable, outTs, obad, ogood, adapted, probing, floorBps, floorWarned, rbad, osev, restartAt, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt }
+    // restart refused mid-negotiation (reverse offer in flight) → retry once after this
+    const POKE_RETRY_MS = 6000;
+    // peerId -> { last, loss, jitter, kbps, conceal, jbDelay, outLoss, outJitter, outKbps, outLast, outTarget, bad, good, unstable, outTs, obad, ogood, adapted, probing, floorBps, floorWarned, rbad, osev, restartAt, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt, pokeTimer }
     const lossStreaks = new Map();
 
     function notePeerLoss(peerId, info) {
@@ -610,6 +612,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             jbLevel: 0,
             zombie: 0,
             zombieAt: 0,
+            pokeTimer: null,
         };
         const inbound = info?.inbound;
         if (inbound) {
@@ -735,10 +738,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         rec.zombie = 0;
         rec.zombieAt = Date.now();
         // same arbitration as the restart rounds: the lower session id acts
-        if (s.selfUuid && s.selfUuid < peerId) {
-            console.warn('[mesh] zombie link: connected but no inbound RTP, restarting ICE', peerId);
-            s.mesh?.restartIce(peerId).catch(() => {});
-        }
+        pokeIce(peerId, rec, '[mesh] zombie link: connected but no inbound RTP, restarting ICE');
     }
 
     /**
@@ -762,14 +762,27 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         rec.osev = 0;
         rec.restartAt = now;
         // same arbitration as the restart rounds: the lower session id acts
-        if (s.selfUuid && s.selfUuid < peerId) {
-            console.warn(
-                '[mesh] quality restart: connected but path is unusable, re-punching',
-                peerId,
-                inSevere ? 'inbound loss' : 'outbound black hole'
-            );
-            s.mesh?.restartIce(peerId).catch(() => {});
-        }
+        pokeIce(
+            peerId,
+            rec,
+            `[mesh] quality restart: path unusable, re-punching (${inSevere ? 'inbound loss' : 'outbound black hole'})`
+        );
+    }
+
+    /** iceRestart with ONE deferred retry: these engines fire on 30-90s
+     *  cooldowns, and a restart refused mid-negotiation burns one for nothing. */
+    function pokeIce(peerId, rec, warnMsg) {
+        if (!s.selfUuid || s.selfUuid >= peerId) return;
+        console.warn(warnMsg, peerId);
+        Promise.resolve(s.mesh?.restartIce(peerId).catch(() => false)).then((sent) => {
+            if (sent || rec.pokeTimer) return;
+            rec.pokeTimer = setTimeout(() => {
+                rec.pokeTimer = null;
+                if (s.joined && s.mesh?.entries.has(peerId) && !peerRecovery.has(peerId)) {
+                    s.mesh.restartIce(peerId).catch(() => {});
+                }
+            }, POKE_RETRY_MS);
+        });
     }
 
     /**
@@ -922,6 +935,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         clearTimeout(pathEarlyTimers.get(peerId));
         pathEarlyTimers.delete(peerId);
         connPaths.delete(peerId);
+        const quality = lossStreaks.get(peerId);
+        if (quality?.pokeTimer) clearTimeout(quality.pokeTimer);
         lossStreaks.delete(peerId);
         presenceProbed.delete(peerId);
         flapHeals.delete(peerId);

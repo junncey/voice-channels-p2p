@@ -666,6 +666,9 @@ function bindUi() {
     window.addEventListener('vc:unload-intent', () => {
         intentionalUnload = true;
     });
+    // resume a mid-session-suspended AudioContext on any later gesture
+    // (iOS call interruption, OS audio-session loss) — owned by voice.js
+    voice.bindResumeOnGesture();
     // Native "leave site?" confirmation while connected to the channel —
     // browsers render their own localized text, returnValue is the legacy
     // Chrome/Edge toggle. No cleanup here: the dialog is cancellable and the
@@ -763,14 +766,9 @@ async function joinInner({ textOnly: asTextOnly }) {
     if (hub.ctx) {
         // the context may start suspended (autoplay policy — e.g. auto-join on
         // page load with no user gesture): peers play through <audio> elements
-        // until the first interaction resumes it, then upgrade to the gain path
+        // until an interaction resumes it, then upgrade to the gain path (the
+        // gesture hook is bound once per page — voice.bindResumeOnGesture)
         hub.ctx.addEventListener('statechange', voice.onCtxStateChange);
-        const resume = () => {
-            hub?.ctx?.resume().catch(() => {});
-            voice.retryPendingPlays(); // autoplay-refused fallback elements get their gesture now
-        };
-        window.addEventListener('pointerdown', resume, { once: true });
-        window.addEventListener('keydown', resume, { once: true });
     }
     voice.syncMicPipeline(); // may swap localStream to the gain-processed stream
     if (localStream && hub.ctx) hub.watch('self', localStream, localLevelCb);

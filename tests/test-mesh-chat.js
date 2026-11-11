@@ -4,7 +4,8 @@
 // Browser-module unit tests for the Mesh pieces that are pure bookkeeping:
 // the DataChannel send-queue budget (frames + bytes), the late-voice attach
 // (replaceAudioTrack on a link that connected while we were text-only), the
-// connPath stats readback (incl. receiver-report identity) and drainChat.
+// connPath stats readback (incl. receiver-report identity), the adaptive-state
+// restamp after SDP rounds, and drainChat.
 // Peer "connections" are plain objects — no RTCPeerConnection needed.
 
 require('should');
@@ -199,6 +200,78 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             should(info.outboundTs).be.null();
             should(info.outboundJitter).be.null();
             should(info.outbound).be.null();
+        });
+    });
+
+    describe('adaptive state restamp after SDP rounds', () => {
+        /** Mesh with an fmtp cap, plus an entry whose pc records every
+         *  setParameters call and exposes one audio sender/receiver pair. */
+        function adaptiveMesh({ bitrateFloor = null, jitterTarget = null } = {}) {
+            const mesh = new Mesh({
+                signaling: { emit() {} },
+                handlers: {},
+                getOpusFmtp: () => ({ maxaveragebitrate: 64000, usedtx: 1 }),
+            });
+            const params = { encodings: [{}] };
+            const receiver = { track: { kind: 'audio' }, jitterBufferTarget: null };
+            const calls = { setParameters: 0 };
+            const pc = {
+                signalingState: 'stable',
+                connectionState: 'connected',
+                localDescription: { type: 'answer', sdp: 'v=0' },
+                setRemoteDescription: async () => {},
+                setLocalDescription: async () => {},
+                createAnswer: async () => ({ type: 'answer', sdp: 'v=0' }),
+                createOffer: async () => ({ type: 'offer', sdp: 'v=0' }),
+                getTransceivers: () => [],
+                getSenders: () => [
+                    {
+                        track: { kind: 'audio' },
+                        getParameters: () => params,
+                        setParameters: (p) => {
+                            calls.setParameters += 1;
+                            should(p.encodings[0].maxBitrate).be.a.Number();
+                            return Promise.resolve();
+                        },
+                    },
+                ],
+                getReceivers: () => [receiver],
+            };
+            const entry = {
+                pc,
+                dc: null,
+                pendingIce: [],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: true,
+                offering: false,
+                bitrateFloor,
+                jitterTarget,
+            };
+            mesh.entries.set('p1', entry);
+            return { mesh, entry, params, receiver, calls };
+        }
+
+        it('should re-apply the fmtp cap and jitter target after ANSWERING a re-offer', async () => {
+            const { mesh, params, receiver } = adaptiveMesh({ jitterTarget: 80 });
+            await mesh._applySessionDescription('p1', mesh.entries.get('p1'), { type: 'offer', sdp: 'v=0' });
+            // an SDP round may drop sender encodings / receiver buffer hints —
+            // the restamp puts the adaptive engines' tuning back on the link
+            params.encodings[0].maxBitrate.should.equal(64000);
+            receiver.jitterBufferTarget.should.equal(80);
+        });
+
+        it('should re-apply the LOSS-DRIVEN FLOOR (not the cap) after our own offer', async () => {
+            const { mesh, params } = adaptiveMesh({ bitrateFloor: 32000, jitterTarget: 120 });
+            const sent = await mesh.renegotiate('p1');
+            sent.should.be.true();
+            params.encodings[0].maxBitrate.should.equal(32000); // floor beats the fmtp cap
+        });
+
+        it('should leave receivers untouched when no jitter target is in force', async () => {
+            const { mesh, receiver } = adaptiveMesh();
+            await mesh._applySessionDescription('p1', mesh.entries.get('p1'), { type: 'answer', sdp: 'v=0' });
+            should(receiver.jitterBufferTarget).be.null();
         });
     });
 });

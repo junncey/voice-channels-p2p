@@ -320,6 +320,7 @@ export class Mesh {
             await pc.setLocalDescription(answer);
             this.signaling.emit('relaySDP', { peer_id, session_description: pc.localDescription });
         }
+        this._restampAdaptiveState(entry);
     }
 
     /**
@@ -422,6 +423,7 @@ export class Mesh {
             await pc.setLocalDescription(offer);
             this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
             if (offerOptions.iceRestart) console.log('[mesh] ice restart offer sent', peerId);
+            this._restampAdaptiveState(entry);
             return true;
         } catch (err) {
             console.error('[mesh] offer failed', peerId, err);
@@ -856,6 +858,25 @@ export class Mesh {
             this._applyJitterTarget(receiver, ms);
         }
         entry.jitterTarget = ms;
+    }
+
+    /**
+     * Re-stamp the adaptive link state (send-bitrate cap/floor + jitter-buffer
+     * target) after every SDP round: a negotiation that rewrites the audio
+     * section can drop sender encoding params and receiver buffer hints, and
+     * this app generates plenty of renegotiations an otherwise healthy link
+     * would never see (recovery restarts, relay re-punches, mode switches) —
+     * each one silently resetting a link the adaptive engines had already
+     * tuned back to browser defaults. rebuildPeer carries the state across a
+     * PC swap; this is the same insurance for the plain re-offer paths.
+     */
+    _restampAdaptiveState(entry) {
+        this._applySendBitrate(entry);
+        if (entry.jitterTarget === null || entry.jitterTarget === undefined) return;
+        for (const receiver of entry.pc.getReceivers()) {
+            if (receiver.track?.kind !== 'audio') continue;
+            this._applyJitterTarget(receiver, entry.jitterTarget);
+        }
     }
 
     /** Push a playout-buffer target onto ONE receiver — feature-detected. */
