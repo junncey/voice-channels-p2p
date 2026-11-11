@@ -1,8 +1,8 @@
 'use strict';
 
 // npx mocha test-backup.js
-// tar writer structure checks (the integration suite covers the HTTP path;
-// here we verify the archive layout arithmetic a tar reader depends on).
+// tar 写入器结构检查（集成测试覆盖 HTTP 路径；这里验证 tar 读取器
+// 所依赖的归档布局算术）。
 
 require('should');
 const { execFileSync } = require('child_process');
@@ -19,20 +19,20 @@ describe('test-backup (tar writer)', () => {
         ];
         const tar = tarFiles(files);
 
-        // header(512) + data(16 padded to 512) + header(512) + data(1000 padded to 1024) + end marker(1024)
+        // header(512) + data(16 补齐到 512) + header(512) + data(1000 补齐到 1024) + 结束标记(1024)
         tar.length.should.equal(512 + 512 + 512 + 1024 + 1024);
 
-        // magic at offset 257: 'ustar\0' + version '00'
+        // 偏移 257 处的 magic：'ustar\0' + 版本 '00'
         tar.slice(257, 265)
             .toString()
             .should.equal('ustar\0' + '00');
 
-        // stored size field (offset 124, 12 bytes octal + NUL) — payload is 15 bytes
+        // 存储的 size 字段（偏移 124，12 字节八进制 + NUL）——payload 是 15 字节
         const sizeField = tar.slice(124, 136).toString().replace(/\0.*$/, '').trim();
         parseInt(sizeField, 8).should.equal(15);
 
-        // checksum: recompute it the way the writer does (field blanked to
-        // spaces) — must match the stored value exactly
+        // checksum：按写入器的方式重算（该字段先全部填空格）——
+        // 必须与存储值完全一致
         const stored = parseInt(tar.slice(148, 156).toString().replace(/\0.*$/, '').trim(), 8);
         const probe = Buffer.from(tar.slice(0, 512));
         probe.fill(0x20, 148, 156);
@@ -50,7 +50,7 @@ describe('test-backup (tar writer)', () => {
                 .toString()
                 .trim();
         } catch {
-            this.skip(); // no tar on this machine — structure checks above still ran
+            this.skip(); // 本机没有 tar——上面的结构检查仍然执行过
             return;
         }
         list.should.equal('probe.txt');
@@ -60,7 +60,7 @@ describe('test-backup (tar writer)', () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-tar-'));
         try {
             const diskFile = path.join(dir, 'on-disk.bin');
-            // size deliberately unaligned with the 512 block to exercise padding
+            // 故意取不与 512 块对齐的尺寸，以触发补齐逻辑
             fs.writeFileSync(diskFile, Buffer.from('y'.repeat(1300)));
 
             const entries = [
@@ -98,7 +98,7 @@ describe('test-backup (tar reader)', () => {
 
     it('should reject archives with a corrupted checksum', async () => {
         const tar = tarFiles([{ name: 'x.txt', data: Buffer.from('hello') }]);
-        tar[100] ^= 0xff; // flip a byte inside the header
+        tar[100] ^= 0xff; // 翻转 header 内部的一个字节
         await readTar(tar).should.be.rejectedWith(/checksum/);
     });
 

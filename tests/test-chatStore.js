@@ -39,7 +39,7 @@ describe('test-chatStore', () => {
             history.should.have.length(2);
             history[0].name.should.equal('alice');
             history[0].text.should.equal('hello');
-            should.equal(history[0].imgs, undefined); // text-only rows stay compact
+            should.equal(history[0].imgs, undefined); // 纯文字行保持紧凑
             history[1].text.should.equal('hi');
             history[1].imgs.should.have.length(2);
             history[1].imgs[0].should.startWith('data:image/png;base64,b1=');
@@ -54,7 +54,7 @@ describe('test-chatStore', () => {
 
             should.equal(store.append('room1', { name: 'a', text: '' }), null);
             should.equal(store.append('room1', { name: 'a', text: '   ' }), null);
-            // a bogus image payload (not an array) is dropped, the text still lands
+            // 非法图片负载（非数组）被丢弃，文字照常入库
             const noImages = store.append('room1', { name: 'a', text: 'ok', imgs: 99 });
             noImages.should.be.an.Object();
             should.equal(noImages.imgs, undefined);
@@ -70,8 +70,8 @@ describe('test-chatStore', () => {
 
         it('should keep only whitelisted, size-capped image data URLs', () => {
             store = newStore('images');
-            // of the five entries only the first is valid (wrong mime, bad
-            // base64, non-URL and over-cap rows are dropped)
+            // 五个条目只有第一个合法（错误 mime、坏 base64、非 data URL
+            // 和超上限的行都会被丢弃）
             const stored = store.append('room1', {
                 name: 'a',
                 text: '',
@@ -98,11 +98,11 @@ describe('test-chatStore', () => {
             });
             store.append('room1', { name: 'a', text: 'fresh text' });
 
-            // default budget: everything fits
+            // 默认预算：全部装得下
             store.history('room1').messages.should.have.length(3);
-            // 512KB budget: the newest row plus the 800KB image row would not
-            // fit → the newest row (always included) + nothing older, and the
-            // page reports there is more behind it
+            // 512KB 预算：最新行加上 800KB 图片行装不下 → 只剩最新行
+            // （永远保留）+ 更早的行一概不给，
+            // 且分页报告其后还有更多
             const trimmed = store.history('room1', { maxBytes: 512 * 1024 });
             trimmed.messages.should.have.length(1);
             trimmed.messages[0].text.should.equal('fresh text');
@@ -111,14 +111,14 @@ describe('test-chatStore', () => {
 
         it('should serve at most the requested page size', () => {
             store = newStore('cap');
-            const base = Date.now() - 60 * 1000; // inside the retention window
+            const base = Date.now() - 60 * 1000; // 在保留窗口期内
             for (let i = 0; i < ChatStore.MAX_MESSAGES + 20; i++) {
-                // unique ts: a same-ts group may legitimately swell a page
-                // (the boundary never splits one), keep this case exact
+                // ts 唯一：同 ts 消息组可以合理地把一页撑大（页边界从不
+                // 切开一组），这里保持精确逐条的情况
                 store.append('room1', { name: 'a', text: `m${i}` }, { ts: base + i });
             }
-            // 320 sent → stored capped at MAX_MESSAGES (oldest shifted off),
-            // one page serves only the newest CHAT_PAGE_SIZE of what remains
+            // 发了 320 条 → 存储被裁到 MAX_MESSAGES（最老的被挤出），
+            // 一页只下发剩余内容中最新的 CHAT_PAGE_SIZE 条
             const page = store.history('room1');
             page.messages.should.have.length(ChatStore.CHAT_PAGE_SIZE);
             page.messages[0].text.should.equal(`m${ChatStore.MAX_MESSAGES + 20 - ChatStore.CHAT_PAGE_SIZE}`);
@@ -128,13 +128,13 @@ describe('test-chatStore', () => {
 
         it('should page backwards without duplicates or gaps', () => {
             store = newStore('paging');
-            const total = ChatStore.CHAT_PAGE_SIZE * 2 + 7; // not a page multiple
-            const base = Date.now() - 60 * 1000; // inside the retention window
+            const total = ChatStore.CHAT_PAGE_SIZE * 2 + 7; // 不是页大小的整数倍
+            const base = Date.now() - 60 * 1000; // 在保留窗口期内
             for (let i = 0; i < total; i++) {
                 store.append('room1', { name: 'a', text: `m${i}` }, { ts: base + i });
             }
 
-            // walk from the newest end back until the store reports done
+            // 从最新端往回走，直到 store 报告取完
             const seen = [];
             let before = 0;
             for (let guard = 0; guard < 100; guard++) {
@@ -147,27 +147,27 @@ describe('test-chatStore', () => {
                 if (!page.hasMore) break;
             }
             seen.should.have.length(total);
-            seen.should.eql(Array.from({ length: total }, (_, i) => `m${i}`)); // oldest → newest, no dupes
+            seen.should.eql(Array.from({ length: total }, (_, i) => `m${i}`)); // 最老 → 最新，无重复
         });
 
         it('should move a group sharing one ts to a single page whole', () => {
             store = newStore('same-ts');
-            const base = Date.now() - 60 * 1000; // inside the retention window
-            // 12 rows on the SAME millisecond plus one older row below them
+            const base = Date.now() - 60 * 1000; // 在保留窗口期内
+            // 12 行落在同一毫秒，下面再压一行更早的
             store.append('room1', { name: 'a', text: 'bottom' }, { ts: base - 500 });
             for (let i = 0; i < 12; i++) {
                 store.append('room1', { name: 'a', text: `same${i}` }, { ts: base });
             }
 
             const first = store.history('room1');
-            // the limit cut heals to the group boundary: the whole group
-            // ships on one page (12 rows > the page size) rather than being
-            // split across a cursor that cannot address its halves
+            // 截断愈合到组边界：整组（12 行 > 页大小）一次性发在同一页，
+            // 而不是被一个无法寻址其中一半的游标切开
+            //
             first.messages.map((m) => m.text).should.eql(Array.from({ length: 12 }, (_, i) => `same${i}`));
             first.hasMore.should.be.true();
 
-            // paging back with the group's ts skips the whole group at once —
-            // no row of it re-appears, nothing is lost
+            // 以组的 ts 向前翻页时整组一次跳过——组内任何一行都不会
+            // 再次出现，也不会丢失
             const second = store.history('room1', { before: first.messages[0].ts });
             second.messages.map((m) => m.text).should.eql(['bottom']);
             second.hasMore.should.be.false();
@@ -247,7 +247,7 @@ describe('test-chatStore', () => {
             const history = legacyStore.history('room1').messages;
             history.should.have.length(2);
             history[0].text.should.equal('old text');
-            history[1].imgs.should.equal(2); // count preserved as-is; the client renders the placeholder
+            history[1].imgs.should.equal(2); // 原样保留计数；占位图由客户端渲染
             legacyStore.destroy();
         });
 
@@ -270,14 +270,14 @@ describe('test-chatStore', () => {
         });
 
         it('should drop rows past the per-file disk budget', () => {
-            // small budget so the shrink loop is exercised quickly
+            // 预算取小值，让收缩循环很快被触发
             store = newStore('budget', { maxBytes: 4096 });
             for (let i = 0; i < 40; i++) {
                 store.append('room1', { name: 'a', text: 'x'.repeat(500) });
             }
             const history = store.history('room1').messages;
             history.length.should.be.below(40);
-            history[history.length - 1].text.should.equal('x'.repeat(500)); // newest kept
+            history[history.length - 1].text.should.equal('x'.repeat(500)); // 最新一条保留
             fs.statSync(store.fileFor('room1')).size.should.be.below(4096);
         });
 
@@ -342,7 +342,7 @@ describe('test-chatStore', () => {
             row.reply.name.should.equal('bob');
             row.reply.text.length.should.equal(80);
             row.reply.ts.should.equal(123);
-            // invalid shapes are dropped, the message stays
+            // 非法形态被丢弃，消息本身保留
             const bad = store.append('room1', { name: 'alice', text: 'no reply', reply: { name: 'x' } });
             should(bad.reply).be.undefined();
         });
@@ -350,18 +350,18 @@ describe('test-chatStore', () => {
         it('should honor a per-channel retention override from the resolver', () => {
             const hours = { roomA: 0, roomB: 1000 };
             store = newStore('per-channel', { retentionHours: (id) => hours[id] ?? 24 });
-            // override 0 = keep nothing for roomA
+            // 覆盖值 0 = roomA 什么都不留
             should(store.append('roomA', { name: 'a', text: 'gone' })).be.null();
-            // roomB keeps rows
+            // roomB 保留行
             const row = store.append('roomB', { name: 'b', text: 'kept' });
             row.text.should.equal('kept');
-            // default applies elsewhere
+            // 其余频道套用默认值
             store.append('roomC', { name: 'c', text: 'also kept' }).text.should.equal('also kept');
         });
 
         it('should keep a channel override alive even when the global window is off', () => {
-            // global 0 = keep nothing, but a channel may explicitly opt in —
-            // sweep() must not wipe it on the global rule alone
+            // 全局 0 = 一概不留，但频道可以显式选择保留——
+            // sweep() 不得只凭全局规则把它清掉
             const hours = { keep: 48 };
             store = newStore('global-off', { retentionHours: (id) => hours[id] ?? 0 });
             store.append('keep', { name: 'a', text: 'kept' });
@@ -374,19 +374,19 @@ describe('test-chatStore', () => {
         it('should prune per-channel inside sweep and exportAll', () => {
             const hours = { fast: 1, slow: 1000 };
             store = newStore('sweep-id', { retentionHours: (id) => hours[id] ?? 24 });
-            const old = Date.now() - 5 * 60 * 60 * 1000; // 5h ago
+            const old = Date.now() - 5 * 60 * 60 * 1000; // 5 小时前
             store.append('fast', { name: 'a', text: 'old' }, { ts: old });
             store.append('slow', { name: 'a', text: 'old' }, { ts: old });
             store.sweep();
             store.history('fast').messages.should.be.empty();
             store.history('slow').messages.should.have.length(1);
-            // exportAll mirrors the pruned view
+            // exportAll 与修剪后的视图一致
             store.append('slow', { name: 'a', text: 'new' });
             store
                 .exportAll('slow')
                 .map((m) => m.text)
                 .should.eql(['old', 'new']);
-            // exported rows are copies — mutating them cannot corrupt the store
+            // 导出的行是副本——改坏它们也不会污染 store
             store.exportAll('slow')[0].text = 'hacked';
             store.exportAll('slow')[0].text.should.equal('old');
         });
@@ -424,8 +424,8 @@ describe('test-chatStore', () => {
         });
 
         it('should enforce the disk budget in bytes, not UTF-16 code units (CJK)', () => {
-            // 3 bytes per CJK char in UTF-8 vs 1 in String#length: a budget
-            // measured in code units let a Chinese channel grow ~3x past it
+            // UTF-8 中每个汉字 3 字节，而 String#length 只算 1：按 code unit
+            // 计的预算会让中文频道悄悄膨胀到预算的 ~3 倍
             const maxBytes = 4096;
             store = newStore('cjk-budget', { maxBytes });
             for (let i = 0; i < 200; i++) {
@@ -434,7 +434,7 @@ describe('test-chatStore', () => {
             const file = path.join(store.dir, 'room1.jsonl');
             const size = fs.statSync(file).size;
             size.should.be.belowOrEqual(maxBytes);
-            // and the newest row must still be there
+            // 且最新一行必须仍在
             store.history('room1').messages.at(-1).text.should.endWith('199');
         });
 
@@ -466,7 +466,7 @@ describe('test-chatStore', () => {
         it('should pick up disk state after reload()', () => {
             store = newStore('reload-method');
             store.append('room1', { name: 'a', text: 'on disk' });
-            store.channels.get('room1').messages.length = 0; // simulate stale memory
+            store.channels.get('room1').messages.length = 0; // 模拟内存过期
             store.reload();
             store
                 .history('room1')
@@ -514,10 +514,10 @@ describe('test-chatStore', () => {
             tomb.deleted.should.be.true();
             should.equal(tomb.text, '');
             const messages = store.history('room1').messages;
-            messages.should.have.length(2); // the row stays as a tombstone
+            messages.should.have.length(2); // 该行以墓碑形式保留
             messages[1].deleted.should.be.true();
             should.equal(messages[1].imgs, undefined);
-            // a tombstone cannot be edited or re-recalled
+            // 墓碑不可再编辑，也不可再次撤回
             should.equal(store.edit('room1', { ts: newTs, name: 'a', text: 'zombie' }), null);
             should.equal(store.remove('room1', { ts: newTs, name: 'a' }), null);
         });
@@ -528,7 +528,7 @@ describe('test-chatStore', () => {
             store.append('room1', { name: 'a', text: 'hello' }, { ts });
             const add = store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
             add.reactions.should.eql({ '👍': ['b'] });
-            // same reactor twice = no duplicate; a second reactor joins in
+            // 同一 reactor 两次 = 不产生重复；第二个 reactor 加入
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'c' });
             store.history('room1').messages[0].reactions.should.eql({ '👍': ['b', 'c'] });
@@ -536,7 +536,7 @@ describe('test-chatStore', () => {
             store.history('room1').messages[0].reactions.should.eql({ '👍': ['c'] });
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'c', op: 'remove' });
             should.equal(store.history('room1').messages[0].reactions, undefined);
-            // distinct-emoji cap (8): a 9th distinct emoji is refused
+            // 去重 emoji 上限（8）：第 9 种 emoji 被拒绝
             for (const emoji of ['😀', '😁', '😂', '🤣', '😅', '😆', '😉', '😊']) {
                 store.react('room1', { ts, name: 'a', emoji, who: 'b' });
             }
@@ -569,9 +569,9 @@ describe('test-chatStore', () => {
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
 
             const after = fs.readFileSync(file, 'utf8');
-            after.should.startWith(before); // pure append: base rows byte-identical
+            after.should.startWith(before); // 纯追加：基础行字节级不变
             const lines = after.split('\n').filter(Boolean);
-            lines.should.have.length(5); // 2 base + edit + del + react
+            lines.should.have.length(5); // 2 条基础 + edit + del + react
             JSON.parse(lines[2]).should.eql({ e: 'edit', ts, name: 'a', text: 'm1 edited' });
             JSON.parse(lines[3]).should.eql({ e: 'del', ts: ts + 1, name: 'a' });
             JSON.parse(lines[4]).should.eql({ e: 'react', ts, name: 'a', emoji: '👍', who: 'b', op: 'add' });
@@ -584,18 +584,18 @@ describe('test-chatStore', () => {
             store.append('room1', { name: 'a', text: 'm1' }, { ts });
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
             const file = store.fileFor('room1');
-            // repeated add / absent removal are no-ops: no line is written
+            // 重复 add / 移除不存在的回应都是 no-op：不写任何行
             const afterFirst = fs.readFileSync(file, 'utf8');
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'nobody', op: 'remove' });
             fs.readFileSync(file, 'utf8').should.equal(afterFirst);
-            // distinct-emoji cap (8): the 9th is refused without a line, too
+            // 去重 emoji 上限（8）：第 9 种被拒，同样不写行
             for (const emoji of ['😀', '😁', '😂', '🤣', '😅', '😆', '😉', '😊']) {
                 store.react('room1', { ts, name: 'a', emoji, who: 'b' });
             }
             const afterCap = fs.readFileSync(file, 'utf8');
-            afterCap.should.not.equal(afterFirst); // the 8 valid adds did land
-            store.react('room1', { ts, name: 'a', emoji: '😏', who: 'b' }); // capped
+            afterCap.should.not.equal(afterFirst); // 8 次合法 add 都已落盘
+            store.react('room1', { ts, name: 'a', emoji: '😏', who: 'b' }); // 被上限挡下
             fs.readFileSync(file, 'utf8').should.equal(afterCap);
         });
 
@@ -607,7 +607,7 @@ describe('test-chatStore', () => {
             first.append('room1', { name: 'b', text: 'm2', reply: { name: 'a', text: 'm1', ts } }, { ts: ts + 1 });
             first.edit('room1', { ts, name: 'a', text: 'm1 edited' });
             first.react('room1', { ts: ts + 1, name: 'b', emoji: '🎉', who: 'a' });
-            first.remove('room1', { ts, name: 'a' }); // tombstone the edited row
+            first.remove('room1', { ts, name: 'a' }); // 把被编辑的行打成墓碑
             const expected = first.exportAll('room1');
             first.destroy();
 
@@ -632,15 +632,15 @@ describe('test-chatStore', () => {
             }
             first.edit('room1', { ts: rows[1].ts, name: rows[1].name, text: 'm1 v2' });
             first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice' });
-            first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice' }); // idempotent add
+            first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice' }); // 幂等 add
             first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'carol' });
             first.react('room1', { ts: rows[2].ts, name: rows[2].name, emoji: '👍', who: 'alice', op: 'remove' });
             first.edit('room1', { ts: rows[3].ts, name: rows[3].name, text: 'm3 v2' });
             first.edit('room1', { ts: rows[3].ts, name: rows[3].name, text: 'm3 v3' });
             first.remove('room1', { ts: rows[5].ts, name: rows[5].name });
-            first.react('room1', { ts: rows[5].ts, name: rows[5].name, emoji: '😅', who: 'bob' }); // tombstone: ignored
-            first.edit('room1', { ts: rows[5].ts, name: rows[5].name, text: 'zombie' }); // tombstone: ignored
-            first.remove('room1', { ts: 404, name: 'nobody' }); // missing row: ignored
+            first.react('room1', { ts: rows[5].ts, name: rows[5].name, emoji: '😅', who: 'bob' }); // 墓碑：忽略
+            first.edit('room1', { ts: rows[5].ts, name: rows[5].name, text: 'zombie' }); // 墓碑：忽略
+            first.remove('room1', { ts: 404, name: 'nobody' }); // 行不存在：忽略
             const expected = first.exportAll('room1');
             first.destroy();
 
@@ -654,11 +654,11 @@ describe('test-chatStore', () => {
             store = newStore('shrink', { retentionHours: () => hours });
             const old = Date.now() - 2 * 60 * 60 * 1000;
             store.append('room1', { name: 'a', text: 'old' }, { ts: old });
-            hours = 1; // admin shrinks the window; the next append pays one marker line
+            hours = 1; // 管理员收紧窗口；下一次 append 补付一条标记行
             store.append('room1', { name: 'a', text: 'fresh' });
 
             const lines = fs.readFileSync(store.fileFor('room1'), 'utf8').split('\n').filter(Boolean);
-            lines.should.have.length(3); // old row + drop marker + new row
+            lines.should.have.length(3); // 旧行 + drop 标记 + 新行
             JSON.parse(lines[1]).should.eql({ e: 'drop', ts: old, n: 1 });
             store
                 .history('room1')
@@ -668,7 +668,7 @@ describe('test-chatStore', () => {
             second
                 .history('room1')
                 .messages.map((m) => m.text)
-                .should.eql(['fresh']); // replay matches: no resurrection
+                .should.eql(['fresh']); // 重放结果一致：不会死而复生
             second.destroy();
         });
 
@@ -692,10 +692,10 @@ describe('test-chatStore', () => {
         it('should drop-mark sweep trims of in-memory channels', () => {
             let hours = 3;
             store = newStore('sweep-marker', { retentionHours: () => hours });
-            const old = Date.now() - 2 * 60 * 60 * 1000; // inside the 3h window
+            const old = Date.now() - 2 * 60 * 60 * 1000; // 在 3h 窗口内
             store.append('room1', { name: 'a', text: 'old' }, { ts: old });
             store.append('room1', { name: 'a', text: 'fresh' });
-            hours = 1; // window shrinks; sweep trims via one marker line, not a rewrite
+            hours = 1; // 窗口收紧；sweep 经一条标记行修剪，而非整档重写
             store.sweep();
 
             const lines = fs.readFileSync(store.fileFor('room1'), 'utf8').split('\n').filter(Boolean);
@@ -711,17 +711,17 @@ describe('test-chatStore', () => {
             this.timeout(4000);
             const dir = tempDir('defer-compact');
             const store = new ChatStore({ dir, sweepMs: 0, maxBytes: 8192 });
-            const bigText = 'x'.repeat(600); // stored capped at 500 → ~543B/line: ratio crosses at 14 lines
-            // explicit distinct ts: 14 appends land in the same millisecond on fast CI
-            // runners, and edit() resolves a row by ts — identical ts would make the
-            // target ambiguous (the test then edits the wrong message).
+            const bigText = 'x'.repeat(600); // 存储截断到 500 → 每行约 543B：14 行越过比率
+            // 显式取不重复的 ts：快速 CI 机器上 14 次 append 会落在同一毫秒，
+            // 而 edit() 按 ts 定位行——ts 相同会让目标变得有歧义
+            // （测试随后就会改错消息）。
             const base = Date.now();
             for (let i = 0; i < 14; i++)
                 store.append('room1', { name: 'a', text: `${i}-${bigText}` }, { ts: base + i });
             const file = store.fileFor('room1');
             const sizeAfterAppends = fs.statSync(file).size;
-            sizeAfterAppends.should.be.above(8192 * 0.9); // ratio crossed …
-            sizeAfterAppends.should.be.below(8192); // … hard budget not
+            sizeAfterAppends.should.be.above(8192 * 0.9); // 越过比率…
+            sizeAfterAppends.should.be.below(8192); // …但未触及硬预算
 
             let saves = 0;
             const orig = ChatStore.prototype.save;
@@ -735,10 +735,10 @@ describe('test-chatStore', () => {
             } finally {
                 ChatStore.prototype.save = orig;
             }
-            saves.should.equal(0); // interaction path stays rewrite-free over the ratio
+            saves.should.equal(0); // 越过比率后交互路径仍零重写
 
             return new Promise((resolve) => setTimeout(resolve, 1300)).then(() => {
-                fs.statSync(file).size.should.be.belowOrEqual(8192); // background compaction ran
+                fs.statSync(file).size.should.be.belowOrEqual(8192); // 后台压缩已运行
                 const second = new ChatStore({ dir, sweepMs: 0 });
                 second.history('room1').messages.at(-1).text.should.startWith('13');
                 second.destroy();
@@ -761,10 +761,10 @@ describe('test-chatStore', () => {
             };
             try {
                 reader.sweep();
-                loads.should.equal(1); // first sight: one full check
+                loads.should.equal(1); // 首次照面：做一次完整检查
                 reader.sweep();
-                loads.should.equal(1); // unchanged file inside its retention epoch: skipped
-                // an external change (restore-style rewrite) forces a fresh look
+                loads.should.equal(1); // 保留期内文件未变化：跳过
+                // 外部变更（restore 式重写）会强制重新查看
                 fs.appendFileSync(
                     reader.fileFor('idle'),
                     JSON.stringify({ ts: Date.now(), name: 'x', text: 'external' }) + '\n',
@@ -797,7 +797,7 @@ describe('test-chatStore', () => {
             } finally {
                 ChatStore.prototype.loadFile = orig;
             }
-            loads.should.equal(0); // tail probe decided; never parsed the file
+            loads.should.equal(0); // 仅凭尾部抽样判定；从未解析过文件
             fs.existsSync(reader.fileFor('old')).should.be.false();
             reader.destroy();
         });
@@ -809,8 +809,8 @@ describe('test-chatStore', () => {
             const rows = [
                 JSON.stringify({ ts, name: 'a', text: 'base' }),
                 JSON.stringify({ e: 'edit', ts, name: 'a', text: 'edited' }),
-                JSON.stringify({ e: 'warp', ts, name: 'a', text: 'from the future' }), // unknown kind
-                '{"e":"del","ts":1,"name":"a"', // torn tail (crash mid-append)
+                JSON.stringify({ e: 'warp', ts, name: 'a', text: 'from the future' }), // 未知事件类型
+                '{"e":"del","ts":1,"name":"a"', // 撕裂尾行（追加中途崩溃）
                 '',
             ].join('\n');
             fs.writeFileSync(path.join(dir, 'room1.jsonl'), rows, 'utf8');
@@ -820,7 +820,7 @@ describe('test-chatStore', () => {
             history.should.have.length(1);
             history[0].text.should.equal('edited');
             history[0].edited.should.be.true();
-            fs.existsSync(path.join(dir, 'room1.jsonl.corrupt')).should.be.false(); // no quarantine false positive
+            fs.existsSync(path.join(dir, 'room1.jsonl.corrupt')).should.be.false(); // 不误触发隔离
             tolerant.destroy();
         });
 
@@ -833,7 +833,7 @@ describe('test-chatStore', () => {
                 JSON.stringify({ ts, name: 'a', text: 'good' }) + '\n',
                 'utf8'
             );
-            // kill -9 between writeFileSync(tmp) and renameSync leaves junk behind
+            // writeFileSync(tmp) 与 renameSync 之间 kill -9 会留下垃圾文件
             fs.writeFileSync(path.join(dir, 'room1.jsonl.tmp'), '{"ts":1,"nam', 'utf8');
 
             const restarted = new ChatStore({ dir, sweepMs: 0 });
@@ -853,7 +853,7 @@ describe('test-chatStore', () => {
             store.react('room1', { ts, name: 'a', emoji: '👍', who: 'b' });
             store.remove('room1', { ts, name: 'a' });
             for (const line of fs.readFileSync(store.fileFor('room1'), 'utf8').split('\n').filter(Boolean)) {
-                Number.isFinite(JSON.parse(line).ts).should.be.true(); // restore.js line validation
+                Number.isFinite(JSON.parse(line).ts).should.be.true(); // restore.js 的行校验
             }
         });
     });

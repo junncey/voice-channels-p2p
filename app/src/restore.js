@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * Admin backup restore: unpack a tar.gz produced by GET /api/admin/backup
- * back into a live server — channels.json into the registry, chat_history/*
- * into the history directory. Everything is validated BEFORE a single file
- * is replaced (parse the whole archive into memory first, then apply), so a
- * truncated or hostile upload can never leave a half-restored server.
+ * Admin 备份恢复：把 GET /api/admin/backup 产出的 tar.gz 解回运行中的
+ * 服务器——channels.json 进注册表，chat_history/*
+ * 进历史目录。一切先经过校验，然后才替换任何文件
+ * （先把整个归档解析进内存，再应用），因此截断或恶意的上传
+ * 绝不会留下一台半恢复状态的服务器。
  *
- * Restores are whole-state: history files for channels absent from the
- * archive are removed, matching what a fresh unpack-over-a-data-dir would do.
+ * 恢复是全量状态语义：归档里没有的频道，其历史文件会被移除，
+ * 与「把备份解压覆盖到一个全新数据目录」的行为一致。
  */
 
 const fs = require('fs');
@@ -23,13 +23,13 @@ const log = new Logs('restore');
 
 const ID_PATTERN = limits.CHANNEL_ID_RE;
 const REGISTRY_NAME = 'channels.json';
-// The registry is a few hundred KB at worst; one history file is bounded by
-// the store's own 12MB disk budget. The whole-archive caps keep a hostile or
-// accidental upload from OOM-ing a small host: the body is buffered, then
-// gunzipped into memory, then parsed — so every stage gets its own ceiling.
+// 注册表最坏也就几百 KB；单个历史文件受 store 自身 12MB 磁盘预算约束。
+// 整归档上限防止恶意或误传的上传把小主机 OOM：请求体先缓冲，
+// 再 gunzip 进内存，然后解析——
+// 每个阶段各有自己的天花板。
 const MAX_REGISTRY_BYTES = 16 * 1024 * 1024;
 const MAX_HISTORY_FILE_BYTES = 16 * 1024 * 1024;
-const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024; // decompressed tar
+const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024; // 解压后的 tar
 
 class RestoreError extends Error {
     constructor(message, status = 400) {
@@ -38,7 +38,7 @@ class RestoreError extends Error {
     }
 }
 
-/** Gunzip a raw archive buffer with a hard cap on the decompressed size. */
+/** 对原始归档 buffer 做 gunzip，解压尺寸有硬上限。 */
 function gunzipBounded(gzipBuf, maxBytes) {
     return new Promise((resolve, reject) => {
         const chunks = [];
@@ -60,8 +60,8 @@ function gunzipBounded(gzipBuf, maxBytes) {
 }
 
 /**
- * Validate + apply a backup archive.
- * @param {Buffer} gzipBuf raw tar.gz bytes
+ * 校验并应用备份归档。
+ * @param {Buffer} gzipBuf 原始 tar.gz 字节
  * @param {object} stores
  * @param {import('./channelStore')} stores.channelStore
  * @param {import('./chatStore')} stores.chatStore
@@ -71,7 +71,7 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
     if (!Buffer.isBuffer(gzipBuf) || !gzipBuf.length) throw new RestoreError('empty upload');
     const tar = await gunzipBounded(gzipBuf, MAX_ARCHIVE_BYTES);
 
-    // ---- pass 1: parse every entry into memory (nothing written yet) ----
+    // ---- 第 1 遍：把所有条目解析进内存（尚未写任何东西） ----
     let registryRaw = null;
     /** id -> { ext: '.jsonl'|'.json', data: Buffer } */
     const histories = new Map();
@@ -88,20 +88,20 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
                 if (!m) throw new RestoreError(`unexpected archive entry: ${name}`);
                 const id = m[1];
                 const prev = histories.get(id);
-                // a JSONL entry wins over a legacy JSON one if both appear
+                // 两者同时出现时，JSONL 条目优先于旧版 JSON 条目
                 if (!prev || (prev.ext === '.json' && m[2] === 'jsonl')) {
                     histories.set(id, { ext: `.${m[2]}`, data });
                 }
             },
         });
     } catch (err) {
-        // structural tar problems are client-input errors, not server faults
+        // tar 结构问题是客户端输入错误，不是服务器故障
         if (err instanceof RestoreError) throw err;
         throw new RestoreError(err.message);
     }
     if (!registryRaw) throw new RestoreError('archive is missing channels.json');
 
-    // ---- pass 2: validate contents (parse shapes; still nothing written) ----
+    // ---- 第 2 遍：校验内容（解析形状；依然什么都没写） ----
     let registry;
     try {
         registry = JSON.parse(registryRaw.toString('utf8'));
@@ -137,17 +137,17 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
         }
     }
 
-    // ---- pass 3: apply (registry first, then histories, then the sweep) ----
-    // registry: validated raw content becomes the new channels.json through
-    // the store itself, so settings/hashes land in memory AND on disk in one
-    // atomic shape (the store's own save() handles tmp+rename+.bak)
+    // ---- 第 3 遍：应用（先注册表，再历史文件，然后清扫） ----
+    // 注册表：校验过的原始内容经由 store 自身成为新的 channels.json，
+    // 这样 settings/哈希以一次原子形状同时落进内存与磁盘
+    // （store 自己的 save() 负责 tmp+rename+.bak）
     const registryTmp = `${channelStore.filePath}.restore`;
     fs.writeFileSync(registryTmp, registryRaw, 'utf8');
     try {
         const parsed = channelStore.readRegistryFile(registryTmp);
-        // snapshot the live state: if the persisting save() fails, memory must
-        // keep matching the disk we still have (applySettings mutates in place,
-        // so the settings copy is a real snapshot, not a shared reference)
+        // 先给在线状态拍快照：若持久化 save() 失败，内存必须仍与我们
+        // 手上的磁盘保持一致（applySettings 是原地变异，
+        // 因此 settings 的拷贝是真快照，不是共享引用）
         const prevChannels = channelStore.channels;
         const prevSettings = { ...channelStore.settings };
         channelStore.channels = parsed.channels;
@@ -165,12 +165,12 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
         try {
             fs.unlinkSync(registryTmp);
         } catch {
-            /* already gone */
+            /* 早已不存在 */
         }
     }
 
-    // histories: write each file under its archive extension (legacy .json
-    // entries migrate to .jsonl on first load, exactly like an old install)
+    // 历史文件：按其在归档里的扩展名写入（旧版 .json 条目在首次加载时
+    // 迁移为 .jsonl，与老安装的行为完全一致）
     for (const [id, entry] of histories) {
         const file = path.join(chatStore.dir, `${id}${entry.ext}`);
         const tmp = `${file}.tmp`;
@@ -183,11 +183,11 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
             fs.unlinkSync(tmp);
         }
     }
-    // whole-state semantics: drop history files whose channel is not in the archive
+    // 全量状态语义：归档里没有的频道，其历史文件一律删除
     for (const id of chatStore.listFiles()) {
         if (!histories.has(id)) chatStore.removeChannel(id);
     }
-    chatStore.reload(); // in-memory caches lazy-load the new files
+    chatStore.reload(); // 内存缓存惰性加载新文件
 
     log.info('Backup restored', { channels: registry.channels.length, histories: histories.size });
     return { channels: registry.channels.length, histories: histories.size };

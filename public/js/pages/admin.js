@@ -1,5 +1,5 @@
 /**
- * Admin console — channel CRUD + host management.
+ * 管理后台 —— 频道增删改查 + 主持人管理。
  */
 
 import { api, getAdminToken, setAdminToken } from '/js/core/api.js';
@@ -11,10 +11,10 @@ const POLL_MS = 10000;
 
 let channels = [];
 let temps = [];
-let editingId = null; // null = creating
+let editingId = null; // null = 新建
 let pendingDelete = null;
-let settingsSaving = false; // don't clobber the toggle from a poll mid-save
-const expandedRooms = new Set(); // channel ids whose member list row is open
+let settingsSaving = false; // 保存进行中时，避免轮询回填覆盖表单开关
+const expandedRooms = new Set(); // 成员列表子行处于展开状态的频道 ID
 
 boot();
 
@@ -72,12 +72,12 @@ function bindUi() {
     $('#auditRefreshBtn').addEventListener('click', () => openAudit());
     $('#auditCloseBtn').addEventListener('click', () => $('#auditModal').classList.add('hidden'));
 
-    // restore: pick a tar.gz → confirm → upload (whole-state replace)
+    // 恢复：选择 tar.gz → 确认 → 上传（全量状态替换）
     let pendingRestoreFile = null;
     $('#restoreBtn').addEventListener('click', () => $('#restoreFileInput').click());
     $('#restoreFileInput').addEventListener('change', (event) => {
         const file = event.target.files?.[0];
-        event.target.value = ''; // allow re-picking the same file
+        event.target.value = ''; // 允许再次选择同一个文件
         if (!file) return;
         pendingRestoreFile = file;
         $('#restoreModal').classList.remove('hidden');
@@ -109,7 +109,7 @@ function bindUi() {
 }
 
 // ---------------------------------------------------------------------------
-// views
+// 视图
 // ---------------------------------------------------------------------------
 
 function showLogin() {
@@ -127,7 +127,7 @@ function showConsole() {
 }
 
 // ---------------------------------------------------------------------------
-// channel table
+// 频道表格
 // ---------------------------------------------------------------------------
 
 async function load() {
@@ -148,7 +148,7 @@ async function load() {
     }
 }
 
-/** Reflect server settings in the form — unless a save is in flight. */
+/** 将服务器设置回填到表单 —— 保存进行中时跳过。 */
 function syncSettingsFields(settings) {
     if (settingsSaving || !settings) return;
     $('#sTempRooms').checked = settings.tempRooms !== false;
@@ -199,7 +199,7 @@ function renderTable() {
         out.push(channelRow(channel, isTemp));
         if (expandedRooms.has(channel.id)) out.push(membersRow(channel, isTemp));
     };
-    // registered channels first, then live temporary rooms (deletable only)
+    // 先渲染注册频道，再渲染活跃临时房间（仅可删除）
     channels.forEach((channel) => pushWithMembers(channel, false));
     temps.forEach((channel) => pushWithMembers(channel, true));
     rows.replaceChildren(...out);
@@ -252,7 +252,7 @@ function channelRow(channel, isTemp) {
         el(
             'td',
             { class: 'actions-cell' },
-            // temp rooms have no editable config — they can only be destroyed
+            // 临时房间没有可编辑配置 —— 只能销毁
             ...(isTemp
                 ? []
                 : [
@@ -271,7 +271,7 @@ function channelRow(channel, isTemp) {
     );
 }
 
-/** Expandable sub-row: live member list with per-member kick. */
+/** 可展开子行：实时成员名单，支持逐个踢出。 */
 function membersRow(channel) {
     const members = channel.members || [];
     const cell = el('td', { colspan: '7', class: 'members-cell' });
@@ -296,7 +296,7 @@ function membersRow(channel) {
             )
         );
     }
-    // flex lives on the wrapper, never on the td (that would kill colspan)
+    // flex 放在外层包装上，绝不放 td 上（否则会破坏 colspan）
     cell.append(el('div', { class: 'members-wrap' }, ...content));
     return el('tr', { class: 'members-row' }, cell);
 }
@@ -312,7 +312,7 @@ async function kickMember(channelId, member) {
 }
 
 // ---------------------------------------------------------------------------
-// stats + audit panels
+// 统计 + 审计面板
 // ---------------------------------------------------------------------------
 
 function formatBytes(bytes) {
@@ -437,7 +437,7 @@ async function openAudit() {
 }
 
 // ---------------------------------------------------------------------------
-// editor
+// 编辑器
 // ---------------------------------------------------------------------------
 
 function openEditor(channel) {
@@ -454,12 +454,12 @@ function openEditor(channel) {
     $('#fName').value = channel ? channel.name : '';
     $('#fDesc').value = channel ? channel.description || '' : '';
     $('#fMax').value = channel ? channel.maxParticipants || 8 : 8;
-    // per-channel retention override: '' = inherit the global setting
+    // 按频道保留期覆盖：'' = 继承全局设置
     $('#fRetention').value = channel?.chatRetentionHours != null ? String(channel.chatRetentionHours) : '';
     $('#fPublic').checked = channel ? channel.public !== false : true;
 
-    // channel password: never echoed back — blank keeps the stored one, an
-    // explicit checkbox clears it (only offered when one is set)
+    // 频道密码：绝不回显 —— 留空保持已存密码，显式勾选
+    // 复选框则清除（仅在已设置密码时提供该选项）
     $('#fPassword').value = '';
     const hasPassword = !!channel?.hasPassword;
     $('#pwHint').textContent =
@@ -532,13 +532,13 @@ async function onEditorSubmit(event) {
     };
     if (!editingId) body.id = $('#fId').value.trim();
 
-    // retention override: '' = inherit (null), otherwise an hour count
+    // 保留期覆盖：'' = 继承（null），否则为小时数
     const retention = $('#fRetention').value.trim();
     if (retention !== '') body.chatRetentionHours = Number(retention);
-    else if (editingId) body.chatRetentionHours = null; // editing: blank clears the override
+    else if (editingId) body.chatRetentionHours = null; // 编辑时：留空即清除覆盖
 
-    // channel password tri-state: filled = set/replace, '' = clear (checkbox),
-    // omitted = leave unchanged
+    // 频道密码三态：有值 = 设置/替换，'' = 清除（需勾选复选框），
+    // 未提供 = 保持不变
     const password = $('#fPassword').value;
     if (password) body.password = password;
     else if (editingId && $('#fClearPw').checked) body.password = '';
@@ -549,7 +549,7 @@ async function onEditorSubmit(event) {
             toast(t('admin.saved'), 'ok');
         } else {
             const { channel } = await api.adminCreateChannel(body);
-            // surface the id — it may have been auto-generated
+            // 展示 ID —— 它可能是自动生成的
             toast(t('admin.created', { id: channel.id }), 'ok');
         }
         closeEditor();
@@ -560,7 +560,7 @@ async function onEditorSubmit(event) {
 }
 
 // ---------------------------------------------------------------------------
-// delete
+// 删除
 // ---------------------------------------------------------------------------
 
 function confirmDelete(channel) {

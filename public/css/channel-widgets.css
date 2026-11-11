@@ -1,11 +1,11 @@
 /* ============================================================
-   Channel page, part 2 — settings modal (audio / devices /
-   appearance / avatar), custom dropdowns, operation sounds,
-   join overlay, responsive breakpoints, light theme overrides,
-   reply composer bar + @mention autocomplete
+   频道页第二部分 — 设置弹窗（音频 / 设备 /
+   外观 / 头像）、自绘下拉框、操作音效、
+   加入遮罩、响应式断点、浅色主题覆盖、
+   回复输入条 + @提及自动补全
    ============================================================ */
 
-/* ---------- audio settings modal ---------- */
+/* ---------- 音频设置弹窗 ---------- */
 
 .settings-modal {
     max-width: 520px;
@@ -48,7 +48,7 @@
     align-self: flex-start;
 }
 
-/* custom avatar picker row (settings modal) */
+/* 自定义头像选择行（设置弹窗） */
 .avatar-row {
     display: flex;
     align-items: center;
@@ -151,7 +151,7 @@
     background: #08281b;
 }
 
-/* disabled by music mode — the mode owns the underlying capture constraint */
+/* 被音乐模式禁用 — 底层采集约束由该模式接管 */
 .switch:disabled,
 .switch-row:has(.switch:disabled) {
     opacity: 0.45;
@@ -163,7 +163,7 @@
     color: var(--text-3);
 }
 
-/* ---------- custom dropdown (device pickers) ---------- */
+/* ---------- 自绘下拉框（设备选择器） ---------- */
 
 .dropdown-root {
     display: flex;
@@ -299,12 +299,12 @@
     animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* ---------- operation sounds (settings modal) ---------- */
+/* ---------- 操作音效（设置弹窗） ---------- */
 
-/* one shared grid for all event rows (row wrappers are display:contents) so
-   every row's dropdown starts at the same x and spans the same width whatever
-   the label lengths; the name column floors at the widest label, the pick
-   column is what compresses on narrow screens (down to 96px, 210px cap) */
+/* 所有事件行共用一个 grid（行包装器为 display:contents），因此无论标签
+   长短如何，每一行的下拉菜单都从同一 x 位置开始、并占据相同宽度；
+   名称列以最宽的标签保底，窄屏下被压缩的是选择列
+   （最小 96px，上限 210px） */
 .sound-event-list {
     display: grid;
     grid-template-columns: auto minmax(min-content, 1fr) minmax(96px, 210px) auto;
@@ -348,7 +348,7 @@
     font-size: 13px;
 }
 
-/* ---------- join overlay ---------- */
+/* ---------- 加入遮罩 ---------- */
 
 .join-card {
     text-align: center;
@@ -393,7 +393,7 @@
     margin: 0 0 12px;
 }
 
-/* ---------- responsive ---------- */
+/* ---------- 响应式 ---------- */
 
 @media (max-width: 860px) {
     .channel-layout {
@@ -426,7 +426,7 @@
     }
 }
 
-/* pending image thumbnails live INSIDE the composer box, above the input line */
+/* 待发送图片缩略图放在输入盒内部、输入行上方 */
 .chat-attachments {
     display: flex;
     flex-wrap: wrap;
@@ -470,7 +470,7 @@
     color: #2b0a09;
 }
 
-/* send button split (QQ style): 发送 + caret opening the send-key menu */
+/* 发送按钮拆分（QQ 风格）：发送主按钮 + 打开发送键菜单的小箭头 */
 
 .send-btn-wrap {
     position: relative;
@@ -502,7 +502,7 @@
     transform: none;
 }
 
-/* send-key options floating above the button */
+/* 悬浮于按钮上方的发送键选项 */
 
 .send-key-menu {
     position: absolute;
@@ -552,15 +552,15 @@
     content: '✓';
 }
 
-/* ---------- light theme overrides ---------- */
+/* ---------- 浅色主题覆盖 ---------- */
 
-/* frosted header follows the light panel color */
+/* 毛玻璃头部跟随浅色面板颜色 */
 html[data-theme='light'] .channel-header {
     background: rgba(255, 255, 255, 0.85);
 }
 
-/* self bubbles are QQ blue with white text; the image-bubble variant keeps
-   its own (higher-specificity) text-1 rule and needs no change */
+/* 自己的气泡为 QQ 蓝底白字；图片气泡变体保有自己的
+   （更高优先级）text-1 规则，无需改动 */
 html[data-theme='light'] .msg.self .msg-text {
     color: #fff;
 }
@@ -573,13 +573,13 @@ html[data-theme='light'] .chat-attachment-remove:hover {
     color: #fff;
 }
 
-/* ---------- reply composer bar + @mention autocomplete menu ---------- */
+/* ---------- 回复输入条 + @提及自动补全菜单 ---------- */
 
 .composer-wrap {
     position: relative;
 }
 
-/* active reply context pinned above the input (QQ style) */
+/* 当前回复上下文固定显示在输入行上方（QQ 风格） */
 .reply-bar {
     display: flex;
     align-items: center;
@@ -631,7 +631,7 @@ html[data-theme='light'] .chat-attachment-remove:hover {
     color: var(--danger);
 }
 
-/* member autocomplete, anchored above the composer */
+/* 成员自动补全菜单，锚定在输入区上方 */
 .mention-menu {
     position: absolute;
     bottom: calc(100% + 6px);

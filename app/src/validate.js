@@ -22,7 +22,7 @@ function hasPathTraversal(input) {
         decodedInput = decodeURIComponent(input);
         decodedInput = decodeURIComponent(decodedInput);
     } catch (err) {
-        /* malformed percent-encoding — analyze the raw input instead */
+        /* 百分号编码畸形——改为分析原始输入 */
     }
 
     const pathTraversalPattern = /(\.\.(\/|\\))+/;
@@ -49,10 +49,10 @@ function isValidData(data) {
     return Object.keys(data).length > 0;
 }
 
-// Standard 8-4-4-4-12 hex uuid (any version) — the session key a room's peer
-// map is keyed by. Strict shape on purpose: the value becomes an object key,
-// so it must never be able to collide with the room meta keys
-// ('lock'/'password'/'joinLock') or with '__proto__'.
+// 标准 8-4-4-4-12 十六进制 uuid（任意版本）——房间 peer 表所用的会话键。
+// 刻意采用严格形状：该值会成为对象键，
+// 因此绝不能与房间元键
+// （'lock'/'password'/'joinLock'）或 '__proto__' 发生碰撞。
 const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isValidSessionUuid(input) {

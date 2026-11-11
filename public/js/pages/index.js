@@ -1,8 +1,8 @@
 /**
- * Homepage — public channel list, polled for online counts. Local-only
- * navigation helpers on top: live search over the loaded list, per-channel
- * favorites and a "recently visited" row (all in localStorage, no server
- * state involved).
+ * 首页 — 公开频道列表，轮询在线人数。其上是纯本地的
+ * 导航辅助：对已加载列表的实时搜索、按频道收藏
+ * 与「最近访问」一行（全部存 localStorage，
+ * 不涉及服务器状态）。
  */
 
 import { api } from '/js/core/api.js';
@@ -13,9 +13,9 @@ import { $, el, toast } from '/js/core/utils.js';
 
 const POLL_MS = 15000;
 
-// everything this app stores per-browser; nickname can be cleared separately.
-// The theme choice (vc_theme) is deliberately NOT listed — "clear everything"
-// must keep the user's palette.
+// 本应用按浏览器存储的全部键；昵称可单独清除。
+// 主题偏好（vc_theme）刻意不列入 ——「清除全部」
+// 必须保留用户的配色选择。
 const NICK_KEY = 'vc_nick';
 const CONFIG_KEYS = [
     'vc_audio_settings',
@@ -27,8 +27,8 @@ const CONFIG_KEYS = [
     'vc_fav_channels',
     'vc_recent_channels',
 ];
-const FAV_KEY = 'vc_fav_channels'; // [channelId]
-const RECENT_KEY = 'vc_recent_channels'; // [{id, ts}] newest first
+const FAV_KEY = 'vc_fav_channels'; // [频道 ID]
+const RECENT_KEY = 'vc_recent_channels'; // [{id, ts}] 新的在前
 const RECENT_MAX = 6;
 
 const MOON_SVG =
@@ -54,7 +54,7 @@ async function boot() {
     setInterval(load, POLL_MS);
 }
 
-// ----- dark/light/auto theme pill (topbar) — cycles through the three states
+// ----- dark/light/auto 主题胶囊按钮（顶栏）—— 在三态间循环切换
 
 function bindThemeToggle() {
     const button = $('#themeBtn');
@@ -75,7 +75,7 @@ function bindThemeToggle() {
     render();
 }
 
-// ----- language switch (two-way toggle; reloads so every static string flips)
+// ----- 语言切换（双向开关；切换后重载页面，让所有静态文案一并翻转）
 
 function bindLangSwitch() {
     const wrap = $('#langSwitch');
@@ -91,12 +91,12 @@ function bindLangSwitch() {
     render();
 }
 
-// ----- temporary rooms: spawn one by visiting a fresh /c/<id>; the server
-// creates it in memory on first join and drops it when the last peer leaves -----
+// ----- 临时房间：访问一个全新的 /c/<id> 即可生成；服务器在首次
+// join 时于内存中创建它，最后一个成员离开即销毁 -----
 
 function bindCreateTemp() {
     $('#createTempBtn').addEventListener('click', () => {
-        const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'; // same unambiguous set as the server
+        const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'; // 与服务器一致的无歧义字符集
         const bytes = crypto.getRandomValues(new Uint8Array(8));
         let id = '';
         for (let i = 0; i < 8; i++) id += alphabet[bytes[i] % alphabet.length];
@@ -104,7 +104,7 @@ function bindCreateTemp() {
     });
 }
 
-// ----- favorites + recent visits (localStorage only) -----
+// ----- 收藏 + 最近访问（仅 localStorage） -----
 
 function loadList(key) {
     try {
@@ -134,13 +134,13 @@ function noteVisit(id) {
     localStorage.setItem(RECENT_KEY, JSON.stringify(recent.slice(0, RECENT_MAX)));
 }
 
-// patch every channel link so a visit lands in "recent" before navigating
+// 拦截所有频道卡片链接，让访问在跳转前先记入「最近访问」
 document.addEventListener('click', (event) => {
     const card = event.target.closest?.('a.channel-card');
     if (card?.dataset?.id) noteVisit(card.dataset.id);
 });
 
-// ----- live search over the loaded list -----
+// ----- 对已加载列表的实时搜索 -----
 
 let searchQuery = '';
 
@@ -155,7 +155,7 @@ async function load() {
     try {
         const { channels, settings } = await api.getPublicChannels();
         $('#statusHint').textContent = '';
-        // temp rooms disabled by the admin — hide the spawn entry point
+        // 管理员已关闭临时房间 —— 隐藏生成入口
         $('#createTempBtn').classList.toggle('hidden', settings?.tempRooms === false);
         cache = Array.isArray(channels) ? channels : [];
         render();
@@ -189,10 +189,10 @@ function render() {
     renderGroupRow($('#favRow'), $('#favGrid'), loadFavorites());
 }
 
-/** One optional group row (favorites / recent); hidden when it has no cards. */
+/** 单个可选分组行（收藏 / 最近访问）；无卡片时隐藏。 */
 function renderGroupRow(row, grid, ids) {
     const byId = new Map(cache.map((channel) => [channel.id, channel]));
-    // a query filters the groups too; unknown ids (deleted/temp rooms) drop out
+    // 搜索词同样过滤分组；未知 ID（已删除/临时房间）自然淘汰
     const cards = [...new Set(ids)]
         .map((id) => byId.get(id))
         .filter(Boolean)
@@ -201,7 +201,7 @@ function renderGroupRow(row, grid, ids) {
     grid.replaceChildren(...cards.map((channel) => renderCard(channel)));
 }
 
-// ----- clear local user data (nickname only, or nickname + all settings) -----
+// ----- 清除本地用户数据（仅昵称，或昵称 + 全部设置） -----
 
 function bindClearData() {
     const modal = $('#clearModal');
@@ -219,8 +219,8 @@ function bindClearData() {
     $('#clearAllBtn').addEventListener('click', () => {
         localStorage.removeItem(NICK_KEY);
         for (const key of CONFIG_KEYS) localStorage.removeItem(key);
-        // persisted host logins and remembered channel passwords (one key per
-        // channel) go with "everything"
+        // 持久化的主持人登录凭据与记住的频道密码（每频道一个键）
+        // 随「清除全部」一并清理
         for (const key of Object.keys(localStorage)) {
             if (key.startsWith('vc_host_token_') || key.startsWith('vc_chan_pw_')) localStorage.removeItem(key);
         }

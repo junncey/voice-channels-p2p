@@ -1,28 +1,28 @@
 /**
- * Image transfer over the existing chat DataChannel — chunked JSON frames.
+ * 图片经现有聊天 DataChannel 传输——分块 JSON 帧。
  *
- * Protocol (all fields short, chunks are plain base64 text so no binary
- * DataChannel support is required):
+ * 协议（字段都很短，分块是纯 base64 文本，因此不需要二进制
+ * DataChannel 支持）：
  *   { type:'img-start', id, from, mime, size, total, batch? }
  *   { type:'img-chunk', id, i, d }        (i = 0..total-1)
  *   { type:'img-end',   id, from, batch? }
  *
- * The sending side compresses first: tiny originals and GIFs pass through
- * untouched (animation/transparency preserved), everything else is re-encoded
- * to JPEG with decreasing size/quality until it fits the budget.
+ * 发送端先压缩：极小的原图和 GIF 原样通过
+ * （保留动画/透明度），其余重新编码为 JPEG，
+ * 逐步降低尺寸/质量直到满足预算。
  */
 
-const CHUNK_CHARS = 12 * 1024; // base64 chars per frame — cross-browser safe
-const MAX_FILE_BYTES = 8 * 1024 * 1024; // raw file picked/pasted by the user
-export const MAX_TRANSFER_CHARS = 1600 * 1024; // receiver cap (~1.15 MB decoded)
-const MAX_INCOMING_TRANSFERS = 8; // concurrent reassemblies — img-start flood guard
+const CHUNK_CHARS = 12 * 1024; // 每帧 base64 字符数——跨浏览器安全
+const MAX_FILE_BYTES = 8 * 1024 * 1024; // 用户选择/粘贴的原始文件
+export const MAX_TRANSFER_CHARS = 1600 * 1024; // 接收端上限（解码后约 1.15 MB）
+const MAX_INCOMING_TRANSFERS = 8; // 并发重组数——img-start 洪水防护
 const SAFE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
-/** Shared data-URL whitelist (twin of the server's limits.IMAGE_DATA_URL_RE). */
+/** 共享 data URL 白名单（服务端 limits.IMAGE_DATA_URL_RE 的镜像）。 */
 export const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
 /**
- * Read a picked/pasted image file into a sendable data URL.
+ * 把选择/粘贴的图片文件读入可发送的 data URL。
  * @returns {Promise<{mime:string, dataUrl:string}>}
  * @throws {Error} 'not-image' | 'too-large' | 'read-failed' | 'compress-failed'
  */
@@ -38,7 +38,7 @@ export async function fileToImageMessage(file) {
     });
     if (!DATA_URL_RE.test(dataUrl)) throw new Error('not-image');
 
-    // keep GIFs (canvas would kill the animation) and small originals as-is
+    // GIF 原样保留（canvas 会杀掉动画），小原图同样原样保留
     if (file.type === 'image/gif' || dataUrl.length <= 600 * 1024) {
         if (dataUrl.length <= MAX_TRANSFER_CHARS) return { mime: file.type, dataUrl };
     }
@@ -46,7 +46,7 @@ export async function fileToImageMessage(file) {
     const compressed = await compressToJpeg(dataUrl).catch(() => null);
     if (!compressed) throw new Error('compress-failed');
     if (compressed.length >= dataUrl.length && dataUrl.length <= MAX_TRANSFER_CHARS) {
-        return { mime: file.type, dataUrl }; // compression didn't help
+        return { mime: file.type, dataUrl }; // 压缩没带来收益
     }
     if (compressed.length > MAX_TRANSFER_CHARS) throw new Error('too-large');
     return { mime: 'image/jpeg', dataUrl: compressed };
@@ -73,17 +73,17 @@ async function compressToJpeg(dataUrl) {
             if (last.length <= 900 * 1024) return last;
         }
     }
-    return last; // best effort even if over budget — sender re-checks the cap
+    return last; // 即使超预算也尽力而为——发送端会复查上限
 }
 
 /**
- * Split a data URL into protocol frames and push them through `send`
- * (typically Mesh.sendChat, one broadcast per frame). An optional `batch`
- * id ties the transfer to a merged text+images bubble on the receiver.
- * The optional async `ready` hook is the backpressure pump: awaited every
- * few chunks (Mesh.drainChat) so an image burst yields to the SCTP buffers —
- * the data shares its transport (and its bandwidth) with the voice packets,
- * and an unpaced dump audibly glitches the call on weak links.
+ * 把 data URL 拆成协议帧并经 `send` 推送
+ * （通常是 Mesh.sendChat，每帧一次广播）。可选的 `batch` id
+ * 把这次传输与接收端合并的图文气泡绑定。
+ * 可选的异步 `ready` 钩子就是背压泵：每几个分块 await 一次
+ * （Mesh.drainChat），让图片突发向 SCTP 缓冲让路——
+ * 数据与语音包共享同一传输通道（和带宽），
+ * 不节流地倾倒会在弱链路上造成可闻的通话卡顿。
  */
 export async function sendImageData({ send, from, mime, dataUrl, batch = '', ready }) {
     const id = crypto.randomUUID();
@@ -93,31 +93,31 @@ export async function sendImageData({ send, from, mime, dataUrl, batch = '', rea
     send({ type: 'img-start', id, from, mime, size: base64.length, total, batch: tag });
     for (let i = 0; i < total; i++) {
         send({ type: 'img-chunk', id, i, d: base64.substr(i * CHUNK_CHARS, CHUNK_CHARS) });
-        // pump: every 4 chunks (~48KB) let the buffers drain below the mesh's
-        // low-water mark; a hook that resolves instantly (no congestion, or no
-        // mesh support) keeps the loop effectively synchronous
+        // 泵送：每 4 个分块（约 48KB）让缓冲排到 mesh 的
+        // 低水位以下；立即 resolve 的钩子（无拥塞、或不支持
+        // mesh）让循环实际上保持同步
         if (typeof ready === 'function' && (i & 3) === 3) await ready();
     }
     send({ type: 'img-end', id, from, batch: tag });
 }
 
 /**
- * Reassemble incoming frames. Everything is validated before it touches the
- * DOM: mime whitelist, size caps, chunk bounds — a malicious peer can at worst
- * waste bandwidth up to the cap, never inject markup.
+ * 重组收到的帧。所有内容在触碰 DOM 之前先校验：
+ * mime 白名单、大小上限、分块边界——恶意 peer 最多
+ * 只能浪费带宽到上限为止，永远无法注入标记。
  *
- * The per-transfer timeout is a NO-PROGRESS window: every previously-unseen
- * chunk re-arms it, so a slow-but-alive transfer survives (a max-size image on
- * a ~500kbps link takes well over the old fixed 20s) while a stalled one still
- * fails promptly. Duplicate chunk replays don't re-arm — a malicious resend
- * loop can't keep a dead transfer alive forever.
+ * 每次传输的超时是一个无进展窗口：每个前所未见的分块
+ * 都会重新武装它，慢但仍在推进的传输得以存活
+ * （一张最大尺寸的图片在 ~500kbps 链路上远超旧的固定 20s），
+ * 而停滞的传输仍会迅速失败。重复分块的重放不会重新武装——
+ * 恶意重发循环无法让死掉的传输永远活着。
  *
  * @param {object} options
  * @param {function({from:string, dataUrl:string, batch:string, peerId:string}):void} options.onDone
- *        `peerId` is the DataChannel peer the frames arrived from — trust it
- *        over the self-declared `from` field when picking a display name.
+ *        `peerId` 是帧到达时所经的 DataChannel peer——
+ *        选择显示名时优先信它，而非自报的 `from` 字段。
  * @param {function(reason:string):void} [options.onFail]
- * @param {number} [options.stallMs] no-progress timeout (default 20s)
+ * @param {number} [options.stallMs] 无进展超时（默认 20s）
  */
 export function createImageReceiver({ onDone, onFail, stallMs = 20000 }) {
     /** id -> { from, mime, size, total, parts, got, timer } */
@@ -137,8 +137,8 @@ export function createImageReceiver({ onDone, onFail, stallMs = 20000 }) {
         if (msg.type === 'img-start') {
             const { id, from, mime, size, total } = msg;
             if (typeof id !== 'string' || id.length > 64 || incoming.has(id)) return;
-            // at capacity: silently drop (fail() below is a no-op for
-            // never-registered ids) — a peer can't flood the map with ids
+            // 容量已满：静默丢弃（下面的 fail() 对未注册的 id
+            // 是空操作）——peer 无法用 id 淹没这张 map
             if (incoming.size >= MAX_INCOMING_TRANSFERS) return;
             if (!SAFE_MIMES.includes(mime)) return fail(id, 'bad-mime');
             if (typeof size !== 'number' || size <= 0 || size > MAX_TRANSFER_CHARS) return fail(id, 'bad-size');
@@ -166,7 +166,7 @@ export function createImageReceiver({ onDone, onFail, stallMs = 20000 }) {
             if (!entry.parts[i]) {
                 entry.parts[i] = d;
                 entry.got += d.length;
-                clearTimeout(entry.timer); // progress: restart the no-progress window
+                clearTimeout(entry.timer); // 有进展：重启无进展窗口
                 entry.timer = setTimeout(() => fail(msg.id, 'timeout'), stallMs);
                 if (entry.got > entry.size) fail(msg.id, 'overflow');
             }

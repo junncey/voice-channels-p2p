@@ -1,8 +1,8 @@
 /**
- * e2e inspection hooks (only with #debug in the URL — never in normal use).
- * Extracted from the channel controller: every probe pulls a FRESH context
- * snapshot via getCtx(), so the controller's mutable module state (hub, mesh,
- * members, …) is always read live.
+ * e2e 检查钩子（仅当 URL 带 #debug 时——正常使用绝不出现）。
+ * 自频道控制器拆出：每个探针都经 getCtx() 拉取全新上下文
+ * 快照，控制器的可变模块状态（hub、mesh、members 等）
+ * 始终是实时读取。
  */
 
 export function installDebugHooks(getCtx) {
@@ -48,9 +48,9 @@ export function installDebugHooks(getCtx) {
             micTest: micTest ? { delay: micTest.delay.delayTime.value, gain: micTest.gain.gain.value } : null,
             micVolume: settings.micVolume,
             micGain: hub?.mic?.gain.gain.value ?? null,
-            // live sampling (not the throttled _tick values) — readable in background tabs.
-            // Same float time-domain RMS as AudioHub._tick (the watcher buffer is a
-            // Float32Array; the old byte-API read here threw on every call)
+            // 实时采样（不是被节流的 _tick 值）—— 后台标签页也能读。
+            // 与 AudioHub._tick 相同的浮点时域 RMS（watcher 缓冲是
+            // Float32Array；旧字节 API 在这里每次调用都会抛错）
             levels: hub
                 ? Object.fromEntries(
                       [...hub.watchers.entries()].map(([k, w]) => {
@@ -100,8 +100,8 @@ export function installDebugHooks(getCtx) {
             },
         };
     };
-    // e2e aid: swap the outgoing mic track for a synthetic sine — verifies the
-    // WebRTC chain without depending on acoustic mic/speaker hardware
+    // e2e 辅助：把对外的麦克风轨换成合成正弦波 —— 不依赖真实
+    // 麦克风/扬声器硬件即可验证 WebRTC 链路
     window.__vcTone = async (ms = 3000) => {
         const { hub, mesh, localStream, micProcessed } = getCtx();
         if (!mesh || !hub?.ctx || !localStream) return 'not-ready';
@@ -115,7 +115,7 @@ export function installDebugHooks(getCtx) {
         g.connect(an);
         let restore = null;
         if (micProcessed && hub.mic) {
-            g.connect(hub.mic.gain); // rides the input-gain pipeline
+            g.connect(hub.mic.gain); // 搭输入增益管线的车
         } else {
             const dest = hub.ctx.createMediaStreamDestination();
             g.connect(dest);
@@ -125,7 +125,7 @@ export function installDebugHooks(getCtx) {
         const data = new Uint8Array(an.frequencyBinCount);
         window.__vcToneLevel = 0;
         osc.start();
-        osc.stop(hub.ctx.currentTime + ms / 1000); // audio-clock schedule: background-tab timer throttling can't stall it
+        osc.stop(hub.ctx.currentTime + ms / 1000); // 音频时钟排程：后台标签页的定时器节流卡不住它
         const t0 = Date.now();
         while (Date.now() - t0 < ms) {
             await new Promise((r) => setTimeout(r, 300));
@@ -153,8 +153,8 @@ export function installDebugHooks(getCtx) {
                         packets: r.packetsReceived,
                         lost: r.packetsLost,
                         jitterMs: typeof r.jitter === 'number' ? Math.round(r.jitter * 1000) : null,
-                        // what the listener actually hears: NetEQ concealment share
-                        // (PLC stitches over loss) and the playout buffer it keeps
+                        // 听者实际听到的：NetEQ 掩蔽占比
+                        // （PLC 在丢包处缝合）与其维持的播放缓冲
                         concealed: r.concealedSamples,
                         concealedPct:
                             r.concealedSamples && r.totalSamplesReceived
@@ -170,7 +170,7 @@ export function installDebugHooks(getCtx) {
                         dir: 'out',
                         bytes: r.bytesSent,
                         packets: r.packetsSent,
-                        targetBitrate: r.targetBitrate, // readback: did setParameters stick?
+                        targetBitrate: r.targetBitrate, // 回读：setParameters 是否生效？
                     });
             });
             const path = await mesh.connPath(peerId).catch(() => null);
@@ -178,16 +178,16 @@ export function installDebugHooks(getCtx) {
                 peerId,
                 state: entry.pc.connectionState,
                 path,
-                // packet-level redundancy negotiated on this link (null = no
-                // remote description yet) — readback for the RED preference
+                // 本链路协商出的包级冗余（null = 尚无远端
+                // 描述）—— RED 偏好的回读
                 red: typeof mesh.redNegotiated === 'function' ? mesh.redNegotiated(peerId) : undefined,
                 rows,
             });
         }
         return out;
     };
-    // probe: is a FRESH Web Audio tap on the (now flowing) remote stream live,
-    // and does a muted <audio> element prime the pipeline?
+    // 探针：对（已在流动的）远端流新挂一个 Web Audio 抽头是否有声，
+    // 以及 muted <audio> 元件能否预热管线？
     window.__vcRetap = async (ms = 1200) => {
         const { hub } = getCtx();
         if (!hub?.ctx) return 'no-ctx';
@@ -218,14 +218,14 @@ export function installDebugHooks(getCtx) {
         }
         return out;
     };
-    // probe: force the AudioContext suspended/running to test the fallback migration
+    // 探针：强制 AudioContext 挂起/运行，测试回退迁移
     window.__vcCtx = (op) => {
         const { hub } = getCtx();
         return op === 'suspend' ? hub?.ctx?.suspend() : hub?.ctx?.resume();
     };
-    // probe: direct access to the mesh (pc states, restartIce) for recovery tests
+    // 探针：直接访问 mesh（PC 状态、restartIce）用于恢复测试
     window.__vcMesh = () => getCtx().mesh;
-    // probe: persistent tap on the outgoing (post-gain) mic stream; sync read, external pacing
+    // 探针：对外（增益后）麦克风流上的常驻抽头；同步读取，外部驱动节拍
     window.__vcOutTap = () => {
         const { hub } = getCtx();
         if (!hub?.ctx || !hub.mic) return null;
@@ -233,7 +233,7 @@ export function installDebugHooks(getCtx) {
             try {
                 window.__outTap?.src.disconnect();
             } catch {
-                /* stale tap */
+                /* 过期的旧抽头 */
             }
             const src = hub.ctx.createMediaStreamSource(hub.mic.stream);
             const an = hub.ctx.createAnalyser();
@@ -243,12 +243,12 @@ export function installDebugHooks(getCtx) {
             window.__outTapKey = hub.mic;
         }
         const { an, data } = window.__outTap;
-        an.getFloatTimeDomainData(data); // linear scale — the dB-mapped byte readout hides gain changes
+        an.getFloatTimeDomainData(data); // 线性刻度 —— 字节读数按 dB 映射，会掩盖增益变化
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
         return Number(Math.sqrt(sum / data.length).toFixed(4));
     };
-    // probe: linear RMS of the first remote peer stream (receive side)
+    // 探针：第一个远端对端流的线性 RMS（接收侧）
     window.__vcPeerRms = () => {
         const { hub } = getCtx();
         const w = hub?.watchers && [...hub.watchers.entries()].find(([k]) => k !== 'self');

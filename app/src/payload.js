@@ -1,7 +1,7 @@
 /*
-Shared request-payload helpers: the sanitize-except-secrets split that keeps
-password-like fields verbatim, the admin channel payload built on top of it,
-and a tiny JSON serializer used by the error paths.
+共享的请求载荷工具：「除密钥外全部清洗」的拆分逻辑（sanitizeExceptSecrets，
+密码类字段原文保留）、在其上构建的管理端频道载荷，
+以及错误路径用到的一个小型 JSON 序列化器。
 */
 
 'use strict';
@@ -9,10 +9,10 @@ and a tiny JSON serializer used by the error paths.
 const checkXSS = require('./xss.js');
 
 /**
- * checkXSS minus the secret fields: passwords must reach the hasher/comparer
- * VERBATIM — DOMPurify silently rewrites strings containing markup characters
- * (<, >, &), which would change the effective password and cut its entropy.
- * Everything else is sanitized as usual; the raw secrets are merged back in.
+ * checkXSS 的「密钥豁免」版：密码必须原封不动地到达哈希/比对函数——
+ * DOMPurify 会静默改写含标记字符（<、>、&）的字符串，
+ * 这会改变实际生效的密码、削弱其熵。
+ * 其余字段照常清洗；原始密钥最后再合并回去。
  */
 function sanitizeExceptSecrets(raw, secretKeys) {
     if (!raw || typeof raw !== 'object') return {};
@@ -25,9 +25,9 @@ function sanitizeExceptSecrets(raw, secretKeys) {
 }
 
 /**
- * Admin channel create/update payload: the channel password and every host
- * password stay raw (see sanitizeExceptSecrets); host usernames and the rest
- * of the definition go through checkXSS as before.
+ * 管理端频道创建/更新载荷：频道密码与每个主持人密码保持原文
+ * （见 sanitizeExceptSecrets）；主持人用户名及定义的其余部分
+ * 照旧经过 checkXSS 清洗。
  */
 function sanitizeChannelPayload(body) {
     const { password, hosts, ...safe } = sanitizeExceptSecrets(body, ['password']);
@@ -38,7 +38,7 @@ function sanitizeChannelPayload(body) {
     return out;
 }
 
-/** Object to Json */
+/** 对象转 JSON */
 function toJson(data) {
     return JSON.stringify(data, null, 4);
 }

@@ -1,8 +1,8 @@
 'use strict';
 
 // npx mocha test-micGrant.js
-// acquireMic lives in a browser ES module — import it dynamically via its
-// file URL (the package itself stays CommonJS).
+// acquireMic 位于浏览器 ES 模块——经其 file URL 动态导入
+// （包本身保持 CommonJS）。
 
 require('should');
 const { pathToFileURL } = require('url');
@@ -27,8 +27,8 @@ describe('test-micGrant', () => {
         });
     });
 
-    // Node exposes `navigator` as a getter-only global, so a plain assignment
-    // would throw; redefine it for the duration of one test.
+    // Node 把 `navigator` 暴露为只读 getter 全局，直接赋值会抛错；
+    // 改用 defineProperty 在单个测试期间临时重定义。
     function stubGetUserMedia(impl) {
         Object.defineProperty(globalThis, 'navigator', {
             value: { mediaDevices: { getUserMedia: impl } },
@@ -65,8 +65,8 @@ describe('test-micGrant', () => {
         const res = await acquireMic({ audio: true }, { timeoutMs: 30 });
         (res.stream === null).should.be.true();
         res.timedOut.should.be.true();
-        // the dialog gets answered after we already degraded: that stream must
-        // be stopped, or the capture light stays on with nobody reading it
+        // 我们已降级之后弹窗才被同意：那个流必须被 stop，否则采集指示灯
+        // 长亮却没人读它的数据
         release(lateStream);
         await new Promise((resolve) => setTimeout(resolve, 10));
         stopped.should.eql(['late']);

@@ -1,8 +1,8 @@
 /*
-Unread badge + desktop notifications — background-tab bookkeeping for the
-channel page: title counter for unread messages and an @mention
-Notification (when enabled and permission is granted).
-Shared page state arrives via the `s` accessor object (owned by channel.js).
+未读徽章 + 桌面通知 —— 频道页的后台标签页簿记：未读消息的
+标题计数，以及 @提及时的桌面 Notification（开关开启且已授权
+时触发）。
+共享页面状态经 `s` 存取器对象到达（归 channel.js 所有）。
 */
 
 export function createNotify({ s, x, channelId, escapeRegExp, toast, t }) {
@@ -13,15 +13,15 @@ export function createNotify({ s, x, channelId, escapeRegExp, toast, t }) {
     let notifyEnabled =
         notifySupported && localStorage.getItem(NOTIFY_KEY) === '1' && Notification.permission === 'granted';
 
-    /** true when the text contains an @mention of the local user's name */
+    /** 文本中包含对本机用户名的 @提及 时为 true */
     function mentionsMe(text) {
         if (!s.selfName || !text.includes('@')) return false;
         const re = new RegExp(`@${escapeRegExp(s.selfName)}(?![\\p{L}\\p{N}_])`, 'u');
         return re.test(text);
     }
 
-    /** A message from someone else arrived: bump the background-tab counter and,
-     *  when it mentions us, fire a desktop notification (if enabled). */
+    /** 收到别人的消息：抬升后台标签页计数，
+     *  若提及我们则（在开关开启时）发桌面通知。 */
     function noteIncomingMessage(name, text) {
         if (name === s.selfName || !document.hidden) return;
         unreadCount += 1;
@@ -31,14 +31,14 @@ export function createNotify({ s, x, channelId, escapeRegExp, toast, t }) {
                 const n = new Notification(`@${name} · ${s.channelMeta?.name || channelId}`, {
                     body: (text || t('chat.image')).slice(0, 80),
                     tag: 'vc-mention',
-                    silent: true, // the message chime already played
+                    silent: true, // 消息提示音已播过
                 });
                 n.onclick = () => {
                     window.focus();
                     n.close();
                 };
             } catch {
-                /* some platforms throw on construction — the title badge still works */
+                /* 某些平台在构造时就抛错 —— 标题徽章仍然有效 */
             }
         }
     }
@@ -50,7 +50,7 @@ export function createNotify({ s, x, channelId, escapeRegExp, toast, t }) {
         }
     });
 
-    /** boot() hands over the page title once the channel metadata is in. */
+    /** 频道元数据到位后，boot() 把页面标题交到这里。 */
     function setBaseTitle(title) {
         baseTitle = title;
         document.title = baseTitle;

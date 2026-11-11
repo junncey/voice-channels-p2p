@@ -1,12 +1,12 @@
 'use strict';
 
 /*
- * Frontend version info served to pages via GET /api/version.
+ * 经 GET /api/version 下发给页面的前端版本信息。
  *
- * `build` is a fingerprint of every file under public/ (relative path +
- * content), so any frontend change is detected without bumping the
- * package.json version by hand — and backend-only deploys never mark
- * already-open pages as stale.
+ * `build` 是 public/ 下所有文件（相对路径+内容）的指纹，
+ * 因此任何前端改动都能被检测到，无需手动递增
+ * package.json 版本号——纯后端部署也绝不会把
+ * 已打开的页面误标记为过期。
  */
 
 const crypto = require('crypto');
@@ -51,12 +51,12 @@ function getVersionInfo(publicDir) {
 const BUILD_META_NAME = 'vc-build';
 
 /**
- * Bake the build id into a page's <head>.
+ * 把 build id 烤进页面 <head>。
  *
- * A page's FIRST /api/version response is not proof of what it is running: a
- * deploy can land between the page load and that call, and treating the newer
- * id as "mine" would silently hide the update forever. With the id in the HTML
- * every page knows exactly which build it booted with.
+ * 页面第一次 /api/version 的响应并不能证明它运行的是什么：部署可能落在
+ * 页面加载与该调用之间，若把更新后的 id 当作「自己的」，更新提示就会
+ * 永远被静默掩盖。把 id 写进 HTML 后，
+ * 每个页面都能确切知道自己启动于哪个 build。
  */
 function injectBuildMeta(html, build) {
     const meta = `<meta name="${BUILD_META_NAME}" content="${build}" />`;

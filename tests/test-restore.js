@@ -1,10 +1,10 @@
 'use strict';
 
 // npx mocha test-restore.js
-// Backup restore round-trip: build a server state, archive it exactly like
-// GET /api/admin/backup does, then apply it over a DIFFERENT pair of stores
-// and verify the whole-state semantics (registry, histories, missing-channel
-// sweep, rejection of bad archives).
+// 备份恢复回环：先构造一份服务器状态，按 GET /api/admin/backup 的方式
+// 逐字打包归档，然后应用到另一对全新 store 上，验证整态语义
+// （注册表、历史、缺失频道清扫、坏归档拒绝）。
+//
 
 require('should');
 const fs = require('fs');
@@ -31,7 +31,7 @@ function buildSource() {
     return { channelStore, chatStore, dir };
 }
 
-/** The exact archive shape GET /api/admin/backup produces. */
+/** 与 GET /api/admin/backup 产出的归档形状完全一致。 */
 function makeArchive(channelStore, chatStore) {
     const entries = [];
     if (fs.existsSync(channelStore.filePath)) {
@@ -73,8 +73,8 @@ describe('test-restore', () => {
             channelStore: new ChannelStore({ filePath: path.join(dir, 'channels.json'), autoInit: true }),
             chatStore: new ChatStore({ dir: path.join(dir, 'chat_history'), sweepMs: 0 }),
         };
-        // pre-existing state the restore must REPLACE, including a channel
-        // that is NOT in the archive (whole-state semantics)
+        // 预置一份恢复必须整态替换的旧状态，包括一个归档里
+        // 不存在的频道（整态语义）
         await target.channelStore.create({ id: 'ghostchan', name: 'Old' });
         target.chatStore.append('ghostchan', { name: 'x', text: 'stale' });
         target.chatStore.append('chan2', { name: 'y', text: 'not in archive' });
@@ -83,21 +83,21 @@ describe('test-restore', () => {
         stats.channels.should.equal(2);
         stats.histories.should.equal(1);
 
-        // registry replaced: archive channels in, pre-existing ones out
+        // 注册表被替换：归档内的频道进来，预置的频道出去
         target.channelStore.exists('chan1').should.be.true();
         target.channelStore.exists('chan2').should.be.true();
         target.channelStore.exists('ghostchan').should.be.false();
-        // settings travelled along
+        // settings 一并随行
         target.channelStore.settings.chatRetentionHours.should.equal(48);
-        // host password hashes survive (verify against the original password)
+        // 主持人密码哈希存活（用原始密码验证）
         (await target.channelStore.verifyHost('chan1', 'hosta', 'pw1')).username.should.equal('hosta');
-        // history restored through the in-memory caches
+        // 历史经内存缓存恢复
         const rows = target.chatStore.history('chan1').messages;
         rows.map((r) => r.text).should.eql(['hello', 'edited?']);
         rows[1].reply.name.should.equal('bob');
-        // histories of channels absent from the archive are gone
+        // 归档中缺失频道的历史已被清除
         target.chatStore.listFiles().should.eql(['chan1']);
-        // and the restored registry is on disk (a fresh store sees the same)
+        // 且恢复后的注册表落了盘（新建 store 读到同样的内容）
         const reopened = new ChannelStore({ filePath: path.join(dir, 'channels.json'), autoInit: false });
         reopened.exists('chan1').should.be.true();
         reopened.exists('ghostchan').should.be.false();
@@ -124,7 +124,7 @@ describe('test-restore', () => {
         };
         const stats = await applyBackupArchive(archive, target);
         stats.histories.should.equal(1);
-        // the legacy file is in place and migrates on first read
+        // 旧格式文件原样就位，首次读取时才迁移
         target.chatStore
             .history('legacy1')
             .messages.map((m) => m.text)
@@ -140,14 +140,14 @@ describe('test-restore', () => {
         };
         await target.channelStore.create({ id: 'keepme', name: 'K' });
 
-        // not gzip
+        // 不是 gzip
         await applyBackupArchive(Buffer.from('plain text'), target).should.be.rejectedWith(/gzip/);
-        // valid gzip, not a tar
+        // 合法 gzip，但不是 tar
         await applyBackupArchive(zlib.gzipSync(Buffer.from('garbage!')), target).should.be.rejectedWith(RestoreError);
-        // tar without channels.json (the lone history entry is valid)
+        // 缺 channels.json 的 tar（单独的历史条目本身是合法的）
         const noRegistry = zlib.gzipSync(tarFiles([{ name: 'chat_history/roomx.jsonl', data: Buffer.from('{}\n') }]));
         await applyBackupArchive(noRegistry, target).should.be.rejectedWith(/channels\.json/);
-        // unexpected entry name (path traversal shape)
+        // 意外的条目名（路径穿越形态）
         const evil = zlib.gzipSync(
             tarFiles([
                 { name: 'channels.json', data: fs.readFileSync(target.channelStore.filePath) },
@@ -155,7 +155,7 @@ describe('test-restore', () => {
             ])
         );
         await applyBackupArchive(evil, target).should.be.rejectedWith(/unexpected archive entry/);
-        // registry with invalid channel ids
+        // 注册表含非法频道 ID
         const badRegistry = zlib.gzipSync(
             tarFiles([
                 {
@@ -166,7 +166,7 @@ describe('test-restore', () => {
         );
         await applyBackupArchive(badRegistry, target).should.be.rejectedWith(/invalid channel ids/);
 
-        // nothing above changed the target state
+        // 以上所有拒绝都没有改动目标状态
         target.channelStore.exists('keepme').should.be.true();
         target.chatStore.listFiles().should.be.empty();
     });

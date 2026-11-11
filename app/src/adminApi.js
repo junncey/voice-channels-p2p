@@ -1,12 +1,12 @@
 /*
-Admin console + host REST surface, and the backup/restore machinery behind it.
+管理后台 + host 的 REST 面，及其背后的备份/恢复机制。
 
-Everything /api/admin/* and /api/host/* lives here (host login + chat export
-included): the console stays completely DISABLED — 404 on every route — until
-both CHANNEL_ADMIN_PASSWORD and CHANNEL_ADMIN_JWT_SECRET are configured.
-Also owns the scheduled rolling backup (same archive as the admin download).
-JWT signing/verification and the login rate limiter are injected by server.js
-(the assembly point); everything here moved out of server.js verbatim.
+所有 /api/admin/* 与 /api/host/*（含 host 登录与聊天导出）都在这里：
+在 CHANNEL_ADMIN_PASSWORD 与 CHANNEL_ADMIN_JWT_SECRET 两者都配置之前，
+后台完全禁用——每条路由一律 404。
+这里还负责定时滚动备份（与管理端下载相同的归档格式）。
+JWT 签发/校验与登录限流器由 server.js（装配点）注入；
+这里的一切都是从 server.js 原样迁出的。
 */
 
 'use strict';
@@ -22,10 +22,10 @@ const { createTarIterator } = require('./backup');
 const { applyBackupArchive, RestoreError } = require('./restore');
 const { sanitizeExceptSecrets, sanitizeChannelPayload } = require('./payload');
 
-// Scheduled rolling backup (off unless CHANNEL_BACKUP_INTERVAL_HOURS is set):
-// writes a tar.gz into CHANNEL_BACKUP_DIR and keeps the newest
-// CHANNEL_BACKUP_KEEP archives. Read from env directly so existing config.js
-// files (created before these options existed) keep working unchanged.
+// 定时滚动备份（未设置 CHANNEL_BACKUP_INTERVAL_HOURS 即关闭）：
+// 向 CHANNEL_BACKUP_DIR 写入 tar.gz，只保留最新的
+// CHANNEL_BACKUP_KEEP 份归档。直接读 env，让既有的 config.js
+// （创建于这些选项出现之前）无需改动即可继续工作。
 const BACKUP_INTERVAL_HOURS = Number(process.env.CHANNEL_BACKUP_INTERVAL_HOURS) || 0;
 const BACKUP_KEEP = Math.max(1, Number(process.env.CHANNEL_BACKUP_KEEP) || 7);
 const BACKUP_DIR = process.env.CHANNEL_BACKUP_DIR || path.join(__dirname, 'backups');
@@ -61,7 +61,7 @@ function registerAdminApi(
         broadcastRemovePeer,
     } = rooms;
 
-    // Host login -> JWT used as peer_token when joining the channel socket room
+    // host 登录 -> JWT，作为加入频道 socket 房间时的 peer_token
     app.post('/api/host/login', loginLimiter, async (req, res) => {
         const { channelId, username, password } = sanitizeExceptSecrets(req.body, ['password']);
 
@@ -69,7 +69,7 @@ function registerAdminApi(
             return res.status(400).json({ error: 'Missing channelId, username or password' });
         }
         if (!channelsCfg.adminJwtSecret) {
-            // per-channel hosts may exist, but there is no secret to sign tokens with
+            // 按频道的 hosts 可能存在，但没有可用于签发 token 的 secret
             log.warn('Host login rejected: CHANNEL_ADMIN_JWT_SECRET is not configured');
             return res.status(503).json({ error: 'server not configured' });
         }
@@ -85,12 +85,12 @@ function registerAdminApi(
 
         log.info('Host login ok', { channelId, username: host.username });
         const payload = { role: 'host', channelId, username: host.username };
-        if (host.via) payload.via = host.via; // 'default-moderator' fallback marker, re-checked at join
+        if (host.via) payload.via = host.via; // 'default-moderator' 回退标记，join 时会复查
         res.json({ token: signConsoleToken(payload, channelsCfg.hostJwtExp) });
     });
 
     // -------------------------------------------------------------------------
-    // Admin API (all 404 until the console is enabled)
+    // Admin API（后台未启用前全部 404）
     // -------------------------------------------------------------------------
 
     function requireAdmin(req, res, next) {
@@ -106,8 +106,8 @@ function registerAdminApi(
 
     app.post('/api/admin/login', loginLimiter, (req, res) => {
         if (!consoleEnabled) return res.status(404).json({ error: 'Not found' });
-        // compared verbatim against the env secret — never sanitized (an env
-        // password containing markup chars was unloginable before this fix)
+        // 与 env secret 原文比对——绝不清洗（含标记字符的 env 密码
+        // 在此修复之前根本无法登录）
         const { password } = req.body || {};
         if (!password || typeof password !== 'string') {
             return res.status(400).json({ error: 'Missing password' });
@@ -121,20 +121,20 @@ function registerAdminApi(
     });
 
     /**
-     * Evict every peer from a channel (admin channel deletion). Each socket gets
-     * a kickOut with the deletion reason, then a hard disconnect — the normal
-     * disconnect cleanup tears the room structures down.
+     * 把某频道的所有 peer 全部逐出（admin 删除频道）。每个 socket 先收到
+     * 带删除原因的 kickOut，再硬断开——正常的断开清理
+     * 会把房间结构拆除。
      */
     function evictChannelPeers(channelId, reason) {
-        // Object.hasOwn: the id is client-visible via the admin API path
+        // Object.hasOwn：该 id 经 admin API 路径对客户端可见
         const room = Object.hasOwn(channels, channelId) ? channels[channelId] : null;
         if (!room) return 0;
         let evicted = 0;
         for (const sock of Object.values(room)) {
             try {
                 sock.emit('kickOut', { reason });
-                // give the packet a beat to flush before the hard close (same
-                // shape as the single-member admin kick)
+                // 给数据包留一拍冲刷时间再硬关闭（与单成员 admin 踢人
+                // 相同的形状）
                 setTimeout(() => sock.disconnect(true), 100).unref?.();
                 evicted++;
             } catch (err) {
@@ -157,9 +157,9 @@ function registerAdminApi(
     });
 
     /**
-     * Remove one member from a channel (admin console). A live socket gets the
-     * same kickOut + hard disconnect the host path uses; a ghost (or a dead
-     * socket) is expired on the spot — release + removePeer broadcast, no timer.
+     * 从频道移除单个成员（admin 后台）。活着的 socket 得到与 host 路径
+     * 相同的 kickOut + 硬断开；幽灵（或已死 socket）当场过期——
+     * 释放 + removePeer 广播，不走定时器。
      */
     app.post('/api/admin/kick', requireAdmin, (req, res) => {
         const body = checkXSS(req.body) || {};
@@ -170,8 +170,8 @@ function registerAdminApi(
         const target = liveSessionSocket(channel, uuid);
         if (target) {
             target.emit('kickOut', { reason: 'removed by admin' });
-            // give the packet a beat to flush before the hard close (same shape as
-            // evictChannelPeers, with the race closed)
+            // 给数据包留一拍冲刷时间再硬关闭（形状同 evictChannelPeers，
+            // 并已闭合竞态）
             setTimeout(() => target.disconnect(true), 100).unref?.();
             log.info('Admin kicked member', { channel, uuid });
             audit.record('adminKick', { channel, uuid, name: peers[channel]?.[uuid]?.peer_name });
@@ -217,10 +217,10 @@ function registerAdminApi(
 
     app.delete('/api/admin/channels/:channelId', requireAdmin, (req, res) => {
         const id = req.params.channelId;
-        // temp rooms live outside the persistent registry but are deletable too
+        // 临时房间不在持久注册表内，但同样可删除
         const result = channelStore.isTemp(id) ? channelStore.removeTemp(id) : channelStore.remove(id);
         if (!result.ok) return res.status(404).json({ error: result.errors[0] });
-        // the persisted chat history is part of the channel — gone with it
+        // 持久化的聊天历史是频道的一部分——随之删除
         chatStore.removeChannel(id);
         const evicted = evictChannelPeers(id, 'channelDeleted');
         if (evicted) log.info('Channel deleted by admin, peers evicted', { channel: id, evicted });
@@ -229,16 +229,16 @@ function registerAdminApi(
     });
 
     /**
-     * One-file server backup: channels.json + every persisted chat history file
-     * as a tar.gz download (restore = unpack over a fresh data directory).
-     * Streamed end-to-end (tar iterator -> gzip transform -> response), so the
-     * whole archive is never held in memory regardless of history volume.
+     * 单文件服务器备份：channels.json + 每个持久化的聊天历史文件
+     * 以 tar.gz 下载（恢复 = 解压覆盖到全新数据目录）。
+     * 端到端流式（tar 迭代器 -> gzip 变换 -> 响应），
+     * 因此无论历史体量多大，整个归档都不会整体驻留内存。
      */
     /**
-     * Backup payload shared by the admin download and the scheduled backup:
-     * channels.json + every persisted chat history file as archive entries,
-     * preflighted for readability so failures surface as a clean error instead
-     * of a mid-stream abort after download headers are already sent.
+     * admin 下载与定时备份共用的备份载荷：
+     * channels.json + 每个持久化的聊天历史文件作为归档条目，
+     * 预检可读性，让失败以干净的错误呈现，
+     * 而不是在下载头已发出之后中途掐断流。
      */
     function collectBackupEntries() {
         const entries = [];
@@ -276,14 +276,14 @@ function registerAdminApi(
     });
 
     /**
-     * Restore a backup archive (see restore.js). The upload arrives as a raw
-     * tar.gz body (bounded by the express.raw limit); every entry is validated
-     * before anything on disk is replaced. Whole-state: history of channels not
-     * present in the archive is removed. Best run while nobody is connected —
-     * live sessions keep their in-memory rooms either way.
+     * 恢复备份归档（见 restore.js）。上传以原始 tar.gz 请求体到达
+     * （受 express.raw 限制约束）；磁盘上的任何东西被替换之前，
+     * 每个条目都先校验。全量状态：归档里没有的频道，
+     * 其历史会被移除。最好在无人连接时执行——
+     * 不过无论何时，在线会话都保留其内存中的房间。
      */
-    // 64MB gzipped ceiling: a real archive (12MB/channel history budget) stays far
-    // below it, and the body + decompressed form both live in memory on a small host
+    // 64MB gzip 上限：真实归档（每频道历史预算 12MB）远低于它，
+    // 而请求体 + 解压形态都要驻留在小主机的内存里
     app.post('/api/admin/restore', requireAdmin, express.raw({ type: () => true, limit: '64mb' }), async (req, res) => {
         if (!Buffer.isBuffer(req.body) || !req.body.length) {
             return res.status(400).json({ error: 'empty upload' });
@@ -301,7 +301,7 @@ function registerAdminApi(
         }
     });
 
-    /** Newest-first tail of the audit trail (membership + admin data ops). */
+    /** 审计轨迹的最新在前尾部（成员事件 + admin 数据操作）。 */
     app.get('/api/admin/audit', requireAdmin, (req, res) => {
         const limit = Number(req.query.limit) || 200;
         res.set('Cache-Control', 'no-store');
@@ -309,10 +309,10 @@ function registerAdminApi(
     });
 
     /**
-     * Server statistics for the admin console: registry/temp-room counts, live
-     * membership, persisted history footprint and a per-channel online table.
-     * Message counts come from the in-memory caches — channels nobody touched
-     * since boot report their file size only (cheap; never a full disk walk).
+     * 供 admin 后台使用的服务器统计：注册表/临时房间计数、在线成员、
+     * 持久化历史的磁盘占用，以及按频道的在线表。
+     * 消息计数来自内存缓存——启动以来无人触碰的频道
+     * 只报告文件大小（便宜；绝不全盘遍历）。
      */
     app.get('/api/admin/stats', requireAdmin, (req, res) => {
         res.set('Cache-Control', 'no-store');
@@ -337,7 +337,7 @@ function registerAdminApi(
             try {
                 historyBytes += fs.statSync(chatStore.existingFileFor(id)).size;
             } catch {
-                /* raced a delete — the walk only feeds a summary */
+                /* 与删除竞态——遍历只为汇总服务 */
             }
             const cached = chatStore.channels.get(id);
             if (cached) storedMessages += cached.messages.length;
@@ -362,9 +362,9 @@ function registerAdminApi(
     });
 
     /**
-     * Host export of a channel's chat history as Markdown (host JWT gated, same
-     * re-checks as the join path: the host must still be configured for the
-     * channel, or the fallback must still be valid for a hostless one).
+     * 主持人把频道聊天历史导出为 Markdown（host JWT 门控，
+     * 与 join 路径相同的复查：该频道必须仍配置着此主持人，
+     * 或对无主频道回退仍有效）。
      */
     app.get('/api/host/:channelId/export', (req, res) => {
         const channelId = req.params.channelId;
@@ -408,7 +408,7 @@ function registerAdminApi(
         log.info('Host chat export served', { channel: channelId, rows: rows.length, host: payload.username });
     });
 
-    /** Local-time-ish stamp for the export (server clock; readable is the goal). */
+    /** 导出用的时间戳（近似本地时区，取服务器时钟；以可读为目标）。 */
     function tStamp(date) {
         const p = (n) => String(n).padStart(2, '0');
         return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
@@ -417,8 +417,8 @@ function registerAdminApi(
     return { startScheduledBackup };
 
     // -------------------------------------------------------------------------
-    // Scheduled rolling backup — same archive as the admin download, written to
-    // BACKUP_DIR on an interval and pruned to the newest BACKUP_KEEP files.
+    // 定时滚动备份——与管理端下载相同的归档，按间隔写入
+    // BACKUP_DIR 并修剪到最新的 BACKUP_KEEP 份。
     // -------------------------------------------------------------------------
 
     function startScheduledBackup() {
@@ -428,13 +428,13 @@ function registerAdminApi(
                 .then((file) => log.info('Scheduled backup written', { file }))
                 .catch((err) => log.error('Scheduled backup failed', { error: err.message }));
         };
-        // first copy right away (so a fresh deploy has one), then on the interval
+        // 立即先备一份（全新部署也有一份），之后按间隔执行
         run();
         const timer = setInterval(run, intervalMs);
         timer.unref?.();
     }
 
-    /** Build the backup archive into BACKUP_DIR; resolves with the file path. */
+    /** 把备份归档写进 BACKUP_DIR；以文件路径 resolve。 */
     function writeScheduledBackup() {
         return new Promise((resolve, reject) => {
             let entries;
@@ -459,13 +459,13 @@ function registerAdminApi(
         });
     }
 
-    /** Keep only the newest BACKUP_KEEP archives in BACKUP_DIR. */
+    /** 只保留 BACKUP_DIR 里最新的 BACKUP_KEEP 份归档。 */
     function pruneScheduledBackups() {
         try {
             const files = fs
                 .readdirSync(BACKUP_DIR)
                 .filter((name) => name.startsWith('voice-channels-backup-') && name.endsWith('.tar.gz'))
-                .sort(); // stamps sort lexicographically = chronologically
+                .sort(); // 时间戳按字典序排序 = 按时间序排序
             for (const name of files.slice(0, Math.max(0, files.length - BACKUP_KEEP))) {
                 fs.unlinkSync(path.join(BACKUP_DIR, name));
             }

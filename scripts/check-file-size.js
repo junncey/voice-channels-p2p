@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * CSS file-size budget — the stylesheet counterpart of ESLint's max-lines
- * rule for JS (see eslint.config.js): every .css file under public/css must
- * stay under MAX_LINES lines. Enforced by `npm run lint` (CI runs the same).
+ * CSS 文件行数预算——JS 侧 ESLint max-lines 规则（见 eslint.config.js）
+ * 的样式表对应物：public/css 下每个 .css 文件都必须低于 MAX_LINES 行。
+ * 由 `npm run lint` 强制执行（CI 跑的是同一命令）。
  *
- * Zero dependencies on purpose: walk the css dir, count lines, exit 1 with
- * the offenders listed when any file is over budget.
+ * 刻意零依赖：遍历 css 目录、数行数，任何文件超预算就列出违规项并以
+ * 退出码 1 结束。
  */
 
 const fs = require('fs');

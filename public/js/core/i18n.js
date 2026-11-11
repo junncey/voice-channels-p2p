@@ -1,10 +1,10 @@
 /**
- * Lightweight semantic-key i18n (zh default, en optional).
- * Usage:
+ * 轻量语义键 i18n（默认中文，可选英文）。
+ * 用法：
  *   await initI18n();
  *   t('channel.micOn')                     -> 麦克风已开启
  *   t('index.online', { n: 3 })             -> 3 人在线
- * Static DOM translation via data-i18n / data-i18n-ph (placeholder) attributes.
+ * 静态 DOM 翻译经 data-i18n / data-i18n-ph（placeholder）属性完成。
  */
 
 const DEFAULT_LANG = 'zh';
@@ -39,15 +39,15 @@ export async function initI18n() {
     applyStaticTranslations();
 }
 
-/** The active language code ('zh' | 'en'). */
+/** 当前生效的语言代码（'zh' | 'en'）。 */
 export function getLang() {
     return currentLang;
 }
 
 /**
- * Switch the UI language. Everything static is translated at boot from
- * data-i18n attributes, so the cheapest correct re-render is a reload —
- * the caller decides when that is acceptable (and says so in its hint).
+ * 切换 UI 语言。所有静态内容在启动时经 data-i18n 属性翻译，
+ * 因此最省事且正确的重渲染方式就是整页刷新——
+ * 何时刷新可接受由调用方决定（并在其提示中说明）。
  */
 export function setLang(lang) {
     if (lang !== 'zh' && lang !== 'en') return;

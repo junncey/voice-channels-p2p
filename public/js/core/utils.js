@@ -1,12 +1,12 @@
 /**
- * Shared DOM / formatting helpers.
+ * 共享的 DOM / 格式化工具。
  */
 import { t } from './i18n.js';
 
 export const $ = (selector, root = document) => root.querySelector(selector);
 
 /**
- * Tiny element builder.
+ * 小型元素构建器。
  * el('div', { class: 'a', text: 'hi', dataset: { id: 1 } }, child1, child2)
  */
 export function el(tag, props = {}, ...children) {
@@ -16,7 +16,7 @@ export function el(tag, props = {}, ...children) {
         if (key === 'class') node.className = value;
         else if (key === 'text') node.textContent = value;
         else if (key === 'html')
-            node.innerHTML = value; // only for trusted static markup
+            node.innerHTML = value; // 仅用于可信的静态标记
         else if (key === 'dataset') Object.assign(node.dataset, value);
         else if (key === 'style' && typeof value === 'object') Object.assign(node.style, value);
         else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value);
@@ -43,7 +43,7 @@ export function formatDate(date = new Date()) {
     return `${mm}-${dd} ${formatTime(d)}`;
 }
 
-/** Deterministic avatar color from a name. */
+/** 由昵称确定性推导头像颜色。 */
 export function avatarColor(name = '') {
     let hash = 0;
     for (let i = 0; i < name.length; i++) {
@@ -62,7 +62,7 @@ export async function copyText(text) {
         await navigator.clipboard.writeText(text);
         return true;
     } catch {
-        // clipboard API unavailable (insecure context) — legacy fallback
+        // clipboard API 不可用（非安全上下文）——传统回退
         try {
             const ta = el('textarea', { style: { position: 'fixed', opacity: '0' } });
             ta.value = text;
@@ -78,8 +78,8 @@ export async function copyText(text) {
 }
 
 /**
- * Transient toast notification, stacked into the page's #toasts container
- * (shared markup across index/channel/admin) and auto-removed after a beat.
+ * 短暂的 toast 通知，堆入页面的 #toasts 容器
+ * （index/channel/admin 共用同一标记），稍后自动移除。
  */
 export function toast(message, kind = '') {
     const box = $('#toasts');

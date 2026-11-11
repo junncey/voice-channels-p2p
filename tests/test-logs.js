@@ -2,9 +2,9 @@
 
 // npx mocha test-logs.js
 //
-// Regression: log() called bare jsonLog(...) instead of this.jsonLog(...) —
-// with LOGS_JSON=true every log() call threw a ReferenceError. The flag is
-// read at module load, so the module is re-required under a pinned env.
+// 回归背景：log() 曾直接调用裸的 jsonLog(...) 而非 this.jsonLog(...)——
+// LOGS_JSON=true 时每次 log() 都抛 ReferenceError。该开关在模块加载时
+// 读取，所以要在固定 env 下重新 require 该模块。
 
 require('should');
 
@@ -12,7 +12,7 @@ const LOGS_PATH = require.resolve('../app/src/logs');
 
 describe('test-logs (JSON logging)', () => {
     after(() => {
-        // leave the shared module cache in the pre-test state for other suites
+        // 把共享的模块缓存还原到测试前状态，给其他测试套件留干净环境
         delete require.cache[LOGS_PATH];
         require(LOGS_PATH);
     });
@@ -52,12 +52,12 @@ describe('test-logs (JSON logging)', () => {
         const prev = process.env.LOGS_JSON;
         const prevDebug = process.env.LOGS_DEBUG;
         process.env.LOGS_JSON = 'true';
-        process.env.LOGS_DEBUG = 'true'; // debug() is gated on the flag
+        process.env.LOGS_DEBUG = 'true'; // debug() 受该开关门控
         try {
             delete require.cache[LOGS_PATH];
             const FreshLogs = require(LOGS_PATH);
             const logs = new FreshLogs('test');
-            // jsonLog funnels EVERY level through console.log
+            // jsonLog 把所有级别都汇入 console.log
             const lines = [];
             const origLog = console.log;
             console.log = (line) => lines.push(line);
@@ -84,8 +84,8 @@ describe('test-logs (JSON logging)', () => {
 });
 
 describe('test-logs (ANSI color switch, colors-dependency replacement)', () => {
-    // LOGS_COLORS is read at module load; re-require under a pinned env (same
-    // pattern as the JSON suite above).
+    // LOGS_COLORS 在模块加载时读取；在固定 env 下重新 require（与上面
+    // JSON 套件同一套路）。
     const capture = (FreshLogs, method, msg) => {
         const logs = new FreshLogs('test');
         const args = [];
@@ -136,7 +136,7 @@ describe('test-logs (ANSI color switch, colors-dependency replacement)', () => {
             delete require.cache[LOGS_PATH];
             const FreshLogs = require(LOGS_PATH);
             const line = capture(FreshLogs, 'error', 'boom');
-            // app name yellow, message red; colors@1.4 closes fg with \x1b[39m
+            // 应用名黄色、消息红色；colors@1.4 用 \x1b[39m 收尾前景色
             line.should.containEql('\x1b[33mtest\x1b[39m');
             line.should.containEql('\x1b[31mboom\x1b[39m');
             const info = capture(FreshLogs, 'info', 'ok');

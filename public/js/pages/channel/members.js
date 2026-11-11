@@ -1,13 +1,13 @@
 /*
-Member list — the room roster UI of the channel page.
+成员列表 —— 频道页的房间花名册 UI。
 
-Owns the members Map (peerId -> joined info, session-uuid keyed) and the
-name-keyed custom-avatar cache, renders the member cards (badges, per-user
-volume slider, host moderation actions) and keeps the roster in sync with
-the server's peers map. Recovery badges are read from the recovery engine's
-maps; audio teardown of a departing peer goes through the shared audioEls.
-Shared page state arrives via the `s` accessor object, cross-module calls
-via the late-bound `x` surface (both owned by channel.js).
+持有 members Map（peerId -> 加入信息，以会话 uuid 为键）与
+以名字为键的自定义头像缓存，渲染成员卡片（徽章、按用户
+音量滑杆、主持人管理操作），并让花名册与服务器的 peers
+map 保持同步。恢复类徽章从恢复引擎的 map 读取；离场对端
+的音频收尾走共享的 audioEls。
+共享页面状态经 `s` 存取器对象到达，跨模块调用走晚绑定的
+`x` 调用面（两者都归 channel.js 所有）。
 */
 
 export function createMembers({
@@ -40,11 +40,11 @@ export function createMembers({
         '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
 
     /** peerId -> { peer_name, peer_presenter, peer_audio_status, joined_at, volume, self }
-     *  (the Map itself is shared page state, created by channel.js) */
+     *  （Map 本身是共享页面状态，由 channel.js 创建） */
 
     function syncMembers(peersMap) {
-        // peer ids are SESSION uuids (stable across our own reconnects) — our own
-        // id is selfUuid, never the ephemeral socket.id
+        // 对端 ID 是会话 uuid（在我们自己的重连间保持稳定）——
+        // 自己的 ID 是 selfUuid，绝不是短命的 socket.id
         const selfId = s.selfUuid;
         for (const [peerId, info] of Object.entries(peersMap)) {
             if (roomMetaKey(peerId)) continue;
@@ -69,12 +69,12 @@ export function createMembers({
                 peer_share: info.peer_share === true,
                 joined_at: info.joined_at || existing?.joined_at || Date.now(),
                 avatar,
-                // remembered per-user volume; an in-session adjustment wins over the stored one
+                // 记忆的按用户音量；会话内的即时调整优先于存储值
                 volume: existing?.volume ?? (name !== '?' ? (peerVolumes[name] ?? 1) : 1),
             });
             if (!existing) rec.armConnectingBadge(peerId);
         }
-        // drop stale entries
+        // 清掉过期条目
         for (const peerId of [...members.keys()]) {
             if (peerId === selfId) continue;
             if (!peersMap[peerId]) dropPeer(peerId, { silent: true });
@@ -94,7 +94,7 @@ export function createMembers({
             peer_audio_status: x.onAir(),
             peer_deafen: s.deafened,
             peer_share: shareSound.active(),
-            joined_at: 0, // self always first
+            joined_at: 0, // 自己永远排第一
             avatar: s.selfAvatar || undefined,
             self: true,
         });
@@ -117,7 +117,7 @@ export function createMembers({
         if (!silent) renderMembers();
     }
 
-    /** avatars is keyed by display name — forget names no longer in the room. */
+    /** avatars 以显示名为键 —— 房间里已不存在的名字即遗忘。 */
     function pruneAvatars() {
         const present = new Set();
         for (const info of members.values()) {
@@ -128,7 +128,7 @@ export function createMembers({
         }
     }
 
-    /** Belt-and-braces: a peer cycling nicknames+avatars can't grow the map forever. */
+    /** 双保险：反复换昵称+头像的对端无法让 map 无限增长。 */
     function capAvatars() {
         while (avatars.size > AVATARS_MAX) avatars.delete(avatars.keys().next().value);
     }
@@ -136,7 +136,7 @@ export function createMembers({
     function memberAvatarNode(info) {
         if (info.avatar) {
             const img = el('img', { class: 'member-avatar img', alt: '' });
-            img.src = info.avatar; // validated data URL
+            img.src = info.avatar; // 已校验的 data URL
             return img;
         }
         return el(
@@ -153,7 +153,7 @@ export function createMembers({
         });
     }
 
-    /** Headphones-off badge on a member card (visible while self-deafened). */
+    /** 成员卡片上的「耳机关闭」徽章（自我静音期间可见）。 */
     function deafenIconNode(on) {
         return el('span', {
             class: 'member-deafen' + (on ? ' on' : ''),
@@ -162,7 +162,7 @@ export function createMembers({
         });
     }
 
-    /** Music-note badge on a member card — that member is sharing sound into the channel. */
+    /** 成员卡片上的音符徽章 —— 该成员正在向频道共享声音。 */
     function shareIconNode(on) {
         return el('span', {
             class: 'member-share' + (on ? ' on' : ''),
@@ -171,7 +171,7 @@ export function createMembers({
         });
     }
 
-    /** Per-user volume row (0-300%), revealed on card hover. */
+    /** 按用户音量行（0-300%），悬停卡片时展开。 */
     function memberVolumeNode(peerId, info) {
         const initial = Math.round((info.volume ?? 1) * 100);
         const value = el('span', { class: 'member-volume-val', text: `${initial}%` });
@@ -283,8 +283,8 @@ export function createMembers({
                     );
                 }
 
-                // touch fallback: hover never happens on a phone, so tapping a
-                // member row reveals the volume slider (and host actions) instead
+                // 触屏回退：手机上永远不会有 hover，所以改为点按
+                // 成员行展开音量滑杆（与主持人操作）
                 node.addEventListener('click', (event) => {
                     if (event.target.closest('button, input, a')) return;
                     const wasOpen = node.classList.contains('open');
@@ -299,8 +299,8 @@ export function createMembers({
     }
 
     /**
-     * Update one member's mic icon in place — remote peerStatus flips (and local
-     * push-to-talk) must not rebuild the list, or a volume slider mid-drag dies.
+     * 原地更新单个成员的麦克风图标 —— 远端 peerStatus 翻转（以及
+     * 本地 PTT）绝不能重建列表，否则正在拖动的音量滑杆会死掉。
      */
     function updateMicIconNode(peerId, on) {
         const node = $(`#memberList .member[data-id="${peerId}"] .member-mic`);
@@ -318,7 +318,7 @@ export function createMembers({
     }
 
     // -------------------------------------------------------------------------
-    // host actions / moderation
+    // 主持人操作 / 管理
     // -------------------------------------------------------------------------
 
     function mutePeer(peerId) {
@@ -342,9 +342,9 @@ export function createMembers({
         });
     }
 
-    // ----- host renames a member's joined nickname -----
+    // ----- 主持人改名成员的入房昵称 -----
 
-    let renameTarget = null; // peerId the rename modal is editing
+    let renameTarget = null; // 改名弹窗正在编辑的 peerId
 
     function renamePeer(peerId) {
         renameTarget = peerId;
@@ -379,8 +379,8 @@ export function createMembers({
         closeRenameModal();
     }
 
-    /** Button content from a static SVG constant + a textContent label — never
-     * string-built HTML, so a future interpolated label can't become an XSS sink. */
+    /** 按钮内容来自静态 SVG 常量 + textContent 标签 —— 绝不
+     * 拼字符串造 HTML，将来哪怕插入变量也不会变成 XSS 汇聚点。 */
     function setIconBtn(btn, icon, label) {
         btn.replaceChildren(el('span', { html: icon }), el('span', { text: label }));
     }

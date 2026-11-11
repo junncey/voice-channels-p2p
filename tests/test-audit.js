@@ -45,7 +45,7 @@ describe('test-audit', () => {
         const weird = tail.find((e) => e.event === 'weird');
         (weird.big.length <= 800).should.be.true();
         should.equal(weird.n, undefined);
-        weird.ok.should.equal('true'); // scalars stringify for a greppable file
+        weird.ok.should.equal('true'); // 标量统一转成字符串，方便 grep 文件
     });
 
     it('should survive a torn trailing line', () => {
@@ -57,6 +57,6 @@ describe('test-audit', () => {
         reopened
             .tail(10)
             .map((e) => e.event)
-            .should.eql(['b', 'a']); // torn line skipped on load
+            .should.eql(['b', 'a']); // 加载时撕裂尾行被跳过
     });
 });

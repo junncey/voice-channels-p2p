@@ -1,10 +1,10 @@
 /*
-Settings modal (audio devices, processing toggles, PTT, volumes, bitrate,
-sound effects, notifications) plus the appearance panel (theme, language)
-and the custom-avatar picker — everything that lives behind the ⚙ button.
-Shared page state arrives via the `s` accessor object, cross-module calls
-via the late-bound `x` surface (both owned by channel.js); member-card
-helpers come through `mem` (members.js).
+设置弹窗（音频设备、处理开关、PTT、音量、码率、
+操作音效、通知）以及外观面板（主题、语言）
+与自定义头像选择 —— ⚙ 按钮背后的一切。
+共享页面状态经 `s` 存取器对象到达，跨模块调用走晚绑定的
+`x` 调用面（两者都归 channel.js 所有）；成员卡片助手经
+`mem`（members.js）。
 */
 import { isModifierCode, keyLabel, normalizePttKey } from '/js/core/utils.js';
 
@@ -47,7 +47,7 @@ export function createSettings({
             onSelect: (value) => {
                 settings.micDeviceId = value;
                 saveAudioSettings();
-                // switching device in text-only mode doubles as "enable voice"
+                // 纯文字模式下切换设备兼作「启用语音」
                 if (s.localStream) x.reacquireMicOrToast();
                 else x.enableVoice();
             },
@@ -85,16 +85,16 @@ export function createSettings({
 
         $('#musicToggle').addEventListener('change', (event) => {
             settings.musicMode = event.target.checked;
-            // re-seed the bitrate slider with the mode's default (hand-tuning
-            // survives across sessions, but a mode switch is an explicit preset)
+            // 用该模式默认值重新播种码率滑杆（手动微调可以跨会话
+            // 保留，但模式切换是明确的预设选择）
             settings.opusBitrate = settings.musicMode ? 192 : 64;
             saveAudioSettings();
             reflectMusicMode();
             reflectBitrate();
-            // re-capture under the overridden processing constraints (hot-swaps the
-            // outgoing track) and push the new bitrate onto live senders at once;
-            // stereo/usedtx live in the fmtp, so also force a plain renegotiation —
-            // a healthy link never produces another SDP round on its own
+            // 在被覆盖的处理约束下重新采集（热替换对外轨道），并立即
+            // 把新码率推到活动 sender 上；stereo/usedtx 住在 fmtp 里，
+            // 所以还要强制一次普通重协商 ——
+            // 健康的链路绝不会自己产生下一轮 SDP
             if (s.localStream) x.reacquireMicOrToast();
             s.mesh?.setSendBitrate();
             s.mesh?.renegotiateAll();
@@ -111,7 +111,7 @@ export function createSettings({
         $('#micVolumeSlider').addEventListener('input', (event) => {
             settings.micVolume = Number(event.target.value) / 100;
             $('#micVolumeVal').textContent = `${event.target.value}%`;
-            s.hub?.setMicGain(settings.micVolume); // takes effect immediately, no renegotiation
+            s.hub?.setMicGain(settings.micVolume); // 立即生效，无重协商
             saveAudioSettings();
         });
 
@@ -119,8 +119,8 @@ export function createSettings({
             settings.opusBitrate = Number(event.target.value);
             $('#bitrateVal').textContent = `${event.target.value} kbps`;
             saveAudioSettings();
-            // pushes onto live senders via setParameters, no renegotiation; the
-            // fmtp cap rides along on the next SDP round
+            // 经 setParameters 推到活动 sender，无重协商；
+            // fmtp 上限搭下一轮 SDP 的车
             s.mesh?.setSendBitrate();
         });
 
@@ -134,15 +134,15 @@ export function createSettings({
         $('#testMicBtn').addEventListener('click', onTestMicClick);
         $('#testSpkBtn').addEventListener('click', playTestBeep);
 
-        // operation sound effects: master switch, volume, per-event sound pickers
+        // 操作音效：总开关、音量、逐事件音效选择器
         initSoundSettings({ applySink, toast });
 
-        // desktop notifications on mention (hidden where unsupported)
+        // 被 @ 时的桌面通知（不支持处隐藏）
         $('#notifySection').classList.toggle('hidden', !x.notifySupported);
         $('#notifyToggle').addEventListener('change', x.onNotifyToggle);
 
-        // device churn: refresh the dropdowns, and if the LIVE capture died with
-        // its device (hot-unplugged headset), voice.js re-acquires the mic
+        // 设备增删：刷新下拉框；若活动采集随设备一起死亡
+        //（热拔耳机），voice.js 会重新获取麦克风
         navigator.mediaDevices?.addEventListener?.('devicechange', () => {
             refreshDeviceSelects();
             x.recoverMicDevice();
@@ -222,8 +222,8 @@ export function createSettings({
         $('#settingsModal').classList.remove('hidden');
     }
 
-    /** Music mode owns the three processing toggles — grays them out and reflects
-     *  the forced-off capture state (the stored preferences survive underneath). */
+    /** 音乐模式接管三个处理开关 —— 置灰并回显强制关闭的采集态
+     *  （存储的偏好仍在底下保留）。 */
     function reflectMusicMode() {
         const on = settings.musicMode;
         $('#musicToggle').checked = on;
@@ -241,8 +241,8 @@ export function createSettings({
         }
     }
 
-    /** Sync the bitrate slider/readout from settings (NOT inside
-     *  reflectMusicMode — opening the modal must not clobber a hand-tuned value). */
+    /** 从设置同步码率滑杆/读数（不放
+     *  reflectMusicMode 里 —— 打开弹窗绝不能冲掉手动微调值）。 */
     function reflectBitrate() {
         const kbps = x.opusFmtp().maxaveragebitrate / 1000;
         $('#bitrateSlider').value = String(kbps);
@@ -286,32 +286,32 @@ export function createSettings({
     async function applySink(audioEl) {
         if (!sinkSupported) return;
         try {
-            // '' is the default output — a cleared choice actively RESETS an
-            // element that still points at a device that vanished mid-call
+            // '' 是默认输出 —— 清空选择会主动重置一个仍指向
+            // 通话中途消失的设备的元件
             await audioEl.setSinkId(settings.spkDeviceId || '');
         } catch {
-            /* device vanished — keep the default output */
+            /* 设备已消失 —— 保持默认输出 */
         }
     }
 
-    /** Configured speaker still enumerated? No explicit choice counts as present. */
+    /** 配置的扬声器仍在枚举中吗？未显式选择即视为在。 */
     async function speakerDevicePresent() {
         if (!settings.spkDeviceId) return true;
         try {
             const devices = await navigator.mediaDevices.enumerateDevices();
             return devices.some((d) => d.kind === 'audiooutput' && d.deviceId === settings.spkDeviceId);
         } catch {
-            return true; // enumeration refused: assume present, let setSinkId decide
+            return true; // 枚举被拒：假定在，交给 setSinkId 判定
         }
     }
 
     /**
-     * A hot-unplugged output device (USB/Bluetooth headset) leaves a dead
-     * choice behind: every later setSinkId on it throws, the dropdown keeps
-     * listing a ghost device, and playback may stay parked on a sink nothing
-     * renders to. Clear the choice and steer both playback paths back to the
-     * default output — like the mic fallback, the cleared choice is
-     * session-only (the device may well come back).
+     * 热拔的输出设备（USB/蓝牙耳机）会留下一个死选择：此后对它
+     * 的每次 setSinkId 都抛错，下拉框继续列着一个幽灵设备，
+     * 播放可能停在一个没有任何输出去向的 sink 上。
+     * 清空选择，把两条播放路径都引回默认输出 ——
+     * 与麦克风回退一样，清空的选择仅本次会话有效
+     * （设备很可能还会回来）。
      */
     async function recoverSpeakerDevice() {
         if (await speakerDevicePresent()) return;
@@ -330,11 +330,11 @@ export function createSettings({
         beep.play().catch(() => toast(t('common.error'), 'warn'));
     }
 
-    // ----- mic test: live loopback — hear your own mic through the speakers with
-    // a short delay; click again to stop. Taps the RAW capture so it works even
-    // while the channel mic is muted, and applies the input volume itself -----
+    // ----- 麦克风测试：实时回环 —— 经扬声器短延迟听到自己的麦克
+    // 风；再点一次停止。抽的是 RAW 采集，即使频道麦克风被静音也能
+    // 工作，并自行应用输入音量 -----
 
-    const MIC_TEST_DELAY = 0.5; // seconds — long enough to feel like an echo, short enough to be live
+    const MIC_TEST_DELAY = 0.5; // 秒 —— 长到有回声感，短到仍是实时
 
     let micTest = null; // { src, delay, gain, timer }
 
@@ -351,7 +351,7 @@ export function createSettings({
         try {
             await s.hub.ensureContext();
         } catch {
-            /* fall through — the graph below will simply stay silent */
+            /* 继续往下走 —— 下方的图就保持无声 */
         }
         const ctx = s.hub.ctx;
         const src = ctx.createMediaStreamSource(s.rawMicStream || s.localStream);
@@ -359,13 +359,13 @@ export function createSettings({
         delay.delayTime.value = MIC_TEST_DELAY;
         const gain = ctx.createGain();
         gain.gain.value = 0;
-        src.connect(delay).connect(gain).connect(ctx.destination); // ctx sink = selected speaker
+        src.connect(delay).connect(gain).connect(ctx.destination); // ctx sink = 所选扬声器
         gain.gain.setTargetAtTime(Math.max(0.2, settings.volume) * settings.micVolume, ctx.currentTime, 0.03);
         micTest = {
             src,
             delay,
             gain,
-            timer: setTimeout(stopMicTest, 30000), // safety stop: bounded feedback risk
+            timer: setTimeout(stopMicTest, 30000), // 安全停止：限制啸叫风险
         };
         const btn = $('#testMicBtn');
         btn.classList.add('recording');
@@ -380,7 +380,7 @@ export function createSettings({
             micTest.delay.disconnect();
             micTest.gain.disconnect();
         } catch {
-            /* already disconnected */
+            /* 早已断开 */
         }
         micTest = null;
         resetTestMicBtn();
@@ -396,25 +396,25 @@ export function createSettings({
         try {
             localStorage.setItem(AUDIO_SETTINGS_KEY, JSON.stringify(settings));
         } catch {
-            /* storage full / disabled — settings just won't persist */
+            /* 存储满/被禁用 —— 设置只是不持久化 */
         }
     }
 
     function savePeerVolume(name, volume) {
         if (!name || name === '?') return;
-        delete x.peerVolumes[name]; // re-insert so recency order holds
+        delete x.peerVolumes[name]; // 先删再插，维持最近使用顺序
         if (volume !== 1) x.peerVolumes[name] = volume;
         const keys = Object.keys(x.peerVolumes);
         if (keys.length > 50) for (const key of keys.slice(0, keys.length - 50)) delete x.peerVolumes[key];
         try {
             localStorage.setItem(PEER_VOLUMES_KEY, JSON.stringify(x.peerVolumes));
         } catch {
-            /* storage full — volumes still apply for this session */
+            /* 存储满 —— 音量本会话仍然生效 */
         }
     }
 
     // -------------------------------------------------------------------------
-    // appearance (settings modal): theme preference + UI language
+    // 外观（设置弹窗）：主题偏好 + UI 语言
     // -------------------------------------------------------------------------
 
     function bindAppearanceControls() {
@@ -443,8 +443,8 @@ export function createSettings({
         langSeg.addEventListener('click', (event) => {
             const lang = event.target.closest('.segment')?.dataset.lang;
             if (lang && lang !== getLang()) {
-                // switching language reloads the page — take that as intended so
-                // the leave-site prompt stays quiet
+                // 切换语言会重载页面 —— 视为有意为之，
+                // 离开页面确认框保持沉默
                 s.intentionalUnload = true;
                 setLang(lang);
             }
@@ -453,7 +453,7 @@ export function createSettings({
     }
 
     // -------------------------------------------------------------------------
-    // custom avatar (settings modal)
+    // 自定义头像（设置弹窗）
     // -------------------------------------------------------------------------
 
     function bindAvatarUi() {
@@ -461,7 +461,7 @@ export function createSettings({
         $('#avatarResetBtn').addEventListener('click', () => applySelfAvatar(''));
         $('#avatarFileInput').addEventListener('change', async (event) => {
             const file = event.target.files?.[0];
-            event.target.value = ''; // allow re-picking the same file
+            event.target.value = ''; // 允许再次选择同一个文件
             if (!file) return;
             try {
                 applySelfAvatar(await processAvatarFile(file));
@@ -492,8 +492,8 @@ export function createSettings({
     }
 
     /**
-     * Center-crop any image to a small square JPEG data URL that always fits the
-     * avatar broadcast budget (shrinks size/quality until it does).
+     * 把任意图片居中裁剪为小方形 JPEG data URL，必定满足头像
+     * 广播预算（不断缩小尺寸/质量直到满足）。
      */
     async function processAvatarFile(file) {
         if (!file || !file.type.startsWith('image/') || file.type === 'image/gif') {
@@ -541,7 +541,7 @@ export function createSettings({
                 if (out.length <= 64 * 1024) return out;
             }
         }
-        return out; // 56px q0.5 always lands well under the 96KB broadcast cap
+        return out; // 56px q0.5 总能稳稳落在 96KB 广播上限之下
     }
 
     return {

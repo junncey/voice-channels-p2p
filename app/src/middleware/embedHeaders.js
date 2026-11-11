@@ -3,16 +3,16 @@
 const config = require('../config');
 
 /**
- * Embed (iframe) restrictions.
+ * 嵌入（iframe）限制。
  *
- * Controls which origins may embed MiroTalk P2P in an <iframe> via CSP
- * `frame-ancestors` (and `X-Frame-Options` for legacy browsers).
- * Configured via ALLOWED_EMBED_ORIGINS env var. See config.server.embed.
+ * 通过 CSP `frame-ancestors`（并对老式浏览器附加 `X-Frame-Options`）
+ * 控制哪些源可以将 MiroTalk P2P 嵌入 <iframe>。
+ * 经 ALLOWED_EMBED_ORIGINS env 配置。见 config.server.embed。
  *
- * Fail-closed defaults: with no ALLOWED_EMBED_ORIGINS configured only
- * same-origin embedding is allowed ('self' is required — the app iframes its
- * own pages for share popups). The admin console is NEVER embeddable, whatever
- * the config says (frame-ancestors 'none' + X-Frame-Options: DENY).
+ * 默认 fail-closed：未配置 ALLOWED_EMBED_ORIGINS 时仅允许同源嵌入
+ * （'self' 必需——应用自己会用 iframe 打开分享弹窗等页面）。
+ * 无论配置如何，管理后台绝不可被嵌入
+ * （frame-ancestors 'none' + X-Frame-Options: DENY）。
  */
 const embedAllowedOrigins = Array.isArray(config?.server?.embed?.allowedOrigins)
     ? config.server.embed.allowedOrigins
@@ -20,11 +20,11 @@ const embedAllowedOrigins = Array.isArray(config?.server?.embed?.allowedOrigins)
 
 function buildEmbedCsp(origins) {
     if (!origins || origins.length === 0) {
-        // Default (no ALLOWED_EMBED_ORIGINS): same-origin only — never allow
-        // embedding from anywhere.
+        // 默认（无 ALLOWED_EMBED_ORIGINS）：仅允许同源——
+        // 绝不放开来自任意来源的嵌入。
         return { csp: "frame-ancestors 'self'", xfo: 'SAMEORIGIN' };
     }
-    // Single-token shortcuts
+    // 单 token 快捷写法
     if (origins.length === 1) {
         const single = origins[0].toLowerCase();
         if (single === 'none' || single === "'none'") {
@@ -34,8 +34,8 @@ function buildEmbedCsp(origins) {
             return { csp: "frame-ancestors 'self'", xfo: 'SAMEORIGIN' };
         }
     }
-    // Build allow-list; always include 'self' implicitly so the app's own
-    // pages can still iframe themselves (share popups, etc.)
+    // 构建允许列表；总是隐式包含 'self'，让应用自己的页面
+    // 仍能 iframe 自己（分享弹窗等）
     const sources = ["'self'"];
     for (const o of origins) {
         const v = o.trim();
@@ -44,16 +44,16 @@ function buildEmbedCsp(origins) {
         if (v.toLowerCase() === 'none' || v === "'none'") continue;
         sources.push(v);
     }
-    // X-Frame-Options cannot express multiple origins; omit it to avoid
-    // contradicting the CSP (modern browsers prefer CSP anyway).
+    // X-Frame-Options 无法表达多个源；省略它以避免与 CSP 矛盾
+    // （反正现代浏览器优先采用 CSP）。
     return { csp: `frame-ancestors ${sources.join(' ')}`, xfo: null };
 }
 
 const embedCsp = buildEmbedCsp(embedAllowedOrigins);
 
 /**
- * Per-path embed policy: the admin console and its API must never be framable,
- * regardless of the configured embed origins.
+ * 按路径的嵌入策略：无论配置了哪些嵌入源，
+ * 管理后台及其 API 都绝不允许被 iframe 嵌入。
  */
 function embedPolicyFor(pathname) {
     if (pathname === '/admin' || pathname.startsWith('/api/admin/')) {
@@ -65,9 +65,9 @@ function embedPolicyFor(pathname) {
 const applyEmbedHeaders = (req, res, next) => {
     const policy = embedPolicyFor(req.path);
     if (policy) {
-        // Merge with any existing CSP header set earlier in the chain (the
-        // base helmet policy never sets frame-ancestors, so the merged header
-        // contains exactly one)
+        // 与链路上游已设置的 CSP 头合并（基础 helmet 策略从不设置
+        // frame-ancestors，因此合并后的头里恰好
+        // 只有一个）
         const existing = res.getHeader('Content-Security-Policy');
         const merged = existing ? `${existing}; ${policy.csp}` : policy.csp;
         res.setHeader('Content-Security-Policy', merged);

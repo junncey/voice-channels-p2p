@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * One-shot PWA icon generator (no image dependencies): renders the app glyph
- * — a green mic capsule inside its sound arc on the dark brand rounded
- * square — straight into PNG files via zlib. Rerun with:
+ * 一次性 PWA 图标生成器（无图像依赖）：直接经 zlib 把应用图形——
+ * 深色品牌圆角方块上、声波弧线环抱的绿色麦克胶囊——渲染成 PNG 文件。
+ * 重新生成：
  *   node scripts/gen-pwa-icons.js
- * Outputs: public/images/icon-192.png, icon-512.png, icon-maskable-512.png.
+ * 输出：public/images/icon-192.png、icon-512.png、icon-maskable-512.png。
  */
 
 const fs = require('fs');
@@ -15,7 +15,7 @@ const zlib = require('zlib');
 const BG = [19, 26, 35, 255]; // #131a23
 const ACCENT = [61, 220, 151, 255]; // #3ddc97
 
-/** Signed distance to a capsule (rounded line) from p1 to p2 with radius r. */
+/** 到胶囊（圆头线段）p1→p2、半径 r 的有符号距离。 */
 function distCapsule(px, py, x1, y1, x2, y2, r) {
     const dx = x2 - x1;
     const dy = y2 - y1;
@@ -27,7 +27,7 @@ function distCapsule(px, py, x1, y1, x2, y2, r) {
     return Math.hypot(px - cx, py - cy) - r;
 }
 
-/** Signed distance to a rounded rectangle centered in the canvas. */
+/** 到画布中心圆角矩形的有符号距离。 */
 function distRoundedRect(px, py, size, inset, radius) {
     const half = size / 2 - inset;
     const qx = Math.abs(px - size / 2) - (half - radius);
@@ -37,7 +37,7 @@ function distRoundedRect(px, py, size, inset, radius) {
     return Math.hypot(ox, oy) + Math.min(Math.max(qx, qy), 0) - radius;
 }
 
-/** 1px-smoothed coverage from a signed distance (in pixels). */
+/** 由有符号距离（像素）得出的 1px 平滑覆盖率。 */
 function cover(d) {
     return Math.max(0, Math.min(1, 0.5 - d));
 }
@@ -53,7 +53,7 @@ function mix(base, over, alpha) {
 
 function renderIcon(size, { maskable = false } = {}) {
     const s = (frac) => frac * size;
-    const scale = maskable ? 0.78 : 1; // maskable: keep the glyph inside the 80% safe zone
+    const scale = maskable ? 0.78 : 1; // maskable：图形收进 80% 安全区内
     const rows = [];
     for (let y = 0; y < size; y++) {
         const row = [];
@@ -61,10 +61,10 @@ function renderIcon(size, { maskable = false } = {}) {
             const px = x + 0.5;
             const py = y + 0.5;
             let pixel = [0, 0, 0, 0];
-            // background: full square for maskable, rounded square otherwise
+            // 背景：maskable 用满幅方块，其余用圆角方块
             const bgAlpha = maskable ? 1 : cover(distRoundedRect(px, py, size, 2, size * 0.22));
             if (bgAlpha > 0) pixel = mix(pixel, BG, bgAlpha);
-            // glyph: mic capsule + sound arc + stand, all accent colored
+            // 图形：麦克胶囊 + 声波弧 + 支架，全部用强调色
             const cx = size / 2;
             const cy = s(0.4) * scale + (size * (1 - scale)) / 2;
             const dMic = distCapsule(px, py, cx, cy, cx, cy, s(0.085) * scale);
@@ -93,14 +93,14 @@ function renderIcon(size, { maskable = false } = {}) {
     return rows;
 }
 
-/** Encode RGBA rows into a PNG buffer (color type 6, no filtering). */
+/** 把 RGBA 行编码为 PNG 缓冲（color type 6，无滤波）。 */
 function encodePng(rows) {
     const height = rows.length;
     const width = rows[0].length;
     const raw = Buffer.alloc((width * 4 + 1) * height);
     let at = 0;
     for (let y = 0; y < height; y++) {
-        raw[at++] = 0; // filter: none
+        raw[at++] = 0; // 滤波：无
         for (const [r, g, b, a] of rows[y]) {
             raw[at++] = r;
             raw[at++] = g;
@@ -120,7 +120,7 @@ function encodePng(rows) {
     const ihdr = Buffer.alloc(13);
     ihdr.writeUInt32BE(width, 0);
     ihdr.writeUInt32BE(height, 4);
-    ihdr[8] = 8; // bit depth
+    ihdr[8] = 8; // 位深
     ihdr[9] = 6; // RGBA
     return Buffer.concat([
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -130,7 +130,7 @@ function encodePng(rows) {
     ]);
 }
 
-// minimal CRC32 (PNG polynomial), table-based
+// 极简 CRC32（PNG 多项式），查表实现
 const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
     for (let n = 0; n < 256; n++) {

@@ -2,14 +2,14 @@
 
 // npx mocha test-chatstore-perf.js
 //
-// Regression guard for the event-line write path (docs/deferred-engineering.md #1):
-// on a ~12MB image-heavy channel the interaction paths (edit / react / append)
-// must stay O(1) appends — no full serialize+rewrite on the event loop — and the
-// background sweep must skip unchanged idle files without reading them. The
-// structural asserts (rewrite counters, on-disk line counts) are deterministic;
-// the wall-clock budgets are deliberately generous so CI load cannot flip them,
-// while the old rewrite-per-op behavior (~50-100ms per 12MB rewrite) would
-// blow straight through them.
+// 事件行写入路径的回归守卫（docs/deferred-engineering.md #1）：在 ~12MB
+// 图片密集频道上，交互路径（edit / react / append）必须保持 O(1) 追加
+// ——事件循环上绝无全量序列化重写——且后台 sweep 必须不读取即跳过
+// 未变化的空闲文件。
+// 结构性断言（重写计数、磁盘行数）是确定的；
+// 墙钟预算刻意放宽以免 CI 负载翻转结果，
+// 而旧的每操作重写行为（每次 12MB 重写 ~50-100ms）
+// 会直接爆掉预算。
 
 require('should');
 
@@ -20,9 +20,9 @@ const path = require('path');
 const ChatStore = require('../app/src/chatStore');
 
 const MAX_BYTES = 12 * 1024 * 1024;
-// 280 image rows ≈ 11.2MB: comfortably under the hard budget, above the 90%
-// compaction ratio, and the 20 appends in the second test land exactly on
-// (not past) MAX_MESSAGES so no drop markers muddy the line-count asserts
+// 280 行图片 ≈ 11.2MB：稳妥低于硬预算、高于 90% 压缩比阈值，且第二个
+// 测试里的 20 次 append 恰好落在（而非越过）MAX_MESSAGES 上，避免 drop
+// 标记搅乱行数断言
 const ROW_IMG = 'data:image/png;base64,' + 'A'.repeat(41 * 1024);
 const ROWS = 280;
 
@@ -32,7 +32,7 @@ function tempDir(name) {
     return dir;
 }
 
-/** Build a ~11.5MB JSONL history directly on disk (no store involved). */
+/** 直接在磁盘上铺一份 ~11.5MB 的 JSONL 历史（不经过 store）。 */
 function seedBigChannel(dir, id) {
     const lines = [];
     const base = Date.now() - 60 * 60 * 1000;
@@ -44,7 +44,7 @@ function seedBigChannel(dir, id) {
     return { file, size: fs.statSync(file).size };
 }
 
-/** Count ChatStore#save calls (full rewrites) while fn runs. */
+/** 统计 fn 运行期间 ChatStore#save（全量重写）的调用次数。 */
 function withSaveSpy(fn) {
     const orig = ChatStore.prototype.save;
     let calls = 0;
@@ -60,7 +60,7 @@ function withSaveSpy(fn) {
     return calls;
 }
 
-/** Milliseconds a synchronous fn blocks for. */
+/** 同步 fn 阻塞的毫秒数。 */
 function timed(fn) {
     const t0 = process.hrtime.bigint();
     fn();
@@ -105,11 +105,11 @@ describe('test-chatStore perf (12MB channel write path)', function () {
             });
         });
 
-        saves.should.equal(0); // zero rewrites: pure event-line appends
-        totalMs.should.be.below(750); // 30 ops with ~75x headroom; a rewrite per op needs seconds
+        saves.should.equal(0); // 零重写：纯事件行追加
+        totalMs.should.be.below(750); // 30 次操作留 ~75 倍余量；每次一重写需数秒
         const lines = fs.readFileSync(seed.file, 'utf8').split('\n').filter(Boolean);
-        lines.should.have.length(ROWS + 30); // base rows untouched + one event line per edit
-        store.channels.get(id).fileSize.should.equal(fs.statSync(seed.file).size); // bookkeeping exact
+        lines.should.have.length(ROWS + 30); // 基础行未动 + 每次 edit 一条事件行
+        store.channels.get(id).fileSize.should.equal(fs.statSync(seed.file).size); // 记账分毫不差
     });
 
     it('reactions and new messages stay O(1) appends', () => {
@@ -132,7 +132,7 @@ describe('test-chatStore perf (12MB channel write path)', function () {
         saves.should.equal(0);
         totalMs.should.be.below(1000);
         const lines = fs.readFileSync(seed.file, 'utf8').split('\n').filter(Boolean);
-        lines.should.have.length(ROWS + 30 + 20); // reactions ride as event lines, messages as rows
+        lines.should.have.length(ROWS + 30 + 20); // 回应以事件行随行，新消息成行
         store.channels.get(id).fileSize.should.equal(fs.statSync(seed.file).size);
     });
 
@@ -149,9 +149,9 @@ describe('test-chatStore perf (12MB channel write path)', function () {
         };
         try {
             reader.sweep();
-            loads.should.equal(1); // first sight: one full check of the 11.5MB file
+            loads.should.equal(1); // 首次照面：对 11.5MB 文件做一次完整检查
             reader.sweep();
-            loads.should.equal(1); // unchanged file inside its retention epoch: stat-only skip
+            loads.should.equal(1); // 保留期内文件未变化：仅 stat 即跳过
         } finally {
             ChatStore.prototype.loadFile = orig;
         }

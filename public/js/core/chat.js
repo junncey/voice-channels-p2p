@@ -1,33 +1,33 @@
 /**
- * Chat message list — QQ-style bubbles (avatar beside a tailed bubble,
- * nickname above the bubble for others, centered time separators).
- * Plain text only (textContent everywhere, no HTML injection; image/avatar
- * sources must be validated data:image URLs — we never interpolate HTML).
+ * 聊天消息列表——QQ 风格气泡（头像贴着带尾角的气泡，
+ * 他人昵称在气泡上方，时间分隔居中）。
+ * 纯文本（全部走 textContent，不注入 HTML；图片/头像
+ * 源必须是校验过的 data:image URL——我们从不内插 HTML）。
  *
- * Message lifecycle after delivery (edit / recall / emoji reaction) is applied
- * in place by editMessage/deleteMessage/reactMessage — the server broadcasts
- * the persisted result to everyone including the sender, so the DOM follows
- * the store instead of trusting local echo.
+ * 送达后的消息生命周期（编辑/撤回/emoji 回应）由
+ * editMessage/deleteMessage/reactMessage 原地应用——服务器把
+ * 持久化结果广播给包括发送者在内的所有人，
+ * DOM 跟随存储，而不信任本地回显。
  */
 
 import { el, formatTime, formatDate, avatarColor } from './utils.js';
 import { DATA_URL_RE, MAX_TRANSFER_CHARS } from './images.js';
 import { isEmojiOnly, openEmojiPicker } from './emoji.js';
 
-/** Show a time separator when the gap to the previous message exceeds this. */
+/** 与上一条消息的间隔超过此值时显示时间分隔。 */
 const TIME_GAP_MS = 5 * 60 * 1000;
 
-// mirrors the server-side persisted-image cap — reject anything bigger on render
+// 镜像服务端持久化图片上限——渲染时拒绝更大的
 const MAX_IMAGE_CHARS = MAX_TRANSFER_CHARS;
 
-/** Escape a member name for the mention RegExp. */
+/** 转义成员名以用于 @提及 RegExp。 */
 export function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
- * Reply quote from a message payload, shape-checked and capped before
- * rendering/storing — shared with the channel page's history and live paths.
+ * 消息载荷中的回复引用，渲染/存储前先形状校验并截断
+ * ——与频道页的历史与实时路径共用。
  */
 export function validReply(reply) {
     if (
@@ -43,28 +43,28 @@ export function validReply(reply) {
 }
 
 /**
- * @param {HTMLElement} container scrollable message list
+ * @param {HTMLElement} container 可滚动的消息列表
  * @param {object} [options]
- * @param {string}  [options.emptyText] placeholder shown when the list is empty * @param {string}  [options.downloadText] lightbox save-image button label
- * @param {string}  [options.yesterdayText] time-separator label for yesterday
- * @param {string}  [options.todayText] day separator label for today
- * @param {function(Date): string} [options.dayText] day separator label (older days)
- * @param {string}  [options.deletedText] tombstone text for recalled messages
- * @param {string}  [options.editedText] "(edited)" marker
- * @param {function(string):string} [options.avatarFor] name -> custom avatar data URL ('' = none)
- * @param {function(number, number):string} [options.imagesProgress] (got, total) -> progress label
- * @param {string}  [options.failText] note when every image of a batch failed
- * @param {string}  [options.historyLoadingText] scroll-up pagination loading line
- * @param {string}  [options.historyEndText] scroll-up pagination end-of-history line
- * @param {function(): string[]} [options.mentionNames] live member names for @highlighting
- * @param {function(): string} [options.selfName] the local user's display name
- * @param {function(): boolean} [options.isHost] presenter rights (recall anyone's message)
- * @param {function(object): void} [options.onReply] ({name, text, ts}) — reply button clicked
- * @param {function(object): void} [options.onEdit] ({name, text, ts}) — edit button clicked
- * @param {function(object): void} [options.onDelete] ({name, ts}) — recall button clicked
- * @param {function(object): void} [options.onReact] ({name, ts, emoji, on}) — reaction toggled
- * @param {function(number): string} [options.jumpNewText] (n) -> "n new messages" pill label
- * @param {string}  [options.jumpText] back-to-bottom pill label
+ * @param {string}  [options.emptyText] 列表为空时显示的占位文本 * @param {string}  [options.downloadText] 灯箱保存图片按钮文案
+ * @param {string}  [options.yesterdayText] 「昨天」时间分隔标签
+ * @param {string}  [options.todayText] 「今天」日分隔标签
+ * @param {function(Date): string} [options.dayText] 日分隔标签（更早日期）
+ * @param {string}  [options.deletedText] 撤回消息的墓碑文案
+ * @param {string}  [options.editedText] 「（已编辑）」标记
+ * @param {function(string):string} [options.avatarFor] 昵称 -> 自定义头像 data URL（'' = 无）
+ * @param {function(number, number):string} [options.imagesProgress] (got, total) -> 进度文案
+ * @param {string}  [options.failText] 批次内所有图片都失败时的提示
+ * @param {string}  [options.historyLoadingText] 上滚分页加载中的提示行
+ * @param {string}  [options.historyEndText] 上滚分页到达历史尽头的提示行
+ * @param {function(): string[]} [options.mentionNames] 用于 @高亮的在线成员名
+ * @param {function(): string} [options.selfName] 本地用户的显示名
+ * @param {function(): boolean} [options.isHost] 主持人权限（可撤回任何人的消息）
+ * @param {function(object): void} [options.onReply] ({name, text, ts})——回复按钮被点击
+ * @param {function(object): void} [options.onEdit] ({name, text, ts})——编辑按钮被点击
+ * @param {function(object): void} [options.onDelete] ({name, ts})——撤回按钮被点击
+ * @param {function(object): void} [options.onReact] ({name, ts, emoji, on})——回应被切换
+ * @param {function(number): string} [options.jumpNewText] (n) -> 「n 条新消息」胶囊文案
+ * @param {string}  [options.jumpText] 回到底部胶囊文案
  */
 export function initChat(
     container,
@@ -94,16 +94,16 @@ export function initChat(
 ) {
     let emptyNode = null;
     let lastTime = null;
-    let lastDay = null; // toDateString() of the last rendered message's day
-    let footerNode = null; // scroll-up pagination status line pinned to the top
+    let lastDay = null; // 最近渲染消息所属日的 toDateString()
+    let footerNode = null; // 钉在顶部的上滚分页状态行
     /** batchId -> { imagesEl, progressEl, textEl, expected, done } */
     const batches = new Map();
-    /** own rows awaiting the server's authoritative ts (FIFO, see bindServerTs) */
+    /** 等待服务器权威 ts 的本端行（FIFO，见 bindServerTs） */
     const pendingOwn = [];
-    /** an own row whose ack never arrived must not swallow a later ack */
+    /** 永远等不到 ack 的本端行不得吞掉后续的 ack */
     const PENDING_ACK_TTL_MS = 10_000;
 
-    // ----- back-to-bottom pill (also counts messages that arrived below the fold) -----
+    // ----- 回到底部胶囊（也统计落在视口下方的新消息数） -----
     let jumpPill = null;
     let newBelow = 0;
 
@@ -134,8 +134,8 @@ export function initChat(
                 },
                 el('span', { class: 'chat-jump-label' })
             );
-            // the composer follows the list in the DOM — hosting the pill there
-            // keeps it anchored above the input regardless of the composer height
+            // 输入区在 DOM 中紧跟列表——把胶囊挂在列表里
+            // 使其始终锚定在输入框上方，与输入区高度无关
             (container.nextElementSibling || container.parentElement).append(jumpPill);
         }
         jumpPill.classList.remove('hidden');
@@ -171,8 +171,8 @@ export function initChat(
     }
 
     /**
-     * Time chip between messages, upgraded to a full-day separator whenever
-     * the calendar day changes (always inserted then, regardless of the gap).
+     * 消息间的时间小片，日历日变化时升级为整日分隔
+     * （此时无论间隔多近都插入）。
      */
     function maybeTimeChip(time, stick) {
         const day = time.toDateString();
@@ -197,10 +197,10 @@ export function initChat(
      * @param {boolean} [msg.self]
      * @param {boolean} [msg.system]
      * @param {Date} [msg.time]
-     * @param {object} [msg.reply] {name, text, ts} quote of the answered row
-     * @param {boolean} [msg.deleted] render as a recall tombstone
-     * @param {boolean} [msg.edited] show the "(edited)" marker
-     * @param {object|null} [msg.reactions] emoji -> [reactor names]
+     * @param {object} [msg.reply] {name, text, ts} 被回复行的引用
+     * @param {boolean} [msg.deleted] 渲染为撤回墓碑
+     * @param {boolean} [msg.edited] 显示「（已编辑）」标记
+     * @param {object|null} [msg.reactions] emoji -> [回应者昵称]
      */
     function add({
         name,
@@ -232,12 +232,12 @@ export function initChat(
             reactions,
         });
         append(row, stick);
-        // the server assigns the authoritative ts; chatAck binds it back to the
-        // row we just rendered (edit/recall/reaction look rows up by ts+name)
+        // 服务器分配权威 ts；chatAck 把它绑回刚渲染的行
+        // （编辑/撤回/回应按 ts+name 查行）
         if (self && !deleted) rememberPending(row);
     }
 
-    /** Queue a locally rendered own row until the server's chatAck lands. */
+    /** 本地渲染的本端行入队，直到服务器的 chatAck 落地。 */
     function rememberPending(row) {
         if (!row || !row.dataset?.ts) return;
         pendingOwn.push({ row, at: Date.now() });
@@ -245,8 +245,8 @@ export function initChat(
     }
 
     /**
-     * Bind the server-assigned ts to the oldest still-pending own row. Called
-     * on every chatAck; a row removed by a channel switch is skipped.
+     * 把服务器分配的 ts 绑定到最老的仍在等待的本端行。
+     * 每次 chatAck 都会调用；被频道切换移除的行会跳过。
      */
     function bindServerTs(ts) {
         const value = Number(ts);
@@ -255,20 +255,20 @@ export function initChat(
         while (pendingOwn.length) {
             const { row, at } = pendingOwn.shift();
             if (!row.isConnected) continue;
-            // no ack ever comes for a message the server dropped (flood limit,
-            // rejected payload) — letting such an entry sit at the head would
-            // hand every later ack to the wrong row, so edit/recall would hit
-            // an unrelated line. Expire it and let this ack go unbound instead.
+            // 被服务器丢弃的消息（超频限制、载荷被拒）永远等不到
+            // ack——让这种条目占着头部会把后续每个 ack 都交给
+            // 错误的行，编辑/撤回就会命中无关的消息。
+            // 让它过期，本次 ack 宁可不绑定。
             if (now - at > PENDING_ACK_TTL_MS) continue;
             row.dataset.ts = String(value);
-            // the hover actions captured the old ts in their click closures —
-            // rebuild them so edit/recall use the server-side identity
+            // 悬停按钮在点击闭包里捕获了旧 ts——重建它们，
+            // 让编辑/撤回使用服务器侧身份
             refreshRowActions(row);
             return;
         }
     }
 
-    /** Greyed-out body of a recalled message. */
+    /** 撤回消息的置灰正文。 */
     function tombstoneBubble() {
         return el(
             'div',
@@ -278,7 +278,7 @@ export function initChat(
     }
 
     /**
-     * Standalone image message (no batch). src must be a validated data:image/* URL.
+     * 独立图片消息（非批次）。src 必须是校验过的 data:image/* URL。
      */
     function addImage({ name, src, self = false, alt = 'image', time = new Date() }) {
         if (!DATA_URL_RE.test(src)) return;
@@ -290,14 +290,14 @@ export function initChat(
     }
 
     /**
-     * Render server-persisted history before the live session starts. Rows
-     * keep their original send times (time chips rebuild naturally); image
-     * batches render like the live merged bubbles — the data URLs were
-     * persisted by the sender and are re-validated here before touching the DOM.
+     * 在实时会话开始前渲染服务器持久化的历史。各行保留原始
+     * 发送时间（时间小片自然重建）；图片批次按实时合并气泡
+     * 的样式渲染——data URL 由发送者持久化，
+     * 在触碰 DOM 前在这里重新校验。
      * @param {Array<{name:string,text:string,imgs?:string[],self?:boolean,time:Date}>} messages
      * @param {object} [options]
-     * @param {string} [options.dividerText] system line shown after the block
-     * @param {string} [options.imageAlt]    alt/title for persisted images
+     * @param {string} [options.dividerText] 块之后显示的系统行
+     * @param {string} [options.imageAlt]    持久化图片的 alt/title
      */
     function addHistory(messages, { dividerText = '', imageAlt = 'image' } = {}) {
         let shown = 0;
@@ -345,11 +345,11 @@ export function initChat(
         if (shown && dividerText) add({ text: dividerText, system: true });
     }
 
-    /** Plain-text bubble with @mention highlighting (+ edited marker). */
+    /** 带 @提及高亮的纯文本气泡（含已编辑标记）。 */
     function textBubble(text, edited = false) {
         const bubble = el('div', { class: 'msg-bubble' }, textNode(text, edited));
-        // the edited marker rides inside .msg-text and would blow up with the
-        // jumbo glyph, so edited messages keep the regular bubble
+        // 已编辑标记在 .msg-text 内，配上超大字形会撑爆，
+        // 所以编辑过的消息保持普通气泡
         if (!edited && isEmojiOnly(text)) bubble.classList.add('emoji-only');
         return bubble;
     }
@@ -361,9 +361,9 @@ export function initChat(
     }
 
     /**
-     * Split a text into nodes, highlighting `@name` occurrences of live
-     * members (own name gets a stronger style). Plain text nodes only —
-     * no HTML is ever interpolated.
+     * 把文本拆成节点，高亮在线成员的 `@name`（自己的名字
+     * 用更强的样式）。只有纯文本节点——
+     * 绝不内插任何 HTML。
      */
     function mentionSegments(text) {
         const names = [...new Set(mentionNames().filter(Boolean))];
@@ -383,7 +383,7 @@ export function initChat(
         return out.length ? out : [text];
     }
 
-    /** Persisted image URLs, re-validated before touching the DOM. */
+    /** 持久化的图片 URL，触碰 DOM 前重新校验。 */
     function validImages(imgs) {
         return (Array.isArray(imgs) ? imgs : [])
             .filter(
@@ -393,7 +393,7 @@ export function initChat(
             .slice(0, 9);
     }
 
-    /** Reactions map from a message payload, shape-checked before rendering. */
+    /** 消息载荷中的回应表，渲染前先形状校验。 */
     function validReactions(reactions) {
         if (!reactions || typeof reactions !== 'object' || Array.isArray(reactions)) return null;
         const out = {};
@@ -409,18 +409,18 @@ export function initChat(
     }
 
     /**
-     * Render one OLDER page of persisted history above everything currently
-     * in the list (scroll-up pagination). Same row rules as addHistory; time
-     * chips are rebuilt for the block (its first row always carries one) and
-     * stitched to the existing top: a top chip the new rows now sit within
-     * the gap threshold of becomes redundant and is dropped, a threshold-
-     * crossing gap keeps it — or gets one when the DOM cap had removed it.
-     * The viewport stays anchored: the scroll offset grows by the inserted
-     * height, so nothing jumps. Deliberately does NOT run the DOM cap —
-     * the freshly fetched rows must not be cut away again.
+     * 在列表现有内容之上渲染更旧的一页持久化历史（上滚分页）。
+     * 行规则与 addHistory 相同；本块的时间小片按块重建
+     * （首行必带一片），并与既有顶部缝合：新行若已落入
+     * 顶部小片的间隔阈值之内，该片变得冗余、被丢弃；
+     * 跨越阈值的间隔保留它——DOM 上限裁掉过时则补一片。
+     * 视口保持锚定：滚动偏移按插入高度增长，
+     * 什么都不跳。
+     * 刻意不执行 DOM 上限——刚取回的行绝不能
+     * 又被裁掉。
      * @param {Array<{name:string,text:string,imgs?:string[],self?:boolean,time:Date}>} messages
      * @param {object} [options]
-     * @param {string} [options.imageAlt] alt/title for persisted images
+     * @param {string} [options.imageAlt] 持久化图片的 alt/title
      */
     function prependHistory(messages, { imageAlt = 'image' } = {}) {
         const frag = document.createDocumentFragment();
@@ -470,12 +470,12 @@ export function initChat(
         }
         if (!shown) return;
 
-        // the block lands below the pagination footer (if one is up) and
-        // above everything else
+        // 本块落在分页页脚（若在显示）之下、
+        // 其余一切之上
         let anchor = container.firstChild;
         if (anchor?.classList?.contains('history-footer')) anchor = anchor.nextSibling;
 
-        // stitch the boundary to whatever is now the first row below the block
+        // 把边界缝合到块下方现在的第一行
         let topChip = null;
         let topRow = null;
         for (let n = anchor; n; n = n.nextSibling) {
@@ -491,15 +491,15 @@ export function initChat(
             const newDay = topDate.toDateString() !== prevDay;
             const gap = Number(topRow.dataset.ts) - prevTs;
             if (newDay) {
-                // calendar-day boundary always separates — as a day line
+                // 日历日边界总是分隔——以日分隔线形式
                 if (topChip) topChip.replaceWith(el('div', { class: 'chat-time day', text: dayLabel(topDate) }));
                 else frag.append(el('div', { class: 'chat-time day', text: dayLabel(topDate) }));
             } else if (gap > TIME_GAP_MS) {
                 if (!topChip) frag.append(timeChipNode(topDate));
-                // else the existing chip already separates the two blocks
+                // 否则既有小片已分隔两块
             } else if (topChip) {
-                // the boundary chip may itself be the insert anchor (first
-                // child of the list) — re-point the anchor before dropping it
+                // 边界小片自身可能就是插入锚点（列表的首个子节点）
+                // ——丢弃前先重指锚点
                 if (topChip === anchor) anchor = topChip.nextSibling;
                 topChip.remove();
             }
@@ -516,9 +516,9 @@ export function initChat(
     }
 
     /**
-     * Pagination status line pinned to the very top of the list:
-     * 'loading' while a page is in flight, 'end' once the store ran dry,
-     * null to clear.
+     * 钉在列表最顶端的分页状态行：
+     * 页面在途中为 'loading'，存储取空后为 'end'，
+     * null 为清除。
      */
     function setHistoryFooter(state) {
         if (footerNode) {
@@ -532,14 +532,14 @@ export function initChat(
     }
 
     /**
-     * Open a merged bubble for one send of text + N images (QQ style: images
-     * stacked in the bubble, text underneath). Images are appended later via
-     * addBatchImage as their transfers complete.
+     * 为一次发送的文本 + N 张图片打开合并气泡（QQ 风格：
+     * 图片叠在气泡内，文本在下）。图片在各自传输完成后
+     * 经 addBatchImage 追加。
      * @param {object} msg
-     * @param {string}  msg.batch  batch id shared with the image frames
+     * @param {string}  msg.batch  与图片帧共享的批次 id
      * @param {string}  msg.name
      * @param {string}  [msg.text]
-     * @param {number}  msg.count  announced image count
+     * @param {number}  msg.count  预告的图片数
      * @param {boolean} [msg.self]
      * @param {Date}    [msg.time]
      */
@@ -556,7 +556,7 @@ export function initChat(
         bubble.append(progressEl);
         const row = buildMessage({ name, self, bubble, ts: when.getTime(), reply: validReply(reply), text });
         append(row, stick);
-        if (self) rememberPending(row); // chatAck after the batch is stored
+        if (self) rememberPending(row); // 批次存储后会有 chatAck
 
         batches.set(batch, {
             row: container.lastChild,
@@ -570,8 +570,8 @@ export function initChat(
     }
 
     /**
-     * Append one arrived image into its batch bubble. Falls back to a
-     * standalone image message if the batch row is gone (history cap).
+     * 把一张到达的图片追加进其批次气泡。批次行已不在
+     * （历史上限裁剪）时回退为独立图片消息。
      */
     function addBatchImage(batch, src, alt = 'image') {
         if (!DATA_URL_RE.test(src)) return failBatchImage(batch);
@@ -582,7 +582,7 @@ export function initChat(
         settleBatch(batch, entry);
     }
 
-    /** One image of the batch failed to transfer. */
+    /** 批次中一张图片传输失败。 */
     function failBatchImage(batch) {
         const entry = batches.get(batch);
         if (!entry) return;
@@ -623,7 +623,7 @@ export function initChat(
         return img;
     }
 
-    /** Find a rendered row by ts + sender name (the message identity). */
+    /** 按 ts + 发送者名（消息身份）查找已渲染的行。 */
     function findRow(name, ts) {
         if (!name || !Number.isFinite(ts)) return null;
         for (const child of [...container.children].reverse()) {
@@ -634,9 +634,9 @@ export function initChat(
         return null;
     }
 
-    // ----- live message lifecycle (server-broadcast results) -----
+    // ----- 实时消息生命周期（服务器广播的结果） -----
 
-    /** Apply an edit broadcast: new text + the edited marker. */
+    /** 应用编辑广播：新文本 + 已编辑标记。 */
     function editMessage({ name, ts, text }) {
         const row = findRow(name, ts);
         if (!row || typeof text !== 'string') return;
@@ -646,8 +646,8 @@ export function initChat(
         if (!bubble) return;
         const quote = row.querySelector('.msg-quote');
         const imgs = row.querySelector('.msg-images');
-        // edited rows carry the "(edited)" marker — always back to a regular
-        // bubble, never the jumbo emoji treatment
+        // 编辑过的行带「（已编辑）」标记——总是回到普通气泡，
+        // 绝不用超大 emoji 样式
         bubble.classList.remove('emoji-only');
         bubble.replaceChildren();
         if (quote) bubble.append(quote);
@@ -656,7 +656,7 @@ export function initChat(
         refreshRowActions(row);
     }
 
-    /** Apply a recall broadcast: the row becomes a tombstone. */
+    /** 应用撤回广播：该行变为墓碑。 */
     function deleteMessage({ name, ts }) {
         const row = findRow(name, ts);
         if (!row) return;
@@ -665,7 +665,7 @@ export function initChat(
         row.classList.add('recalled');
         const bubble = row.querySelector('.msg-bubble');
         if (bubble) {
-            // the tombstone must not inherit the jumbo emoji sizing
+            // 墓碑不得继承超大 emoji 尺寸
             bubble.classList.remove('emoji-only');
             bubble.replaceChildren(el('div', { class: 'msg-text tombstone', text: deletedText }));
         }
@@ -673,7 +673,7 @@ export function initChat(
         row.querySelector('.msg-actions')?.remove();
     }
 
-    /** Apply a reaction broadcast: re-render the reaction bar from the map. */
+    /** 应用回应广播：从映射重建回应条。 */
     function reactMessage({ name, ts, reactions }) {
         const row = findRow(name, ts);
         if (!row || row._deleted) return;
@@ -684,7 +684,7 @@ export function initChat(
         row.querySelector('.msg-body')?.append(reactionsNode(row, map));
     }
 
-    /** Reaction chips under a bubble; clicking toggles the local user's entry. */
+    /** 气泡下方的回应 chip；点击切换本地用户的参与状态。 */
     function reactionsNode(row, map) {
         const me = selfName();
         const wrap = el('div', { class: 'msg-reactions' });
@@ -709,14 +709,14 @@ export function initChat(
         return wrap;
     }
 
-    /** Rebuild a row's hover action buttons after a state change. */
+    /** 状态变化后重建一行的悬停操作按钮。 */
     function refreshRowActions(row) {
         row.querySelector('.msg-actions')?.remove();
         const actions = rowActionsNode(row);
         if (actions) row.append(actions);
     }
 
-    /** The hover action cluster: reply / react / edit / recall. */
+    /** 悬停操作簇：回复 / 回应 / 编辑 / 撤回。 */
     function rowActionsNode(row) {
         if (!onReply && !onReact && !onEdit && !onDelete) return null;
         const name = row.dataset.name || '?';
@@ -802,14 +802,14 @@ export function initChat(
         return el('div', { class: 'msg-actions' }, ...buttons);
     }
 
-    /** One QQ-style row: avatar beside a body of [nickname] + bubble.
-     *  DOM order is [avatar, body] for BOTH sides — .msg.self's
-     *  flex-direction: row-reverse flips it so the avatar lands on the
-     *  right edge with the bubble to its left. `ts` tags the row so the
-     *  scroll-up pagination can stitch time chips to the existing top.
-     *  A reply quote (when present) rides at the top of the bubble, hover
-     *  buttons expose reply/react/edit/recall, and a reaction bar renders
-     *  under the bubble when the row carries reactions. */
+    /** 一行 QQ 风格消息：头像贴着 [昵称] + 气泡的主体。
+     *  两侧的 DOM 顺序都是 [avatar, body]——.msg.self 的
+     *  flex-direction: row-reverse 将其翻转，头像落在右缘、
+     *  气泡在其左。`ts` 标记该行，供上滚分页把时间小片
+     *  缝合到既有顶部。
+     *  回复引用（若有）位于气泡顶部，悬停按钮提供
+     *  回复/回应/编辑/撤回，行带回应时气泡下方
+     *  渲染回应条。 */
     function buildMessage({ name, self, bubble, ts, reply = null, text = '', deleted = false, reactions = null }) {
         const row = el('div', {
             class: 'msg' + (self ? ' self' : '') + (deleted ? ' recalled' : ''),
@@ -819,8 +819,8 @@ export function initChat(
         row._reactions = reactions || undefined;
         if (reply) {
             bubble.prepend(quoteNode(reply));
-            // a quoted reply keeps the bubble chrome — jumbo glyphs would
-            // dwarf the quote and leave it floating without a container
+            // 带引用回复的气泡保持普通外观——超大字形会
+            // 碾压引用、让它失去容器漂浮
             bubble.classList.remove('emoji-only');
         }
         const body = el('div', { class: 'msg-body' });
@@ -833,7 +833,7 @@ export function initChat(
         return row;
     }
 
-    /** Quoted row inside a reply bubble — click scrolls to the original. */
+    /** 回复气泡内的引用行——点击滚动到原消息。 */
     function quoteNode(reply) {
         const node = el(
             'div',
@@ -857,7 +857,7 @@ export function initChat(
         const url = avatarFor ? avatarFor(name) : '';
         if (url && DATA_URL_RE.test(url)) {
             const img = el('img', { class: 'msg-avatar img', alt: '' });
-            img.src = url; // set after creation; src is a validated data URL
+            img.src = url; // 创建后设置；src 是校验过的 data URL
             return img;
         }
         return el(
@@ -868,8 +868,8 @@ export function initChat(
     }
 
     /**
-     * Custom avatar changed (self or a peer) — re-render avatars of the
-     * matching rows so history follows, like QQ does.
+     * 自定义头像变更（自己或某 peer）——重渲染匹配行的头像，
+     * 让历史跟随更新，与 QQ 一致。
      */
     function setAvatar(name, url) {
         if (!name) return;
@@ -880,7 +880,7 @@ export function initChat(
         }
     }
 
-    /** A peer was renamed — retarget future avatar updates for their rows. */
+    /** 某 peer 改名——其行的后续头像更新改指向新名。 */
     function renamePeer(oldName, newName) {
         if (!oldName || !newName || oldName === newName) return;
         for (const row of container.children) {
@@ -888,12 +888,12 @@ export function initChat(
         }
     }
 
-    // ----- client-side search over the rendered rows (loaded pages only) -----
+    // ----- 对已渲染行的客户端搜索（仅已加载页） -----
 
     /**
-     * Filter the rendered list by a query (matches sender name and text).
-     * '' / null clears the filter. Returns { total, hits } for the caller's
-     * counter, or null when the filter was cleared.
+     * 按查询串过滤已渲染列表（匹配发送者名与文本）。
+     * '' / null 清除过滤。返回 { total, hits } 供调用方
+     * 计数，清除过滤时返回 null。
      */
     function setSearch(query) {
         const q = (query || '').trim().toLowerCase();
@@ -930,21 +930,21 @@ export function initChat(
         container.append(node);
         if (stick) scrollBottom();
         else if (!isChip && node.classList?.contains('msg')) newBelow = newBelow + 1;
-        // cap history so a long session can't grow the DOM unbounded
+        // 裁剪历史，长时间会话也不能让 DOM 无界增长
         while (container.children.length > 300) {
             const removed = container.firstChild;
-            // a capped-away batch row can no longer receive images — drop its
-            // entry so late chunks fall back to standalone image messages
+            // 被裁掉的批次行无法再接收图片——删除其条目，
+            // 迟到的分块回退为独立图片消息
             for (const [id, entry] of batches) {
                 if (entry.row === removed) batches.delete(id);
             }
             removed.remove();
         }
         if (!container.children.length) showEmpty();
-        updateJumpPill(); // shows/hides the pill without a scroll event
+        updateJumpPill(); // 无需滚动事件即可显隐胶囊
     }
 
-    // ----- lightbox (click an image to view it full size) -----
+    // ----- 灯箱（点击图片全尺寸查看） -----
 
     let lightbox = null;
 

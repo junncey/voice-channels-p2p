@@ -1,5 +1,5 @@
 /**
- * REST client. Admin JWT is kept in sessionStorage (per tab, cleared on close).
+ * REST 客户端。管理端 JWT 存于 sessionStorage（按标签页隔离，关闭即清除）。
  */
 
 const ADMIN_TOKEN_KEY = 'vc_admin_token';
@@ -39,15 +39,15 @@ async function request(path, { method = 'GET', body, admin = false } = {}) {
 }
 
 export const api = {
-    /* public */
+    /* 公共接口 */
     getPublicChannels: () => request('/api/channels'),
     getChannel: (id) => request(`/api/channels/${encodeURIComponent(id)}`),
 
-    /* host */
+    /* 主持人 */
     hostLogin: (channelId, username, password) =>
         request('/api/host/login', { method: 'POST', body: { channelId, username, password } }),
 
-    /* admin */
+    /* 管理员 */
     adminLogin: (password) => request('/api/admin/login', { method: 'POST', body: { password } }),
     adminChannels: () => request('/api/admin/channels', { admin: true }),
     adminGetSettings: () => request('/api/admin/settings', { admin: true }),
@@ -61,7 +61,7 @@ export const api = {
     adminStats: () => request('/api/admin/stats', { admin: true }),
     adminAudit: (limit = 200) => request(`/api/admin/audit?limit=${encodeURIComponent(limit)}`, { admin: true }),
 
-    /** Upload a tar.gz backup and restore it over the live data (admin). */
+    /** 上传 tar.gz 备份并覆盖恢复现有数据（管理员）。 */
     adminRestore(file) {
         return fetch('/api/admin/restore', {
             method: 'POST',
@@ -74,7 +74,7 @@ export const api = {
         });
     },
 
-    /** Download the server backup (channels.json + chat history) as tar.gz. */
+    /** 下载服务器备份（channels.json + 聊天历史）为 tar.gz。 */
     adminBackup() {
         return fetch('/api/admin/backup', { headers: { Authorization: `Bearer ${getAdminToken()}` } }).then(
             async (res) => {
@@ -90,7 +90,7 @@ export const api = {
         );
     },
 
-    /** Download the channel chat history as Markdown (host token required). */
+    /** 下载频道聊天历史为 Markdown（需主持人 token）。 */
     hostExport(channelId, hostToken) {
         return fetch(`/api/host/${encodeURIComponent(channelId)}/export`, {
             headers: { Authorization: `Bearer ${hostToken}` },

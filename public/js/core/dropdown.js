@@ -1,10 +1,10 @@
 /**
- * Custom dropdown listbox — replaces native <select> for device pickers.
- * Native select popups misplace themselves inside overlays that use
- * backdrop-filter/transform (and in scaled webviews); this component renders
- * its own menu, fixed-positioned in <body>, so it always sits under the
- * trigger. Keyboard: Enter/Space/ArrowDown open, arrows navigate, Enter picks,
- * Esc / outside click closes.
+ * 自定义下拉列表框——替代原生 <select> 用于设备选择器。
+ * 原生 select 弹层在使用 backdrop-filter/transform 的覆盖层内
+ * （以及缩放过的 webview 里）会错位；本组件自绘菜单，
+ * 以 fixed 定位挂在 <body> 下，因此永远贴在触发按钮下方。
+ * 键盘：Enter/Space/ArrowDown 打开，方向键导航，Enter 选中，
+ * Esc / 点击外部关闭。
  */
 
 import { el } from './utils.js';
@@ -15,7 +15,7 @@ const CHEVRON_SVG =
 /**
  * @param {object} options
  * @param {function():Array<{value:string,label:string}>} options.getItems
- * @param {function():string} options.getValue   current value id
+ * @param {function():string} options.getValue   当前值 id
  * @param {function(value:string):void} options.onSelect
  * @returns {{ el:HTMLButtonElement, refresh:Function, close:Function, setDisabled:Function }}
  */
@@ -86,7 +86,7 @@ export function createDropdown({ getItems, getValue, onSelect }) {
         menu.style.maxWidth = `${Math.min(420, window.innerWidth - 16)}px`;
         let top = rect.bottom + 6;
         if (top + menu.offsetHeight > window.innerHeight - 8) {
-            top = Math.max(8, rect.top - menu.offsetHeight - 6); // flip above when space runs out
+            top = Math.max(8, rect.top - menu.offsetHeight - 6); // 空间不足时向上翻转
         }
         menu.style.top = `${top}px`;
         menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -123,7 +123,7 @@ export function createDropdown({ getItems, getValue, onSelect }) {
     }
 
     function onScroll(event) {
-        if (menu.contains(event.target)) return; // scrolling the menu itself is fine
+        if (menu.contains(event.target)) return; // 滚动菜单本身没问题
         close();
     }
 

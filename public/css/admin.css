@@ -1,5 +1,5 @@
 /* ============================================================
-   Admin console
+   管理后台
    ============================================================ */
 
 .page {
@@ -41,7 +41,7 @@
     color: var(--text-1);
 }
 
-/* ---------- console ---------- */
+/* ---------- 控制台 ---------- */
 
 .admin-topbar {
     height: var(--header-h);
@@ -146,7 +146,7 @@
     white-space: nowrap;
 }
 
-/* online count doubles as the member-list expander */
+/* 在线人数兼作成员列表展开开关 */
 .admin-table .count-toggle {
     appearance: none;
     background: none;
@@ -167,14 +167,14 @@
     text-underline-offset: 3px;
 }
 
-/* expandable member sub-row (admin kick list) */
+/* 可展开的成员子行（管理员踢人列表） */
 .admin-table .members-row td {
     background: var(--bg-2, rgba(128, 128, 128, 0.08));
     padding: 8px 12px 12px;
 }
 
-/* Lives INSIDE the td: a flex td would stop being a table-cell and the
-   colspan would collapse into a narrow strip under the first column. */
+/* 必须位于 td 内部：flex 化的 td 不再是 table-cell，
+   colspan 会塌缩成第一列下方的窄条。 */
 .members-wrap {
     display: flex;
     flex-wrap: wrap;
@@ -223,7 +223,7 @@
     color: var(--text-2);
 }
 
-/* ---------- editor modal ---------- */
+/* ---------- 编辑弹窗 ---------- */
 
 .editor-modal {
     max-width: 480px;
@@ -291,7 +291,7 @@
     margin-bottom: 18px;
 }
 
-/* channel password editor bits */
+/* 频道密码编辑相关 */
 
 .pw-flag {
     margin-left: 6px;
@@ -315,14 +315,14 @@
 }
 
 /* ============================================================
-   New: stats panel + audit log
+   新增：统计面板 + 审计日志
    ============================================================ */
 
 .stats-modal,
 .audit-modal {
     width: min(680px, 92vw);
-    /* base .modal caps max-width at 400px — without lifting it these
-       panels silently shrink and the audit row wraps per-character */
+    /* 基础 .modal 将 max-width 限死在 400px — 不解除的话这两个
+       面板会被悄悄压窄，审计行会逐字符换行 */
     max-width: 92vw;
 }
 .stats-body {

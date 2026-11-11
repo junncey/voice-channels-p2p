@@ -1,14 +1,14 @@
 /*
-Socket event wiring — maps every socket.io event of the signaling protocol
-onto page actions, plus the scroll-up pagination for the persisted chat
-history (cursor = ts of the oldest row we already have; the server replays
-the newest page on every join, older pages are pulled via chatPage acks).
+Socket 事件接线 —— 把信令协议的每个 socket.io 事件映射到
+页面动作，外加持久化聊天历史的向上滚动分页
+（游标 = 已有最旧行的 ts；服务器每次 join 都重放最新一页，
+更老的页经 chatPage ack 逐页回拉）。
 
-Lives at module scope (not inside a page controller): bindHistoryPaging()
-binds the scroll listener in boot() before the socket handlers are wired.
-Shared page state arrives via the `s` accessor object, cross-module calls
-via the late-bound `x` surface (both owned by channel.js); member-list
-helpers through `mem`, recovery through `rec`.
+位于模块作用域（不在页面控制器内）：bindHistoryPaging()
+在 socket 处理器接线之前的 boot() 里绑定滚动监听。
+共享页面状态经 `s` 存取器对象到达，跨模块调用走晚绑定的
+`x` 调用面（两者都归 channel.js 所有）；成员列表助手经
+`mem`，恢复经 `rec`。
 */
 
 export function createSocketEvents({
@@ -30,34 +30,34 @@ export function createSocketEvents({
     t,
     $,
 }) {
-    // the server replays the persisted chat history on EVERY join (reconnects
-    // included) — only the first block of a page load is ever rendered
+    // 服务器在每次 join（含重连）时都重放持久化聊天历史 ——
+    // 只有页面加载后的第一块会被渲染
     let chatHistorySeen = false;
-    // scroll-up pagination for that history: cursor = ts of the oldest row we
-    // already have, hasMore mirrors the server's report, loading guards the
-    // single in-flight chatPage request
+    // 该历史的向上滚动分页：游标 = 已有最旧行的 ts，
+    // hasMore 镜像服务器的报告，loading 保护
+    // 单个在途 chatPage 请求
     let historyCursor = null;
     let historyHasMore = false;
     let historyLoading = false;
-    // mirror of chat.js nearBottom(): fetch one page before hitting the top
+    // 镜像 chat.js 的 nearBottom()：在触及顶部之前预取一页
     const CHAT_LOAD_THRESHOLD = 80;
 
-    // transport-level drops (VPN switch, network flap) usually reconnect within a
-    // couple of seconds — hold the "disconnected" toast until it sticks
+    // 传输层断连（VPN 切换、网络闪断）通常几秒内重连 ——
+    // 「已断开」提示压到确认真的断了再弹
     const DISCONNECT_TOAST_MS = 3000;
     let disconnectToastTimer = null;
 
-    // join acknowledgment: the join event has NO built-in ack, and the server
-    // drops a join without a word in exactly one place (the auth-failure
-    // cooldown — see signaling.js joinThrottled). Without a timeout a silently
-    // dropped join leaves the page waiting for a serverInfo that never comes,
-    // which is the one dead-end the recovery ladder cannot see. serverInfo
-    // clears the timer; a timeout re-sends (bounded), then says so.
+    // join 应答确认：join 事件没有内建 ack，而服务器只在唯一
+    // 一处一言不发地丢弃 join（鉴权失败冷却 —— 见 signaling.js
+    // joinThrottled）。没有超时的话，被静默丢弃的 join 会让页面
+    // 干等一个永不到来的 serverInfo，这正是恢复阶梯看不见的
+    // 那条死路。serverInfo 清掉定时器；超时则（有上限地）重发，
+    // 然后如实告知。
     const JOIN_ACK_MS = 10000;
     const JOIN_ACK_MAX_RETRIES = 3;
     let joinAckTimer = null;
     let joinAckRetries = 0;
-    let joinThrottleUntil = 0; // epoch ms — server-told cooldown, join re-sends wait it out
+    let joinThrottleUntil = 0; // epoch ms —— 服务器告知的冷却，join 重发要等它过去
 
     function clearJoinAck() {
         clearTimeout(joinAckTimer);
@@ -73,12 +73,12 @@ export function createSocketEvents({
         joinAckTimer = null;
         if (s.joined || !s.socket) return;
         if (!s.socket.connected) {
-            armJoinAck(); // offline: the reconnect handler re-emits join for us
+            armJoinAck(); // 离线：重连处理器会替我们重发 join
             return;
         }
         const waitLeft = joinThrottleUntil - Date.now();
         if (waitLeft > 0) {
-            joinAckTimer = setTimeout(onJoinAckTimeout, waitLeft + 500); // server-told cooldown rules
+            joinAckTimer = setTimeout(onJoinAckTimeout, waitLeft + 500); // 服务器告知的冷却说了算
             return;
         }
         if (joinAckRetries < JOIN_ACK_MAX_RETRIES) {
@@ -88,31 +88,31 @@ export function createSocketEvents({
             armJoinAck();
             return;
         }
-        joinAckRetries = 0; // a later reconnect cycle gets a fresh budget
+        joinAckRetries = 0; // 之后的重连周期会拿到全新预算
         toast(t('channel.errors.joinTimeout'), 'warn');
-        armJoinAck(); // keep watching — the next serverInfo ends this quietly
+        armJoinAck(); // 继续盯着 —— 下一个 serverInfo 会悄悄了结它
     }
 
-    // TURN REST credentials expire (the username IS the unix expiry timestamp)
-    // but the list is baked into each RTCPeerConnection at addPeer time — a
-    // session that outlives its credentials would send every recovery
-    // iceRestart at a coturn that no longer authenticates it. Re-arm a fetch
-    // shortly before the earliest expiry lands in a payload; the fresh set
-    // goes to setConfiguration via mesh.updateIceServers.
+    // TURN REST 凭证会过期（用户名就是 unix 过期时间戳），
+    // 而这份列表在 addPeer 时就烤进了每个 RTCPeerConnection ——
+    // 比凭证活得更久的会话，会把每次恢复用的 iceRestart 发给
+    // 一个不再认它的 coturn。在最早的过期时间落进载荷之前不久
+    // 重新武装一次拉取；新集合经 mesh.updateIceServers 进
+    // setConfiguration。
     const ICE_REFRESH_MARGIN_MS = 5 * 60 * 1000;
-    // cheap ack against a memoized server — retry soon rather than sit out a
-    // long window with credentials that may already be aging out
+    // 对 memoized 服务器的廉价 ack —— 尽快重试，而不是拿着
+    // 可能正在过期的凭证干等一个长窗口
     const ICE_REFRESH_RETRY_MS = 60 * 1000;
-    // setConfiguration refused mid-negotiation (rare): re-apply the SAME list
-    // shortly instead of waiting for the next fetch cycle
+    // 协商中 setConfiguration 被拒（罕见）：稍后重应用同一份列表，
+    // 而不是等下一轮拉取周期
     const ICE_APPLY_RETRY_MS = 30 * 1000;
     let iceRefreshTimer = null;
     let iceApplyRetryTimer = null;
 
-    /** (Re)schedule the next credential fetch from the newest addPeer payload. */
+    /** 依据最新的 addPeer 载荷（重）排下一次凭证拉取。 */
     function scheduleIceRefresh(iceServers) {
-        // only REST-mode entries carry a numeric expiry username; static
-        // accounts and bare STUN never age out — nothing to schedule
+        // 只有 REST 模式的条目才带数字过期用户名；静态账号与
+        // 纯 STUN 永不过期 —— 无需排程
         let expiresAtSec = null;
         for (const server of iceServers || []) {
             const expiry = Number(server?.username);
@@ -123,9 +123,9 @@ export function createSocketEvents({
         clearTimeout(iceRefreshTimer);
         iceRefreshTimer = null;
         if (expiresAtSec === null) return;
-        // no artificial floor: a payload already inside the margin window
-        // (short-lived credentials) must fetch NOW — a floor could arm the
-        // refresh after the expiry it is meant to beat
+        // 不设人为下限：载荷已进入余量窗口（短命凭证）时必须
+        // 立即拉取 —— 设下限可能让刷新排在它本要赶超的
+        // 过期时间之后
         const delay = Math.max(0, ICE_REFRESH_MARGIN_MS + expiresAtSec * 1000 - Date.now());
         iceRefreshTimer = setTimeout(refreshIceServers, delay);
     }
@@ -133,7 +133,7 @@ export function createSocketEvents({
     function refreshIceServers() {
         iceRefreshTimer = null;
         const socket = s.socket;
-        // not in a live session: the next addPeer (join / new peer) reschedules
+        // 不在活动会话中：下一个 addPeer（join / 新对端）会重新排程
         if (!socket?.connected || !s.joined) return;
         socket.timeout(8000).emit('refreshIceServers', null, (err, iceServers) => {
             if (err || !Array.isArray(iceServers) || !iceServers.length) {
@@ -142,8 +142,8 @@ export function createSocketEvents({
             }
             const refused = s.mesh?.updateIceServers(iceServers) || 0;
             if (refused > 0) {
-                // some live PCs refused setConfiguration (mid-negotiation edge):
-                // re-apply the same fresh list shortly — no new fetch needed
+                // 部分活动 PC 拒绝了 setConfiguration（协商中的边缘情况）：
+                // 稍后重应用同一份新列表 —— 无需再拉取
                 clearTimeout(iceApplyRetryTimer);
                 iceApplyRetryTimer = setTimeout(() => s.mesh?.updateIceServers(iceServers), ICE_APPLY_RETRY_MS);
             }
@@ -151,15 +151,15 @@ export function createSocketEvents({
         });
     }
 
-    /** Server history rows -> renderable rows (shared by join + paging). */
+    /** 服务器历史行 -> 可渲染行（join 与分页共用）。 */
     function parseHistoryRows(messages) {
         const rows = [];
         for (const msg of messages) {
             if (!msg || typeof msg !== 'object') continue;
             const name = String(msg.name || '?').slice(0, 24);
             let text = typeof msg.text === 'string' ? msg.text : '';
-            const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // prependHistory re-validates each URL
-            // legacy rows (≤ voice.21) kept only the image count — show it as a placeholder
+            const imgs = Array.isArray(msg.imgs) ? msg.imgs : []; // prependHistory 会重新校验每个 URL
+            // 旧版行（≤ voice.21）只留了图片数量 —— 以占位符显示
             const legacyCount = Number.isInteger(msg.imgs) && msg.imgs > 0 ? msg.imgs : 0;
             if (legacyCount) text = [text, `[${t('chat.image')}×${legacyCount}]`].filter(Boolean).join(' ');
             if (!text && !imgs.length && msg.deleted !== true) continue;
@@ -189,7 +189,7 @@ export function createSocketEvents({
         box.addEventListener('scroll', maybeLoadOlder, { passive: true });
     }
 
-    /** Fire a page fetch whenever the list is scrolled near its top. */
+    /** 列表滚动到接近顶部时触发一次翻页拉取。 */
     function maybeLoadOlder() {
         if (!s.socket || !historyHasMore || historyLoading) return;
         const box = $('#chatMessages');
@@ -201,8 +201,8 @@ export function createSocketEvents({
         if (historyLoading || !historyHasMore) return;
         historyLoading = true;
         s.chat.setHistoryFooter('loading');
-        // ack keeps request and response paired; the timeout un-sticks the
-        // flag when the answer never comes so a later scroll can retry
+        // ack 让请求与响应配对；应答永不到来时超时会解开
+        // 标志位，之后的滚动还能重试
         s.socket.timeout(8000).emit('chatPage', { room_id: channelId, before: historyCursor ?? 0 }, (err, res) => {
             historyLoading = false;
             s.chat.setHistoryFooter(null);
@@ -210,12 +210,12 @@ export function createSocketEvents({
             const messages = Array.isArray(res?.messages) ? res.messages : [];
             historyHasMore = res?.hasMore === true;
             if (messages.length) {
-                const first = messages[0]; // oldest of the page, again
+                const first = messages[0]; // 又是本页最旧的一条
                 if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
                 s.chat.prependHistory(parseHistoryRows(messages), { imageAlt: t('chat.image') });
             }
             if (historyHasMore)
-                maybeLoadOlder(); // viewport may still not be full
+                maybeLoadOlder(); // 视口可能仍未填满
             else s.chat.setHistoryFooter('end');
         });
     }
@@ -240,15 +240,15 @@ export function createSocketEvents({
         const socket = s.socket;
 
         socket.on('connect', () => {
-            // back within the flap window — the "disconnected" toast never fired
+            // 回到了闪断窗口内 —— 「已断开」提示从未弹出
             clearTimeout(disconnectToastTimer);
             disconnectToastTimer = null;
             emitJoin();
         });
 
         socket.on('serverInfo', (cfg) => {
-            // a successful (re)join resolves any pending self-reconnect and
-            // any pending join-ack timeout
+            // 一次成功的（重）join 会了结任何未决的自愈重连
+            // 与任何未决的 join-ack 超时
             rec.markSessionRestored();
             clearJoinAck();
             joinAckRetries = 0;
@@ -264,11 +264,11 @@ export function createSocketEvents({
                 mem.syncMembers(cfg.peers || {});
                 s.chat.add({ text: t('chat.joined', { name: s.selfName }), system: true, self: true });
                 x.syncPttHoldButton();
-                x.applyDeafenState(); // reflects the (session-local) state on the fresh member card
-                // password accepted — keep it for the next auto-join
+                x.applyDeafenState(); // 把（会话本地的）状态反映到新成员卡片上
+                // 密码通过 —— 留着供下次自动 join 使用
                 if (s.channelPassword) x.saveChannelPw(s.channelPassword);
-                // tell everyone in the room which avatar we carry (peers list only
-                // flows joiner <- room, this is the joiner -> room direction)
+                // 告诉房间里的所有人我们带的是什么头像（peers 列表
+                // 只从房间流向加入者，这是加入者 -> 房间的方向）
                 if (s.selfAvatar) socket.emit('peerAvatar', { room_id: channelId, avatar: s.selfAvatar });
             } else {
                 s.isPresenter = !!cfg.is_presenter;
@@ -279,46 +279,46 @@ export function createSocketEvents({
         });
 
         socket.on('chatAck', ({ ts } = {}) => {
-            // server-assigned timestamp for the row we rendered optimistically —
-            // without it edit/recall/reaction would look up a ts nobody else has
+            // 服务器为乐观渲染的那一行指派的时间戳 ——
+            // 没有它，编辑/撤回/回应将查到一个别人都没有的 ts
             s.chat.bindServerTs(ts);
         });
 
         socket.on('chatHistory', (cfg) => {
-            // reconnect replays are ignored: the live DOM already holds the
-            // recent context, rendering again would duplicate every row
+            // 重连重放被忽略：活动 DOM 已持有近期上下文，
+            // 再渲染一次会让每行重复
             if (chatHistorySeen) return;
             chatHistorySeen = true;
-            // newest page of the persisted history; older pages are pulled on
-            // demand when the user scrolls to the top
+            // 持久化历史的最新一页；更老的页在用户滚到顶部时
+            // 按需回拉
             historyHasMore = cfg?.hasMore === true;
             const messages = Array.isArray(cfg?.messages) ? cfg.messages : [];
-            const first = messages[0]; // server sends oldest first
+            const first = messages[0]; // 服务器最旧的在前
             if (first && typeof first.ts === 'number' && first.ts > 0) historyCursor = first.ts;
             const rows = parseHistoryRows(messages);
             if (!rows.length) return;
             s.chat.addHistory(rows, { dividerText: t('chat.historyDivider'), imageAlt: t('chat.image') });
-            maybeLoadOlder(); // keep going while the viewport isn't filled yet
+            maybeLoadOlder(); // 视口还没填满就继续拉
         });
 
         socket.on('addPeer', (cfg) => {
             const known = s.mesh.entries.has(cfg.peer_id);
-            scheduleIceRefresh(cfg.iceServers); // freshest credential expiry rides on every addPeer
+            scheduleIceRefresh(cfg.iceServers); // 最新的凭证过期时间随每个 addPeer 送达
             s.mesh.addPeer(cfg.peer_id, cfg.should_create_offer, cfg.iceServers || []);
             mem.syncMembers(cfg.peers || {});
-            // should_create_offer=false means: WE are the old member and someone
-            // else just joined — announce them (the joiner gets one event per
-            // existing member and must not re-announce everyone). rejoin=true is
-            // a resumed session coming back from a network flap: its card never
-            // left, no announcement, no sound.
+            // should_create_offer=false 意味着：我们是老成员，别人
+            // 刚刚加入 —— 由我们播报（加入者会按每个既有成员各收
+            // 一个事件，绝不能再播报所有人）。rejoin=true 是从网络
+            // 闪断中回来的原地恢复会话：它的卡片从未离开，
+            // 不播报、不响声。
             if (s.joined && cfg.should_create_offer === false && !cfg.rejoin) {
                 const name = members.get(cfg.peer_id)?.peer_name || '';
                 if (name) s.chat.add({ text: t('chat.joined', { name }), system: true });
                 playSound('peerJoin');
             }
-            // resumed session with an existing (possibly broken) link: the mesh
-            // entry was reused so NO offer went out — put the recovery ladder on
-            // it now instead of waiting for the next 10s scan
+            // 带既有（可能已损坏）链路的恢复会话：mesh 条目被复用，
+            // 没有 offer 发出 —— 现在就把恢复阶梯架上去，
+            // 而不是等下一轮 10s 扫描
             if (known && cfg.should_create_offer === true) {
                 const state = s.mesh.entries.get(cfg.peer_id)?.pc.connectionState;
                 if (state && state !== 'connected' && state !== 'closed') rec.notePeerState(cfg.peer_id, state);
@@ -339,8 +339,8 @@ export function createSocketEvents({
         socket.on('iceCandidate', (cfg) => s.mesh.handleIceCandidate(cfg));
         socket.on('sessionDescription', (cfg) => s.mesh.handleSessionDescription(cfg));
 
-        // message lifecycle — the server broadcasts the persisted result to
-        // everyone (sender included), so the DOM follows the store
+        // 消息生命周期 —— 服务器把持久化结果广播给所有人
+        // （含发送者），DOM 跟随存储走
         socket.on('chatEdit', (cfg) => {
             if (Number.isFinite(cfg?.ts))
                 s.chat.editMessage({
@@ -387,19 +387,19 @@ export function createSocketEvents({
         });
 
         socket.on('peerName', ({ peer_id, peer_name: rawName, peer_name_old }) => {
-            // host-supplied: cap like the join/rename inputs so a hostile host
-            // can't push an oversized string into state or localStorage
+            // 主持人提供的：按 join/改名输入框一样截断，防止恶意
+            // 主持人把超长字符串推进状态或 localStorage
             const peer_name = String(rawName || '').slice(0, 24);
             if (!peer_name) return;
             const member = members.get(peer_id);
             const old = member?.peer_name;
             if (member && old && old !== peer_name) {
-                // per-user volume memory is keyed by display name — follow the rename
+                // 按用户音量记忆以显示名为键 —— 跟随改名
                 if (peerVolumes[old] !== undefined && peerVolumes[old] !== 1) {
                     x.savePeerVolume(peer_name, peerVolumes[old]);
                 }
-                x.savePeerVolume(old, 1); // drop the stale key
-                // avatar lookup is keyed by name too — move it along
+                x.savePeerVolume(old, 1); // 丢掉过期键
+                // 头像查找也以名字为键 —— 一并迁移
                 const avatar = avatars.get(old);
                 if (avatar) {
                     avatars.set(peer_name, avatar);
@@ -412,7 +412,7 @@ export function createSocketEvents({
                 member.peer_name = peer_name;
             }
             if (peer_id === s.selfUuid) {
-                // the host renamed ME — accept it and persist for the next visit
+                // 主持人改名了我 —— 接受并持久化供下次访问
                 s.selfName = peer_name;
                 localStorage.setItem(NICK_KEY, peer_name);
                 if (s.selfAvatar) avatars.set(s.selfName, s.selfAvatar);
@@ -465,7 +465,7 @@ export function createSocketEvents({
 
         socket.on('kickOut', (cfg) => {
             x.teardown();
-            // host ejection vs. the admin deleting the room under our feet
+            // 被主持人移出 vs. 管理员从脚下删掉房间
             x.showJoinFatal(cfg?.reason === 'channelDeleted' ? t('channel.channelDeleted') : t('channel.kicked'));
         });
 
@@ -486,8 +486,8 @@ export function createSocketEvents({
             x.showJoinError(t('channel.errors.channelLimit', { n: cfg?.max || 0 }))
         );
         socket.on('channelPasswordRequired', () => {
-            // wrong or missing channel password — drop the stale remembered value
-            // so the overlay stays up until a correct one is entered
+            // 频道密码错误或缺失 —— 丢掉过期的记忆值，
+            // 覆盖层保持展开直到输入正确的密码
             x.clearChannelPw();
             s.channelPassword = '';
             x.showJoinError(t('channel.errors.passwordRequired'));
@@ -497,30 +497,30 @@ export function createSocketEvents({
         });
         socket.on('unauthorized', () => {
             if (!s.hostToken) return x.showJoinError(t('channel.errors.unauthorized'));
-            // persisted token no longer accepted (expired or the host was removed
-            // from the channel config) — drop it and carry on as a guest
+            // 持久化的令牌不再被接受（过期或主持人已从频道配置
+            // 移除）—— 丢弃它，以访客身份继续
             x.clearHostToken();
             s.hostToken = '';
             $('#hostReadyHint').classList.add('hidden');
             toast(t('channel.hostTokenExpired'), 'warn');
             if (s.joined)
-                emitJoin(); // reconnect of an established session: rejoin without the token
+                emitJoin(); // 已建立会话的重连：不带令牌重进
             else {
                 s.socket.disconnect();
                 x.join({ textOnly: false });
             }
         });
         socket.on('joinError', () => {
-            // server-side fault mid-join (the handler logs the details) — the
-            // session state was rolled back there, so start over cleanly
+            // join 中途的服务器故障（处理器会记录细节）——
+            // 会话状态已在服务器侧回滚，这里干净地重来
             clearJoinAck();
             x.showJoinError(t('channel.errors.joinFailed'));
             x.setOverlayBusy(false);
         });
         socket.on('joinThrottled', ({ retryAfter } = {}) => {
-            // the auth-failure cooldown dropped this join (shared NATs trip it
-            // for innocent users too) — told instead of silent, so hold the
-            // re-send loop to the exact second and say why the join is stuck
+            // 鉴权失败冷却丢弃了这次 join（共享 NAT 也会让无辜用户
+            // 触发）—— 这次有告知而非静默，所以把重发循环
+            // 卡到精确的秒数，并说明 join 为何卡住
             const seconds = Math.max(1, Math.min(600, Number(retryAfter) || 60));
             joinThrottleUntil = Date.now() + seconds * 1000;
             clearJoinAck();
@@ -530,15 +530,15 @@ export function createSocketEvents({
 
         socket.on('disconnect', (reason) => {
             if (!s.joined) return;
-            // The mesh and member list SURVIVE the disconnect: the server parks
-            // our session as a ghost, this socket re-joins with the same
-            // peer_uuid and the existing peer connections resume — they heal via
-            // the ICE-restart recovery ladder instead of a full renegotiation.
-            // Intentional exits (leave, kick, our own B1 rebuild, join errors)
-            // tear the state down themselves before disconnecting.
+            // mesh 与成员列表在断连中「存活」：服务器把我们的会话
+            // 挂起为幽灵，这个 socket 以同一 peer_uuid 重新 join，
+            // 既有的对端连接原地恢复 —— 它们经 ICE-restart 恢复阶梯
+            // 治愈，而不是全量重协商。
+            // 主动退出（离开、被踢、自己的 B1 重建、join 错误）
+            // 会在断开前自己拆干净状态。
             if (reason === 'io client disconnect' || rec.selfReconnecting) return;
-            // brief transport flaps (VPN/accelerator switch) usually reconnect
-            // within a couple of seconds — don't cry "disconnected" until it sticks
+            // 短暂的传输闪断（VPN/加速器切换）通常几秒内重连 ——
+            // 确认真断了再喊「已断开」
             clearTimeout(disconnectToastTimer);
             disconnectToastTimer = setTimeout(() => {
                 disconnectToastTimer = null;

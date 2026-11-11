@@ -1,15 +1,15 @@
 'use strict';
 
 // npx mocha test-red-codecs.js
-// redFirstCodecs lives in a browser ES module — import it dynamically via its
-// file URL (the package itself stays CommonJS), same pattern as test-opusFmtp.
+// redFirstCodecs 位于浏览器 ES 模块——经其 file URL 动态导入
+// （包本身保持 CommonJS），与 test-opusFmtp 同一套路。
 
 require('should');
 const { pathToFileURL } = require('url');
 const path = require('path');
 
-// shape mirrors RTCRtpReceiver.getCapabilities('audio').codecs in Chrome,
-// where audio/red rides first-party with an apt chain pointing at opus
+// 形状仿照 Chrome 的 RTCRtpReceiver.getCapabilities('audio').codecs：
+// audio/red 以 apt 链指向 opus 的方式随第一方一起出现
 const CHROME_LIKE = [
     { mimeType: 'audio/opus', clockRate: 48000, channels: 2, sdpFmtpLine: 'minptime=10;useinbandfec=1' },
     { mimeType: 'audio/red', clockRate: 48000, channels: 2, sdpFmtpLine: '111/111' },
@@ -30,8 +30,8 @@ describe('test-red-codecs', () => {
     it('should move audio/red entries to the front, keeping the rest in order', () => {
         const out = redFirstCodecs(CHROME_LIKE);
         out[0].mimeType.should.equal('audio/red');
-        // everything else keeps its relative order — codec preference only
-        // reorders, it must never drop or duplicate entries
+        // 其余条目保持原有相对顺序——codec 偏好只做重排，
+        // 绝不能丢条目或产生重复
         out.map((c) => c.mimeType).should.eql([
             'audio/red',
             'audio/opus',
@@ -51,15 +51,15 @@ describe('test-red-codecs', () => {
     it('should keep every entry and its fields intact (apt chains survive reordering)', () => {
         const out = redFirstCodecs(CHROME_LIKE);
         out.should.have.length(CHROME_LIKE.length);
-        // same object references — the reordering carries payloads untouched
+        // 仍是同一批对象引用——重排不碰任何 payload 内容
         for (const codec of CHROME_LIKE) out.should.containEql(codec);
     });
 
     it('should return the input untouched when audio/red is absent (Firefox-like)', () => {
         const noRed = CHROME_LIKE.filter((c) => c.mimeType !== 'audio/red');
         const out = redFirstCodecs(noRed);
-        // identity return is the caller’s "no red available" signal (webrtc.js
-        // compares red !== codecs before calling setCodecPreferences)
+        // 原样返回是调用方的“无 red 可用”信号（webrtc.js 在调用
+        // setCodecPreferences 前比较 red !== codecs）
         out.should.equal(noRed);
     });
 

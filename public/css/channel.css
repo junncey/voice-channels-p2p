@@ -1,5 +1,5 @@
 /* ============================================================
-   Channel page — left voice members / right text chat
+   频道页 — 左侧语音成员 / 右侧文字聊天
    ============================================================ */
 
 body {
@@ -9,7 +9,7 @@ body {
     overflow: hidden;
 }
 
-/* ---------- header ---------- */
+/* ---------- 头部 ---------- */
 
 .channel-header {
     height: var(--header-h);
@@ -109,7 +109,7 @@ body {
     }
 }
 
-/* ---------- layout ---------- */
+/* ---------- 布局 ---------- */
 
 .channel-layout {
     flex: 1;
@@ -151,7 +151,7 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-/* ---------- voice panel (left) ---------- */
+/* ---------- 语音面板（左） ---------- */
 
 .voice-panel {
     flex: 0 0 300px;
@@ -205,7 +205,7 @@ body {
         0 0 18px var(--accent-glow);
 }
 
-/* custom avatar image variant (chat rows + member cards) */
+/* 自定义头像图片变体（聊天行 + 成员卡片） */
 .msg-avatar.img,
 .member-avatar.img {
     display: block;
@@ -257,7 +257,7 @@ body {
     color: var(--danger);
 }
 
-/* broken media link (connectionState disconnected/failed) */
+/* 媒体链路已断（connectionState 为 disconnected/failed） */
 .member.bad .member-avatar {
     opacity: 0.45;
 }
@@ -266,7 +266,7 @@ body {
     color: var(--danger);
 }
 
-/* recovery badge: hidden until self-healing kicks in on a broken link */
+/* 恢复徽章：默认隐藏，链路损坏且自愈启动时才出现 */
 .member-sub .badge.recover-badge {
     display: none;
     background: var(--danger-dim);
@@ -277,8 +277,8 @@ body {
     display: inline-flex;
 }
 
-/* connecting badge: link stuck in new/connecting past the grace window
-   (likely a ghost member the server heartbeat hasn't reaped yet) */
+/* 连接中徽章：链路在 new/connecting 卡住超过宽限窗口
+   （多半是服务器心跳尚未回收的幽灵成员） */
 .member-sub .badge.connect-badge {
     display: none;
     background: var(--warn-dim);
@@ -289,8 +289,8 @@ body {
     display: inline-flex;
 }
 
-/* connection path badge: P2P direct vs TURN relay — hidden until the
-   getStats poll resolves the selected candidate pair (seconds after join) */
+/* 连接路径徽章：P2P 直连 vs TURN 中转 — 在 getStats 轮询
+   解析出所选候选对之前隐藏（加入后数秒） */
 .member-sub .badge.path-badge {
     display: none;
     background: var(--accent-dim);
@@ -306,20 +306,20 @@ body {
     color: var(--warn);
 }
 
-/* inline RTT after the P2P/relay label; tabular-nums keeps the badge width
-   steady across the 5s poll refreshes */
+/* P2P/中转标签后的内联 RTT；tabular-nums 让徽章宽度
+   在 5 秒轮询刷新间保持稳定 */
 .member-sub .badge.path-badge .rtt {
     opacity: 0.72;
     font-variant-numeric: tabular-nums;
 }
 
-/* current inbound loss right after the RTT — visible without hovering */
+/* RTT 之后的当前入向丢包 — 无需悬停即可见 */
 .member-sub .badge.path-badge .loss {
     color: var(--warn);
     font-variant-numeric: tabular-nums;
 }
 
-/* unstable badge: sustained high packet loss on an otherwise alive link */
+/* 不稳定徽章：链路尚存活但持续高丢包 */
 .member-sub .badge.unstable-badge {
     display: none;
     background: var(--warn-dim);
@@ -330,7 +330,7 @@ body {
     display: inline-flex;
 }
 
-/* media outage banner — shown when automatic recovery is running/failed */
+/* 媒体中断横幅 — 自动恢复进行中/已失败时显示 */
 .outage-banner {
     position: fixed;
     top: 14px;
@@ -352,8 +352,8 @@ body {
     border-color: var(--danger);
 }
 
-/* the outage pill floats over the header; when a new build is announced at the
-   same time the update bar (in flow, above the header) pushes it down */
+/* 中断胶囊悬浮在头部之上；若同一时间发布了新版本，
+   更新提示条（在文档流中、位于头部上方）会把它往下推 */
 body.has-update-bar .outage-banner {
     top: calc(14px + var(--update-bar-h, 0px));
 }
@@ -380,7 +380,7 @@ body.has-update-bar .outage-banner {
     color: var(--text-2);
 }
 
-/* host actions on a member card */
+/* 成员卡片上的主持人操作 */
 .member-actions {
     display: none;
     gap: 4px;
@@ -395,7 +395,7 @@ body.has-update-bar .outage-banner {
     font-size: 11.5px;
 }
 
-/* per-user volume (hover a member card to reveal) */
+/* 单人音量（悬停成员卡片显示） */
 .member-volume {
     display: none;
     flex: 1 0 100%;
@@ -432,7 +432,7 @@ body.has-update-bar .outage-banner {
     font-variant-numeric: tabular-nums;
 }
 
-/* ---------- voice controls ---------- */
+/* ---------- 语音控制 ---------- */
 
 .voice-controls {
     flex: 0 0 auto;
@@ -483,7 +483,7 @@ body.has-update-bar .outage-banner {
     color: #08281b;
 }
 
-/* ---------- chat panel (right) ---------- */
+/* ---------- 聊天面板（右） ---------- */
 
 .chat-panel {
     flex: 1;
@@ -506,7 +506,7 @@ body.has-update-bar .outage-banner {
     font-size: 13px;
 }
 
-/* centered time separator between message groups */
+/* 消息组之间居中的时间分隔 */
 .chat-time {
     align-self: center;
     font-size: 11.5px;
@@ -523,10 +523,10 @@ body.has-update-bar .outage-banner {
     position: relative;
 }
 
-/* reply/react/edit/recall affordances live in the .msg-actions cluster
-   (hover, floats above the bubble) — see the message-lifecycle block below */
+/* 回复/回应/编辑/撤回的操作入口在 .msg-actions 组里
+   （悬停出现，悬浮于气泡上方）— 见下方消息生命周期区块 */
 
-/* quoted row at the top of a reply bubble — click jumps to the original */
+/* 回复气泡顶部的引用行 — 点击跳转至原消息 */
 .msg-quote {
     border-left: 3px solid var(--accent);
     background: rgba(127, 127, 127, 0.12);
@@ -555,7 +555,7 @@ body.has-update-bar .outage-banner {
     text-overflow: ellipsis;
 }
 
-/* target row briefly flashes when a quote click locates it */
+/* 点击引用定位到目标行时，目标行短暂闪烁 */
 .msg.flash .msg-bubble {
     animation: msg-flash 1.2s var(--ease);
 }
@@ -570,7 +570,7 @@ body.has-update-bar .outage-banner {
     }
 }
 
-/* @mention highlight inside message text */
+/* 消息文本内的 @提及高亮 */
 .mention {
     color: var(--accent);
     font-weight: 600;
@@ -582,9 +582,9 @@ body.has-update-bar .outage-banner {
     padding: 0 3px;
 }
 
-/* own text bubbles are accent-filled — an accent-colored mention would vanish
-   into the bubble, so chip it with a dark veil instead; image bubbles keep the
-   dark fill on the self side and keep the default accent color */
+/* 自己的文字气泡为强调色填充 — 强调色文字的提及会没入背景，
+   因此改用深色蒙版小片；图片气泡在自己一侧保持深色底，
+   提及维持默认强调色 */
 .msg.self .msg-bubble:not(.img) .mention {
     color: inherit;
     background: rgba(0, 0, 0, 0.16);
@@ -601,7 +601,7 @@ body.has-update-bar .outage-banner {
     flex-direction: row-reverse;
 }
 
-/* QQ-style rounded-square avatar */
+/* QQ 风格圆角方形头像 */
 .msg-avatar {
     width: 36px;
     height: 36px;
@@ -628,7 +628,7 @@ body.has-update-bar .outage-banner {
     align-items: flex-end;
 }
 
-/* nickname above the bubble, others only (own name is implicit) */
+/* 气泡上方的昵称，仅他人消息显示（自己的名字不言自明） */
 .msg-name {
     font-size: 12px;
     color: var(--text-3);
@@ -639,7 +639,7 @@ body.has-update-bar .outage-banner {
     white-space: nowrap;
 }
 
-/* bubble with a small tail pointing at the avatar */
+/* 带指向头像小尾巴的气泡 */
 .msg-bubble {
     position: relative;
     padding: 8px 12px;
@@ -681,10 +681,10 @@ body.has-update-bar .outage-banner {
     color: #08281b;
 }
 
-/* bare emoji run (chat.js tags .emoji-only) — no bubble chrome, jumbo glyph;
-   a lone emoji inside a normal bubble reads like a stray reaction chip.
-   Selectors stay one step above .msg.self .msg-bubble / its ::before and are
-   declared after them, so the accent fill and tail lose in both themes. */
+/* 纯 emoji 消息（chat.js 打 .emoji-only 标记）— 去掉气泡外观、字号放大；
+   普通气泡里的单个 emoji 看起来像误发的回应小片。
+   选择器优先级比 .msg.self .msg-bubble 及其 ::before 高一级，
+   且声明在其后，两种主题下强调色填充与尾巴都被压制。 */
 .msg .msg-bubble.emoji-only {
     background: transparent;
     box-shadow: none;
@@ -712,8 +712,8 @@ body.has-update-bar .outage-banner {
     user-select: none;
 }
 
-/* composer = ONE rounded box holding the pending images and the input
-   line inside it (QQ style), not a tray strip above a bare input row */
+/* 输入区 = 一个圆角盒，待发送图片与输入行都收纳在内
+   （QQ 风格），而非裸输入行上方的托盘条 */
 .chat-composer {
     flex: 0 0 auto;
     margin: 0 12px 12px;
@@ -733,19 +733,19 @@ body.has-update-bar .outage-banner {
 
 .chat-form {
     display: flex;
-    /* buttons stay pinned to the bottom while the textarea grows (QQ style) */
+    /* 文本域长高时按钮钉在底部（QQ 风格） */
     align-items: flex-end;
     gap: 8px;
 }
 
-/* the text input is naked inside the composer box — the box IS the input */
+/* 输入框在输入盒内是裸的 — 盒子本身就是输入框 */
 .chat-composer .input {
     background: transparent;
     border: none;
     padding: 7px 6px;
 }
 
-/* multiline composer: auto-grows via JS up to ~6 lines, then scrolls */
+/* 多行输入区：经 JS 自动长高至约 6 行，之后滚动 */
 .chat-composer .chat-input {
     resize: none;
     overflow-y: auto;
@@ -767,10 +767,10 @@ body.has-update-bar .outage-banner {
     color: var(--accent);
 }
 
-/* ---------- image messages + lightbox ---------- */
+/* ---------- 图片消息 + 灯箱 ---------- */
 
-/* merged text+images bubble (QQ style): images stacked in the bubble,
-   text underneath; slim padding, no accent fill on either side */
+/* 图文合并气泡（QQ 风格）：图片堆叠在气泡内、文字在下；
+   内边距收窄，两侧都不用强调色填充 */
 .msg-bubble.img {
     padding: 6px;
 }
@@ -785,7 +785,7 @@ body.has-update-bar .outage-banner {
     gap: 6px;
 }
 
-/* single image: natural ratio */
+/* 单图：保持原始比例 */
 .msg-images.c1 {
     grid-template-columns: auto;
     justify-items: start;
@@ -797,7 +797,7 @@ body.has-update-bar .outage-banner {
     width: auto;
 }
 
-/* two images: wide rows stacked (as in QQ) */
+/* 两图：宽行上下堆叠（同 QQ） */
 .msg-images.c2 {
     width: 216px;
     grid-template-columns: 1fr;
@@ -808,7 +808,7 @@ body.has-update-bar .outage-banner {
     aspect-ratio: 16 / 10;
 }
 
-/* three and up: square 2-column grid, odd tail image spans both */
+/* 三图及以上：方形双列网格，落单尾图横跨两列 */
 .msg-images.c3,
 .msg-images.c4,
 .msg-images.c5,
@@ -843,7 +843,7 @@ body.has-update-bar .outage-banner {
     padding: 0 4px 2px;
 }
 
-/* the image bubble keeps the dark fill on the self side too */
+/* 图片气泡在自己一侧同样保持深色底 */
 .msg.self .msg-bubble.img .msg-text {
     color: var(--text-1);
 }

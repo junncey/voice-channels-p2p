@@ -2,17 +2,17 @@
 
 // npx mocha test-embed-headers.js
 //
-// The embed policy is security-relevant (frame-ancestors / X-Frame-Options)
-// and buildEmbedCsp/embedPolicyFor are pure — direct unit tests, no server.
+// 嵌入策略涉及安全（frame-ancestors / X-Frame-Options），而
+// buildEmbedCsp/embedPolicyFor 都是纯函数——直接单测，无需起服务器。
 
 require('should');
 
 const configPath = require.resolve('../app/src/config');
 const configWasCached = Boolean(require.cache[configPath]);
 const { buildEmbedCsp, embedPolicyFor } = require('../app/src/middleware/embedHeaders');
-// embedHeaders pulls in config.js, which reads process.env at load — leaving
-// it cached would leak THIS file's env into test-server.js (it pins its own
-// env before requiring server.js). Hand later suites a fresh evaluation.
+// embedHeaders 会引入 config.js，后者在加载时读取 process.env——若把它留在
+// require 缓存里，本文件的 env 会泄漏进 test-server.js（它在 require server.js
+// 前会先固定自己的 env）。给后续测试套件一个干净的求值环境。
 if (!configWasCached) delete require.cache[configPath];
 
 describe('test-embed-headers (iframe restrictions)', () => {
@@ -35,7 +35,7 @@ describe('test-embed-headers (iframe restrictions)', () => {
         it('should implicitly include self alongside configured origins', () => {
             buildEmbedCsp(['https://partner.example']).should.eql({
                 csp: "frame-ancestors 'self' https://partner.example",
-                xfo: null, // XFO cannot express multiple origins — omit instead of contradicting CSP
+                xfo: null, // XFO 表达不了多个来源——宁可省略也不与 CSP 矛盾
             });
         });
 
@@ -55,7 +55,7 @@ describe('test-embed-headers (iframe restrictions)', () => {
         });
 
         it('should apply the configured policy to every other path', () => {
-            embedPolicyFor('/').should.eql(buildEmbedCsp([])); // unconfigured default: same-origin
+            embedPolicyFor('/').should.eql(buildEmbedCsp([])); // 未配置时的默认：仅同源
             embedPolicyFor('/c/talk').should.eql({ csp: "frame-ancestors 'self'", xfo: 'SAMEORIGIN' });
         });
     });

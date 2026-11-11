@@ -47,11 +47,11 @@ describe('test-channelStore', () => {
         it('should keep the event loop responsive while verifying (async scrypt)', async () => {
             const store = newStore('flood');
             await store.create({ id: 'flood', name: 'F', password: 'right-pw' });
-            // 16 concurrent wrong-password verifies ≈ 0.5-1.6s of scrypt work.
-            // The 5ms timer is scheduled BEFORE the flood starts: with scryptSync
-            // the 16 verifies block the loop inside Array.from, so the timer
-            // cannot fire until they all finish (drift ≥ the whole scrypt batch);
-            // on the threadpool the loop stays free (drift ≈ scheduling noise).
+            // 16 个并发错误密码验证 ≈ 0.5-1.6s 的 scrypt 工作量。
+            // 5ms 定时器在洪水开始之前就排定：若用 scryptSync，16 个验证会在
+            // Array.from 内部阻塞事件循环，定时器必须等它们全部做完才能触发
+            // （漂移 ≥ 整批 scrypt 耗时）；走线程池时循环保持空闲
+            // （漂移 ≈ 调度噪声）。
             const t0 = Date.now();
             const timer = new Promise((resolve) => setTimeout(resolve, 5));
             const jobs = Array.from({ length: 16 }, () => store.verifyChannelPassword('flood', 'wrong-pw'));
@@ -105,11 +105,11 @@ describe('test-channelStore', () => {
             await store.create({ id: 'persisted', name: 'kept' });
             const temp = store.getOrCreateTemp('quick-room');
             temp.temporary.should.be.true();
-            store.getOrCreateTemp('quick-room').should.equal(temp); // created once
+            store.getOrCreateTemp('quick-room').should.equal(temp); // 只创建一次
             store.isTemp('quick-room').should.be.true();
             store.isTemp('persisted').should.be.false();
 
-            // sanitized with the temporary flag, listed separately
+            // sanitize 带临时标记，单独列出
             store.sanitize(temp).temporary.should.be.true();
             store.sanitize(store.get('persisted')).temporary.should.be.false();
             store
@@ -117,11 +117,11 @@ describe('test-channelStore', () => {
                 .map((ch) => ch.id)
                 .should.eql(['quick-room']);
 
-            // never written to disk
+            // 绝不写入磁盘
             const raw = JSON.parse(fs.readFileSync(store.filePath, 'utf8'));
             raw.channels.map((ch) => ch.id).should.eql(['persisted']);
 
-            // removed only when empty
+            // 仅在空房间时移除
             store.removeTempIfEmpty('quick-room', 1);
             store.isTemp('quick-room').should.be.true();
             store.removeTempIfEmpty('quick-room', 0);
@@ -170,7 +170,7 @@ describe('test-channelStore', () => {
                 store.isValidId(bad).should.be.false(bad);
                 (await store.create({ id: bad, name: 'n' })).ok.should.be.false(bad);
             }
-            // exact match only: the id pattern is case-sensitive
+            // 仅精确匹配：ID 规则区分大小写
             store.isValidId('Constructor').should.be.true();
         });
 
@@ -185,8 +185,8 @@ describe('test-channelStore', () => {
 
         it('should not double-register on concurrent same-id creates (async scrypt window)', async () => {
             const race = newStore('race');
-            // passwords force the async scrypt await: both calls pass the
-            // pre-checks before either pushes — only one may land
+            // 密码会强制走 async scrypt await：两笔调用都能在对方 push 之前
+            // 通过前置检查——只允许一笔落地
             const [a, b] = await Promise.all([
                 race.create({ id: 'race', name: 'a', password: 'pw-a' }),
                 race.create({ id: 'race', name: 'b', password: 'pw-b' }),
@@ -201,7 +201,7 @@ describe('test-channelStore', () => {
             const gone = newStore('upd-gone');
             await gone.create({ id: 'mid', name: 'old', password: 'pw' });
             const pending = gone.update('mid', { name: 'new', password: 'pw2' });
-            gone.remove('mid'); // lands while the update is still hashing
+            gone.remove('mid'); // 在 update 仍在做哈希时落地
             (await pending).ok.should.be.false();
             gone.exists('mid').should.be.false();
         });
@@ -218,7 +218,7 @@ describe('test-channelStore', () => {
             res.ok.should.be.true();
             res.channel.name.should.equal('new');
             res.channel.hosts.should.eql(['bob', 'carol']);
-            // bob kept the original hash
+            // bob 保留原始哈希
             (await store.verifyHost('upd', 'bob', 'pw2')).should.be.ok();
             (await store.verifyHost('upd', 'carol', 'pw3')).should.be.ok();
             should(await store.verifyHost('upd', 'carol', 'pw2')).be.null();
@@ -252,7 +252,7 @@ describe('test-channelStore', () => {
             await store.create({ id: 'chan2', name: 'c', hosts: [{ username: 'bob', password: 'pw2' }] });
 
             (await store.verifyHost('chan1', 'alice', 'pw1')).should.eql({ username: 'alice' });
-            // wrong channel / wrong user / wrong password
+            // 错频道 / 错用户 / 错密码
             should.not.exist(await store.verifyHost('chan2', 'alice', 'pw1'));
             should.not.exist(await store.verifyHost('chan1', 'bob', 'pw1'));
             should.not.exist(await store.verifyHost('chan1', 'alice', 'pw2'));
@@ -261,12 +261,12 @@ describe('test-channelStore', () => {
 
         it('should fall back to the default moderator secret for host-less channels', async () => {
             const store = newStore('fallback', { defaultModerator: 'letmein' });
-            await store.create({ id: 'open', name: 'c' }); // no hosts configured
+            await store.create({ id: 'open', name: 'c' }); // 未配置 hosts
             await store.create({ id: 'locked', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
 
             (await store.verifyHost('open', 'anyone', 'letmein')).should.be.ok();
             should.not.exist(await store.verifyHost('open', 'anyone', 'nope'));
-            // fallback must NOT apply when the channel has its own hosts
+            // 频道有自己的 hosts 时绝不套用回退
             should.not.exist(await store.verifyHost('locked', 'anyone', 'letmein'));
         });
 
@@ -287,28 +287,28 @@ describe('test-channelStore', () => {
 
             store.sanitize(store.get('locked')).hasPassword.should.be.true();
             store.sanitize(store.get('open')).hasPassword.should.be.false();
-            // hash never leaks through the sanitized copy
+            // 哈希绝不经 sanitize 副本泄漏
             JSON.stringify(store.sanitize(store.get('locked'))).should.not.containEql('scrypt$');
 
             (await store.verifyChannelPassword('locked', 'open-sesame')).should.be.true();
             (await store.verifyChannelPassword('locked', 'wrong')).should.be.false();
             (await store.verifyChannelPassword('locked', '')).should.be.false();
             (await store.verifyChannelPassword('locked')).should.be.false();
-            (await store.verifyChannelPassword('open', 'anything')).should.be.false(); // no password set
+            (await store.verifyChannelPassword('open', 'anything')).should.be.false(); // 未设置密码
             (await store.verifyChannelPassword('missing', 'open-sesame')).should.be.false();
         });
 
         it('should keep / replace / clear the password on update (tri-state)', async () => {
             const store = newStore('chanpw-upd');
             await store.create({ id: 'sec', name: 'c', password: 'first' });
-            // field omitted -> unchanged
+            // 字段省略 -> 保持不变
             (await store.update('sec', { name: 'renamed' })).ok.should.be.true();
             (await store.verifyChannelPassword('sec', 'first')).should.be.true();
-            // non-empty -> replaced
+            // 非空 -> 替换
             (await store.update('sec', { password: 'second' })).ok.should.be.true();
             (await store.verifyChannelPassword('sec', 'first')).should.be.false();
             (await store.verifyChannelPassword('sec', 'second')).should.be.true();
-            // '' -> explicitly cleared
+            // '' -> 显式清除
             const cleared = await store.update('sec', { password: '' });
             cleared.ok.should.be.true();
             cleared.channel.hasPassword.should.be.false();
@@ -346,7 +346,7 @@ describe('test-channelStore', () => {
                 .updateSettings({ tempRooms: false })
                 .should.eql({ ok: true, settings: { ...DEFAULT_SETTINGS, tempRooms: false } });
             const reloaded = new ChannelStore({ filePath, autoInit: false, defaultSettings: { tempRooms: true } });
-            // file wins over the env-seeded default once a setting is stored
+            // 一旦设置已落盘，文件优先于 env 预置的默认值
             reloaded.getSettings().should.eql({ ...DEFAULT_SETTINGS, tempRooms: false });
 
             store.updateSettings({ tempRooms: true }).ok.should.be.true();
@@ -356,7 +356,7 @@ describe('test-channelStore', () => {
         it('should ignore non-boolean / unknown settings and malformed input', () => {
             const store = newStore('settings-bad');
             store.updateSettings({ tempRooms: 'yes' }).ok.should.be.false();
-            store.updateSettings({ somethingElse: true }).ok.should.be.true(); // unknown key = no-op
+            store.updateSettings({ somethingElse: true }).ok.should.be.true(); // 未知键 = 无操作
             store.getSettings().should.eql(DEFAULT_SETTINGS);
             store.updateSettings(null).ok.should.be.false();
         });
@@ -397,7 +397,7 @@ describe('test-channelStore', () => {
                 socketMaxChannels: 1,
             });
 
-            // a hand-edited registry with out-of-range values falls back per key
+            // 手工编辑过的注册表若值越界，按键逐一回退
             const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
             raw.settings.tempMaxPerIp = 9999;
             raw.settings.tempRooms = 'nope';
@@ -414,11 +414,11 @@ describe('test-channelStore', () => {
         it('should force-remove a temp room regardless of occupancy', () => {
             const store = newStore('settings-remove');
             store.getOrCreateTemp('quick-room');
-            store.removeTempIfEmpty('quick-room', 3); // occupied: no-op
+            store.removeTempIfEmpty('quick-room', 3); // 有人占用：无操作
             store.isTemp('quick-room').should.be.true();
             store.removeTemp('quick-room').ok.should.be.true();
             store.isTemp('quick-room').should.be.false();
-            store.removeTemp('quick-room').ok.should.be.false(); // already gone
+            store.removeTemp('quick-room').ok.should.be.false(); // 已不存在
             store.removeTemp('never-existed').ok.should.be.false();
         });
     });
@@ -430,7 +430,7 @@ describe('test-channelStore', () => {
                 should(store.getOrCreateTemp(`tmp-${i}`)).be.ok();
             }
             should(store.getOrCreateTemp('overflow-room')).be.null();
-            // existing rooms stay reachable at the cap
+            // 达到上限后既有房间仍可访问
             store.getOrCreateTemp('tmp-0').should.be.ok();
         });
     });
@@ -456,18 +456,18 @@ describe('test-channelStore', () => {
             for (let i = 0; i < ChannelStore.MAX_TEMPS_PER_IP; i++) {
                 should(store.getOrCreateTemp(`room-${i}`, { creatorIp: ip })).be.ok();
             }
-            // a different visitor is unaffected
+            // 其他访客不受影响
             should(store.getOrCreateTemp('other-room', { creatorIp: '198.51.100.7' })).be.ok();
-            // ...but IPv6 rotation inside the creator's /64 must not grant fresh quota
+            // …但创建者在同一 /64 内的 IPv6 轮换不得获得新配额
             should(store.getOrCreateTemp('v6-a', { creatorIp: '2001:db8::1' })).be.ok();
             should(store.getOrCreateTemp('v6-b', { creatorIp: '2001:db8:0:0:0:0:0:2' })).be.ok();
             should(store.getOrCreateTemp('v6-c', { creatorIp: '2001:db8::3' })).be.ok();
             should(store.getOrCreateTemp('v6-d', { creatorIp: '2001:db8::4' })).be.null();
             should(store.getOrCreateTemp('room-overflow', { creatorIp: ip })).be.null();
-            // the last peer leaving releases the slot
+            // 最后一名 peer 离开即释放名额
             store.removeTempIfEmpty('room-0', 0);
             should(store.getOrCreateTemp('room-new', { creatorIp: ip })).be.ok();
-            // an existing room is still reachable at the cap (no new creation)
+            // 达上限后既有房间仍可访问（不是新建）
             store.getOrCreateTemp('room-1', { creatorIp: ip }).id.should.equal('room-1');
         });
 
@@ -481,7 +481,7 @@ describe('test-channelStore', () => {
             store.checkTempQuota(ip).should.eql({ ok: false, reason: 'per-ip-limit' });
             store.removeTemp('r-0');
             store.checkTempQuota(ip).should.eql({ ok: true });
-            // no attributable IP -> never per-IP limited (global cap still applies)
+            // 无可归因 IP -> 永不受每 IP 限制（全局上限仍然生效）
             store.checkTempQuota('').should.eql({ ok: true });
         });
 
@@ -490,11 +490,11 @@ describe('test-channelStore', () => {
             const ip = '192.0.2.10';
             for (let i = 0; i < ChannelStore.TEMP_CREATE_MAX_PER_WINDOW; i++) {
                 should(store.getOrCreateTemp(`churn-${i}`, { creatorIp: ip })).be.ok();
-                store.removeTempIfEmpty(`churn-${i}`, 0); // room gone, creation still counted
+                store.removeTempIfEmpty(`churn-${i}`, 0); // 房间已删，创建仍计数
             }
             store.checkTempQuota(ip).should.eql({ ok: false, reason: 'rate-limit' });
             should(store.getOrCreateTemp('churn-next', { creatorIp: ip })).be.null();
-            // ...until the window has slid past the oldest creation
+            // …直到窗口滑过最早的创建记录
             store.tempCreateLog.set(ip, [Date.now() - store.settings.tempCreateWindowMin * 60000 - 1]);
             should(store.getOrCreateTemp('churn-next', { creatorIp: ip })).be.ok();
         });
@@ -503,14 +503,14 @@ describe('test-channelStore', () => {
             const store = newStore('tempip-tuned');
             store.updateSettings({ tempMaxPerIp: 1, tempCreateMax: 1 }).ok.should.be.true();
             should(store.getOrCreateTemp('t-one', { creatorIp: '203.0.113.9' })).be.ok();
-            should(store.getOrCreateTemp('t-two', { creatorIp: '203.0.113.9' })).be.null(); // per-ip cap 1
+            should(store.getOrCreateTemp('t-two', { creatorIp: '203.0.113.9' })).be.null(); // 每 IP 上限 1
             store.checkTempQuota('203.0.113.9').reason.should.equal('per-ip-limit');
-            store.removeTempIfEmpty('t-one', 0); // frees the owned slot, creation still counted
+            store.removeTempIfEmpty('t-one', 0); // 释放占用的名额，创建仍计数
             store.checkTempQuota('203.0.113.9').reason.should.equal('rate-limit');
-            // 0 = refuse every new temp room for everyone
+            // 0 = 对所有人拒绝一切新建临时房间
             store.updateSettings({ tempMaxPerIp: 0 }).ok.should.be.true();
             should(store.getOrCreateTemp('t-three', { creatorIp: '198.51.100.1' })).be.null();
-            // …but a room that is already live stays reachable regardless of the quotas
+            // …但已在运行的房间无论配额如何都保持可访问
             store.updateSettings({ tempMaxPerIp: 1, tempCreateMax: 5, tempCreateWindowMin: 1 }).ok.should.be.true();
             should(store.getOrCreateTemp('t-live', { creatorIp: '198.51.100.1' })).be.ok();
             store.updateSettings({ tempMaxPerIp: 0, tempMaxRooms: 0 }).ok.should.be.true();
@@ -539,7 +539,7 @@ describe('test-channelStore', () => {
             fs.writeFileSync(filePath, '{ not json', 'utf8');
             const store = new ChannelStore({ filePath, autoInit: false });
             store.channels.should.be.an.Array().and.empty();
-            // the broken file was renamed aside, never silently overwritten
+            // 损坏文件被改名挪开，绝不悄悄覆盖
             fs.existsSync(`${filePath}.corrupt`).should.be.true();
             fs.readFileSync(`${filePath}.corrupt`, 'utf8').should.equal('{ not json');
             fs.existsSync(filePath).should.be.false();
@@ -549,12 +549,12 @@ describe('test-channelStore', () => {
             const filePath = tempFile('quarantine-bak');
             const store = new ChannelStore({ filePath, autoInit: true });
             await store.create({ id: 'keep-me', name: 'kept' });
-            await store.create({ id: 'second', name: 'kept2' }); // .bak now holds the pre-write state
-            fs.writeFileSync(filePath, 'garbage{', 'utf8'); // corrupt the live file
+            await store.create({ id: 'second', name: 'kept2' }); // .bak 此时保存的是写入前状态
+            fs.writeFileSync(filePath, 'garbage{', 'utf8'); // 弄坏活文件
 
             const reloaded = new ChannelStore({ filePath, autoInit: false });
             reloaded.exists('keep-me').should.be.true();
-            reloaded.exists('second').should.be.false(); // .bak predates the last write
+            reloaded.exists('second').should.be.false(); // .bak 早于最后一次写入
             fs.existsSync(`${filePath}.corrupt`).should.be.true();
         });
 
@@ -563,7 +563,7 @@ describe('test-channelStore', () => {
             const store = new ChannelStore({ filePath, autoInit: true });
             await store.create({ id: 'one', name: 'first' });
             fs.existsSync(`${filePath}.bak`).should.be.true();
-            JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.should.be.empty(); // pre-create state
+            JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8')).channels.should.be.empty(); // 创建前状态
             await store.create({ id: 'two', name: 'second' });
             JSON.parse(fs.readFileSync(`${filePath}.bak`, 'utf8'))
                 .channels.map((c) => c.id)
@@ -582,7 +582,7 @@ describe('test-channelStore', () => {
             fallback.username.should.equal('anyone');
             fallback.via.should.equal('default-moderator');
 
-            (await store.verifyHost('hosted', 'a', 'b')).should.eql({ username: 'a' }); // no via claim
+            (await store.verifyHost('hosted', 'a', 'b')).should.eql({ username: 'a' }); // 不带 via 声明
             should.not.exist(await store.verifyHost('open', 'anyone', 'wrong'));
         });
 
@@ -592,7 +592,7 @@ describe('test-channelStore', () => {
             await store.create({ id: 'hosted', name: 'c', hosts: [{ username: 'a', password: 'b' }] });
             store.isHostless('open').should.be.true();
             store.isHostless('hosted').should.be.false();
-            // configuring a real host revokes the fallback
+            // 配置真实主持人即吊销回退
             await store.update('open', { hosts: [{ username: 'real', password: 'pw' }] });
             store.isHostless('open').should.be.false();
             store.isHostless('missing').should.be.false();
@@ -670,7 +670,7 @@ describe('test-channelStore', () => {
             const stored = await hashPassword(secret);
             (await verifyPassword(secret, stored)).should.be.true();
             (await verifyPassword('wrong', stored)).should.be.false();
-            // no legacy fallback wired: verifyPasswordCompat behaves like verifyPassword
+            // 未接线旧版回退：verifyPasswordCompat 行为等同 verifyPassword
             (await ChannelStore.verifyPasswordCompat(secret, stored, null)).should.be.true();
             (await ChannelStore.verifyPasswordCompat('wrong', stored, null)).should.be.false();
         });
@@ -679,16 +679,16 @@ describe('test-channelStore', () => {
             const checkXSS = require('../app/src/xss.js');
             const raw = 'a<b>&c';
             const legacyForm = checkXSS(raw);
-            legacyForm.should.not.equal(raw); // sanity: the sanitizer really rewrites it
-            // a pre-fix registry stored the hash of the SANITIZED form
+            legacyForm.should.not.equal(raw); // 合理性检查：清洗器确实改写了它
+            // 修复前的注册表存的是「清洗后形态」的哈希
             const legacyHash = await hashPassword(legacyForm);
 
             const store = newStore('legacy-pw', { legacySanitize: (pw) => checkXSS(pw) });
             await store.create({ id: 'legacy-chan', name: 'Legacy', password: raw });
-            // raw-first verify against the NEW hash
+            // 用原始密码优先比对新哈希
             (await store.verifyChannelPassword('legacy-chan', raw)).should.be.true();
 
-            // plant the legacy hash and verify the raw password still passes
+            // 预埋旧版哈希，验证原始密码仍能通过
             store.get('legacy-chan').passwordHash = legacyHash;
             (await store.verifyChannelPassword('legacy-chan', raw)).should.be.true();
             (await store.verifyChannelPassword('legacy-chan', 'wrong')).should.be.false();
@@ -715,7 +715,7 @@ describe('test-channelStore', () => {
 
             should(store.sanitize(channel).hosts).be.undefined();
             store.sanitize(channel, { includePrivate: true }).hosts.should.eql(['alice']);
-            // create/update results feed the admin console — they carry hosts
+            // create/update 结果供管理后台使用——必须携带 hosts
             (
                 await store.create({ id: 'hosted2', name: 'H2', hosts: [{ username: 'bob', password: 'pw2' }] })
             ).channel.hosts.should.eql(['bob']);

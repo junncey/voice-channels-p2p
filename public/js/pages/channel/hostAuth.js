@@ -1,19 +1,19 @@
 /*
-Host login + channel-password persistence.
+主持人登录 + 频道密码持久化。
 
-The host token lives in localStorage so the login survives browser restarts
-(the server re-grants presenter status on every join). Tokens stored in
-sessionStorage by older versions are promoted on sight; expired ones are
-dropped locally so the join never has to fail because of them.
+主持人令牌存 localStorage，登录凭据因此能熬过浏览器重启
+（服务器在每次 join 时重新授予主持人身份）。旧版本存进
+sessionStorage 的令牌一经发现就晋升到 localStorage；已过期的
+就地丢弃，join 不必因它们而失败。
 
-The channel password is remembered per channel so returning visitors keep
-the auto-join flow; the server still validates it on every join (a stale
-value just re-opens the overlay). Hosts never need it (their JWT bypasses
-the channel password).
+频道密码按频道记忆，让回头访客保住自动 join 流程；服务器
+在每次 join 时仍会校验它（过期的记忆值只会让覆盖层
+重新弹出，不会挡住页面）。主持人永远不需要它
+（其 JWT 绕过频道密码）。
 
-The load functions are plain exports (channel.js needs them before any
-factory exists); the modal wiring comes as a factory like the other
-submodules.
+两个 load 函数是纯导出（channel.js 在任何工厂存在之前
+就要用它们）；弹窗接线与其他子模块一样，
+以工厂形式提供。
 */
 
 const HOST_TOKEN_PREFIX = 'vc_host_token_';
@@ -85,7 +85,7 @@ export function createHostAuth({ s, x, channelId, api, t, $ }) {
             closeHostModal();
             if (!s.joined) x.join({ textOnly: false });
             else {
-                // presenter status is granted at join time — rejoin with the token
+                // 主持人身份在 join 时授予 —— 带令牌重进一次
                 s.intentionalUnload = true;
                 location.reload();
             }

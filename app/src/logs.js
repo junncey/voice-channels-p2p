@@ -7,9 +7,9 @@ const LOGS_COLORS = process.env.LOGS_COLORS ? process.env.LOGS_COLORS === 'true'
 const LOGS_JSON = process.env.LOGS_JSON ? process.env.LOGS_JSON === 'true' : false;
 const LOGS_JSON_PRETTY = process.env.LOGS_JSON_PRETTY ? process.env.LOGS_JSON_PRETTY === 'true' : false;
 
-// Replaces the colors dependency: output is byte-identical (same SGR open code
-// + \x1b[39m default-fg close as colors@1.4); LOGS_COLORS=false makes the
-// wrappers identity functions, matching colors.disable().
+// 替代 colors 依赖：输出逐字节一致（与 colors@1.4 相同的 SGR 开启码
+// + \x1b[39m 默认前景色关闭码）；LOGS_COLORS=false 时这些包装器
+// 变成恒等函数，等价于 colors.disable()。
 const ansi = (code) => (text) => (LOGS_COLORS ? `\x1b[${code}m${text}\x1b[39m` : String(text));
 const yellow = ansi(33);
 const green = ansi(32);
@@ -46,7 +46,7 @@ module.exports = class Logs {
             logObj.data = op;
         }
 
-        // Output pretty JSON if LOGS_JSON_PRETTY is set, else compact one line JSON
+        // 设置了 LOGS_JSON_PRETTY 时输出美化 JSON，否则输出紧凑单行 JSON
         LOGS_JSON_PRETTY ? console.log(JSON.stringify(logObj, null, 2)) : console.log(JSON.stringify(logObj));
     }
 

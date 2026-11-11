@@ -1,9 +1,9 @@
 /**
- * Theme preference: dark (default) / light / auto (follow the OS, updated
- * live). Stored per-browser under vc_theme — deliberately NOT part of the
- * homepage "clear everything" sweep, so clearing user data keeps the chosen
- * palette. The pre-paint application lives in theme-boot.js (non-module,
- * <head>); this module owns runtime switching.
+ * 主题偏好：dark（默认）/ light / auto（跟随操作系统，实时更新）。
+ * 按浏览器存于 vc_theme——刻意不参与首页的「清除全部」清扫，
+ * 因此清除用户数据后保留所选配色。
+ * 绘制前的应用逻辑在 theme-boot.js（非模块，<head> 内）；
+ * 本模块负责运行时切换。
  */
 
 const THEME_KEY = 'vc_theme';
@@ -15,7 +15,7 @@ function systemPrefersLight() {
     return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: light)').matches;
 }
 
-/** Register the OS-change listener once; auto mode re-resolves live. */
+/** 只注册一次系统变化监听；auto 模式实时重新解析。 */
 function watchSystem() {
     if (media || typeof window.matchMedia !== 'function') return;
     media = window.matchMedia('(prefers-color-scheme: light)');
@@ -23,16 +23,16 @@ function watchSystem() {
         if (getThemePref() === 'auto') applyPref('auto');
     };
     if (media.addEventListener) media.addEventListener('change', onChange);
-    else if (media.addListener) media.addListener(onChange); // old Safari
+    else if (media.addListener) media.addListener(onChange); // 旧版 Safari
 }
 
-/** The stored preference: 'dark' | 'light' | 'auto'. */
+/** 存储的偏好：'dark' | 'light' | 'auto'。 */
 export function getThemePref() {
     const stored = document.documentElement.dataset.themePref || localStorage.getItem(THEME_KEY);
     return PREFS.includes(stored) ? stored : 'dark';
 }
 
-/** The palette actually on screen right now. */
+/** 当前屏幕上实际生效的配色。 */
 export function getTheme() {
     return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
 }
@@ -43,13 +43,13 @@ function applyPref(pref) {
     return pref;
 }
 
-/** Set the preference ('dark'|'light'|'auto'), persist it, apply it. */
+/** 设置偏好（'dark'|'light'|'auto'），持久化并应用。 */
 export function setThemePref(pref) {
     const next = PREFS.includes(pref) ? pref : 'dark';
     try {
         localStorage.setItem(THEME_KEY, next);
     } catch {
-        /* storage unavailable — the choice just won't persist */
+        /* 存储不可用——该选择只是不会持久化 */
     }
     if (next === 'auto') watchSystem();
     return applyPref(next);

@@ -1,17 +1,17 @@
 /*
-Join-time microphone acquisition with a bounded permission wait.
+join 时的麦克风获取，权限等待有上限。
 
-The browser can leave a getUserMedia() promise pending indefinitely when the
-permission prompt is never answered (ignored tab, dismissed dialog, a policy
-that neither grants nor denies). joinInner() awaits that call before it opens
-the socket, so one unanswered prompt used to mean: no socket, no member card,
-the button stuck on "connecting…" — the room looked unreachable while nothing
-was actually broken.
+当权限弹窗始终无人应答（标签页被忽略、弹窗被关掉、策略
+既不授权也不拒绝）时，浏览器会让 getUserMedia() 的 promise
+无限期挂起。joinInner() 在开 socket 之前要 await 这个调用，
+所以过去一个无人应答的弹窗就意味着：没有 socket、
+没有成员卡片、按钮卡在「连接中…」——
+什么都没坏，房间却像不可达。
 
-acquireMic() bounds the wait. On timeout it returns { stream: null, timedOut:
-true } and releases a late-arriving grant (otherwise the capture light stays on
-with nobody reading the track). The caller degrades to text-only; the mic button
-can retry afterwards, this time under a user gesture.
+acquireMic() 给等待设了上限。超时即返回 { stream: null,
+timedOut: true }，并释放迟到的授权（否则采集指示灯常亮，
+却没人读这条轨道）。调用方退化为纯文字；麦克风按钮
+此后可重试，那次调用会带着用户手势。
 */
 
 export const MIC_GRANT_TIMEOUT_MS = 8000;
@@ -35,7 +35,7 @@ export async function acquireMic(constraints, { timeoutMs = MIC_GRANT_TIMEOUT_MS
         return { stream: await Promise.race([request, timeout]), timedOut: false };
     } catch {
         if (timedOut) {
-            // the grant may still land later — release it so the device is free
+            // 授权可能稍后才落地 —— 释放它让设备空闲出来
             request.then((late) => late.getTracks().forEach((track) => track.stop())).catch(() => {});
         }
         return { stream: null, timedOut };

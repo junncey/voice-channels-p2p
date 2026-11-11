@@ -2,16 +2,16 @@
 
 // npx mocha test-server.js
 //
-// Signaling integration tests: real server instance + socket.io-client pairs
-// covering join/addPeer, ghost grace + same-uuid resume, intentional leave,
-// capacity/password gates, join-throttle feedback, chat history persistence
-// (incl. the session-uuid sender lookup) and the admin member list / kick
-// endpoints.
+// 信令集成测试：真实服务器实例 + socket.io-client 成对客户端，覆盖
+// join/addPeer、幽灵宽限 + 同 uuid resume、主动离开、人数/密码门禁、
+// join 节流反馈、聊天历史留存（含按会话 uuid 查发送者）
+// 以及管理端成员名单 / 踢人端点。
 //
-// The suite runs in-process: env is pinned BEFORE server.js (and thus
-// config.js) loads. The repo's real channels.json / chat_history are backed
-// up and restored — the test owns them while it runs. Ghost grace windows are
-// shortened via GHOST_GRACE_MS so expiry cases finish in seconds.
+//
+// 套件在进程内运行：env 在 server.js（从而 config.js）加载之前固定。
+// 仓库真实的 channels.json / chat_history 会被备份并在结束后还原——
+// 测试运行期间由它接管。幽灵宽限窗口经 GHOST_GRACE_MS 缩短，
+// 让过期用例几秒内跑完。
 
 process.env.PORT = '3100';
 process.env.CHANNEL_ADMIN_PASSWORD = 'test-admin-pw';
@@ -21,11 +21,11 @@ process.env.GHOST_GRACE_MS = '1200';
 process.env.GHOST_GRACE_LATE_MS = '600';
 process.env.TEMP_ROOMS_ENABLED = 'true';
 process.env.AUTO_INIT_CHANNELS = 'true';
-// the join-throttle test trips the auth-failure cooldown from a SPOOFED
-// x-forwarded-for IP so the 127.0.0.1 counter other tests share stays clean
+// join 节流测试用伪造的 x-forwarded-for IP 触发鉴权失败冷却，
+// 保证其他测试共用的 127.0.0.1 计数器保持干净
 process.env.TRUST_PROXY = 'true';
-// REST/HMAC TURN mode: every addPeer / refreshIceServers payload must carry
-// the minted credentials (exercised by the "fresh TURN REST credentials" case)
+// REST/HMAC TURN 模式：每个 addPeer / refreshIceServers 负载都必须带上
+// 铸出的临时凭证（由“fresh TURN REST credentials”用例行使）
 process.env.TURN_SERVER_ENABLED = 'true';
 process.env.TURN_SERVER_URL = 'turn:t1.example.com:3478,turn:t2.example.com:3478';
 process.env.TURN_SERVER_SECRET = 'test-turn-secret';
@@ -38,8 +38,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { io } = require('socket.io-client');
 
-// the audit trail must not touch the repo's real file either (env must be
-// pinned before server.js loads, hence its position after the requires)
+// 审计日志同样不得碰仓库真实文件（env 必须在 server.js 加载前固定，
+// 所以放在 require 之后这一行）
 process.env.VC_AUDIT_FILE = path.join(os.tmpdir(), `vc-audit-test-${process.pid}.jsonl`);
 
 const SRC = path.join(__dirname, '..', 'app', 'src');
@@ -51,24 +51,24 @@ const GHOST_MS = Number(process.env.GHOST_GRACE_MS);
 const backupDir = path.join(os.tmpdir(), `vc-server-test-${Date.now()}`);
 const hadChannelsFile = fs.existsSync(CHANNELS_FILE);
 const hadChatDir = fs.existsSync(CHAT_DIR);
-// registry sidecar files that already exist belong to the USER — the after()
-// hook may only delete the ones this suite itself produced (the old cleanup
-// wiped a pre-existing channels.json.bak whenever the main file was absent)
+// 已存在的注册表 sidecar 文件属于用户——after() 钩子只能删除本套件
+// 自己产出的那些（旧清理逻辑曾在主文件缺席时误删一个预先存在的
+// channels.json.bak）
 const REGISTRY_SIDEcars = ['.bak', '.corrupt', '.tmp'];
 const preexistingSidecars = new Set(
     REGISTRY_SIDEcars.filter((suffix) => fs.existsSync(CHANNELS_FILE + suffix)).map((suffix) => CHANNELS_FILE + suffix)
 );
 
-// backup before the server auto-creates them
+// 在服务器自动创建之前先备份
 fs.mkdirSync(backupDir, { recursive: true });
 if (hadChannelsFile) fs.copyFileSync(CHANNELS_FILE, path.join(backupDir, 'channels.json'));
 if (hadChatDir) fs.cpSync(CHAT_DIR, path.join(backupDir, 'chat_history'), { recursive: true });
 
 /**
- * Hand the user's data files back exactly as they were. Idempotent: called
- * from after() on a clean run AND from the process 'exit' hook below, so a
- * hard test failure or Ctrl+C cannot leave the swapped registry behind
- * (SIGKILL is beyond anyone's reach).
+ * 把用户的数据文件原样归还。幂等：正常运行时经 after() 调用，
+ * 同时也挂在下方进程的 'exit' 钩子上——硬性测试失败或 Ctrl+C 都不能
+ * 让被换掉的注册表留在原地
+ * （SIGKILL 谁也拦不住）。
  */
 let userDataRestored = false;
 function restoreUserData() {
@@ -76,7 +76,7 @@ function restoreUserData() {
     userDataRestored = true;
     if (hadChannelsFile) fs.copyFileSync(path.join(backupDir, 'channels.json'), CHANNELS_FILE);
     else if (fs.existsSync(CHANNELS_FILE)) fs.unlinkSync(CHANNELS_FILE);
-    // sidecars: delete only what the TEST created, never a user's files
+    // sidecar：只删 TEST 自己创建的，绝不碰用户的文件
     for (const suffix of REGISTRY_SIDEcars) {
         const file = CHANNELS_FILE + suffix;
         if (!preexistingSidecars.has(file) && fs.existsSync(file)) fs.unlinkSync(file);
@@ -91,7 +91,7 @@ function restoreUserData() {
 }
 process.on('exit', restoreUserData);
 
-require('../app/src/server.js'); // starts listening on :3100
+require('../app/src/server.js'); // 开始监听 :3100
 
 let adminToken = '';
 
@@ -127,7 +127,7 @@ function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Abrupt transport death (no disconnect packet) — the ghost path. */
+/** 传输层骤死（无 disconnect 包）——走幽灵路径。 */
 function abruptClose(socket) {
     socket.io.engine.close();
 }
@@ -140,7 +140,7 @@ async function adminApi(method, urlPath, body) {
     });
 }
 
-/** Fresh unique room id per test so ghost-expiry broadcasts never cross-talk. */
+/** 每个用例用全新的唯一房间 ID，避免幽灵过期广播互相串扰。 */
 function freshRoom(prefix) {
     return (
         prefix +
@@ -154,8 +154,8 @@ function freshRoom(prefix) {
 describe('test-server (signaling integration)', function () {
     this.timeout(10000);
     before(async () => {
-        // the require() above returns before the listen callback fires on a
-        // cold start — poll once for readiness instead of racing the login
+        // 冷启动时上方的 require() 会在 listen 回调触发前就返回——
+        // 先轮询一次就绪状态，而不是和登录抢跑
         for (let i = 0; i < 50; i++) {
             try {
                 await fetch(URL + '/api/version');
@@ -183,8 +183,8 @@ describe('test-server (signaling integration)', function () {
             password: 'secret-pw',
         });
         await pwChannel.json();
-        // the suite spawns many short-lived temp rooms from one IP — raise the
-        // anti-abuse quotas (values must stay inside the settings schema caps)
+        // 套件会从同一 IP 频繁开出大量短命临时房间——调高防滥用配额
+        // （数值必须落在 settings schema 上限之内）
         await adminApi('PUT', '/api/admin/settings', { tempCreateMax: 500, tempMaxPerIp: 100 });
     });
 
@@ -198,7 +198,7 @@ describe('test-server (signaling integration)', function () {
             try {
                 sock.disconnect();
             } catch {
-                /* already gone */
+                /* 早已不在 */
             }
         }
         socketsToClose = [];
@@ -222,7 +222,7 @@ describe('test-server (signaling integration)', function () {
 
             const b = track(connect());
             const gotAddPeer = once(a, 'addPeer');
-            const gotToAddPeer = once(b, 'addPeer'); // addPeer storms arrive BEFORE serverInfo
+            const gotToAddPeer = once(b, 'addPeer'); // addPeer 风暴先于 serverInfo 到达
             b.emit('join', joinPayload(room, ub, 'bob'));
             const toA = await gotAddPeer;
             toA.peer_id.should.equal(ub);
@@ -248,9 +248,9 @@ describe('test-server (signaling integration)', function () {
             b.emit('join', joinPayload(room, ub, 'bob'));
             const toA = await gotAddPeer;
 
-            // the addPeer payload carries the minted HMAC set: a numeric (unix
-            // expiry) username, one entry per comma-separated TURN URL, and the
-            // documented coturn REST password = base64(hmac-sha1(secret, username))
+            // addPeer 负载带着铸出的 HMAC 集：数字（unix 过期时间）用户名、
+            // 每个逗号分隔的 TURN URL 一条，以及 coturn REST 文档规定的
+            // 密码 = base64(hmac-sha1(secret, username))
             const turn = (toA.iceServers || []).filter((server) => String(server.urls || '').startsWith('turn:'));
             turn.should.have.length(2);
             const expiresAtSec = Number(turn[0].username);
@@ -260,7 +260,7 @@ describe('test-server (signaling integration)', function () {
             const expected = crypto.createHmac('sha1', 'test-turn-secret').update(turn[0].username).digest('base64');
             turn[0].credential.should.equal(expected);
 
-            // the ack-based refresh hands out the SAME cached set until half-life
+            // 半衰期之前，ack 式刷新下发的是同一份缓存集
             const refreshed = await new Promise((resolve, reject) => {
                 a.timeout(4000).emit('refreshIceServers', null, (err, list) => (err ? reject(err) : resolve(list)));
             });
@@ -285,7 +285,7 @@ describe('test-server (signaling integration)', function () {
             relayed.peer_id.should.equal(ua);
             relayed.session_description.sdp.should.equal('v=0 test');
 
-            // unknown target is dropped silently
+            // 未知目标被静默丢弃
             a.emit('relaySDP', { peer_id: crypto.randomUUID(), session_description: { type: 'offer', sdp: 'x' } });
             (await emitted(b, 'sessionDescription', 250)).should.be.false();
         });
@@ -309,14 +309,14 @@ describe('test-server (signaling integration)', function () {
             relayed.element.should.equal('share');
             relayed.status.should.be.true();
 
-            // a member joining AFTER the flip sees the state in the peer map
+            // 翻转之后加入的成员在 peer map 里看到该状态
             const c = track(connect());
             c.emit('join', joinPayload(room, crypto.randomUUID(), 'carol'));
             const infoC = await once(c, 'serverInfo');
             infoC.peers[ua].peer_share.should.be.true();
             infoC.peers[ub].peer_share.should.be.false();
 
-            // unknown element never relays
+            // 未知 element 一律不中转
             a.emit('peerStatus', { room_id: room, peer_name: 'alice', peer_id: ua, element: 'bogus', status: true });
             (await emitted(c, 'peerStatus', 250)).should.be.false();
         });
@@ -350,7 +350,7 @@ describe('test-server (signaling integration)', function () {
             Number.isFinite(ts).should.be.true();
             ts.should.be.above(0);
 
-            // that ts is exactly what edit/recall/reaction look up later
+            // 这个 ts 正是后续 edit/recall/reaction 用来定位的键
             const done = once(a, 'chatEdit');
             a.emit('chatEdit', { room_id: 'troom', ts, name: 'frank', msg: 'ack me (edited)' });
             const edited = await done;
@@ -483,16 +483,16 @@ describe('test-server (signaling integration)', function () {
                         .emit('peerPresence', { peer_id }, (err, res) => (err ? reject(err) : resolve(res)))
                 );
 
-            // both sessions live and deliverable
+            // 两个会话都存活且可达
             (await probe(b, ua)).present.should.equal('live');
-            // dead transport inside the grace window → ghost (a resume may still land)
+            // 宽限窗口内传输已死 → ghost（仍可能原地 resume）
             abruptClose(a);
             await wait(150);
             (await probe(b, ua)).present.should.equal('ghost');
-            // grace expired, session really gone
+            // 宽限已过，会话真没了
             await once(b, 'removePeer', GHOST_MS + 3000);
             (await probe(b, ua)).present.should.equal('gone');
-            // a session that never existed
+            // 从未存在过的会话
             (await probe(b, crypto.randomUUID())).present.should.equal('gone');
         });
 
@@ -509,7 +509,7 @@ describe('test-server (signaling integration)', function () {
             await wait(100);
 
             const gone = once(b, 'removePeer');
-            a.disconnect(); // proper close packet: intentional
+            a.disconnect(); // 正常 close 包：属主动离开
             (await gone).peer_id.should.equal(ua);
         });
     });
@@ -522,8 +522,8 @@ describe('test-server (signaling integration)', function () {
         });
 
         it('should tell a throttled source instead of dropping the join silently', async () => {
-            // from a dedicated spoofed IP: tripping JOIN_FAIL_LIMIT (10) must
-            // not poison the shared 127.0.0.1 counter for the rest of the suite
+            // 用专门的伪造 IP：触发 JOIN_FAIL_LIMIT（10）不得污染共享的
+            // 127.0.0.1 计数器，以免殃及套件余下用例
             const spoofed = () =>
                 track(
                     io(URL, {
@@ -536,11 +536,11 @@ describe('test-server (signaling integration)', function () {
             const s = spoofed();
             for (let i = 0; i < 10; i++) {
                 s.emit('join', { channel: 'troom', peer_uuid: 'not-a-uuid', peer_name: 'x', peer_audio: true });
-                await once(s, 'unauthorized'); // each failure re-arms the counter
+                await once(s, 'unauthorized'); // 每次失败都会重置计数器
             }
-            // a fully VALID join from that source now hits the cooldown: the
-            // server must say so (retryAfter seconds) instead of going quiet —
-            // the client's join-ack timeout keys off exactly this event
+            // 来自该来源的一次完全合法的 join 此刻会撞上冷却：服务器必须
+            // 明说（retryAfter 秒）而不是闷声不响——客户端的 join-ack
+            // 超时判断正是以这一事件为依据
             s.emit('join', joinPayload('zzthrottle', crypto.randomUUID(), 'hampered'));
             const throttled = await once(s, 'joinThrottled');
             throttled.retryAfter.should.be.a.Number();
@@ -555,7 +555,7 @@ describe('test-server (signaling integration)', function () {
         });
 
         it('should enforce the participant cap', async () => {
-            // fresh capacity-2 room via the admin API
+            // 经管理 API 新建一个容量 2 的房间
             const room = freshRoom('cap');
             await adminApi('POST', '/api/admin/channels', { id: room, name: 'Small', maxParticipants: 2 });
             const u1 = crypto.randomUUID();
@@ -578,7 +578,7 @@ describe('test-server (signaling integration)', function () {
             s.emit('join', joinPayload('zztemp1', crypto.randomUUID(), 'wanderer'));
             const info = await once(s, 'serverInfo');
             info.peers_count.should.equal(1);
-            const gone = once(s, 'removePeer').catch(() => null); // may not fire for the last peer
+            const gone = once(s, 'removePeer').catch(() => null); // 最后一名 peer 时可能不触发
             s.disconnect();
             await wait(300);
             const res = await adminApi('GET', '/api/admin/channels');
@@ -591,20 +591,20 @@ describe('test-server (signaling integration)', function () {
             const room = freshRoom('flood');
             await adminApi('POST', '/api/admin/channels', { id: room, name: 'Flood', password: 'flood-pw' });
 
-            // a successful join resets the per-IP join-failure counter, so the
-            // flood below gets the full attempt budget regardless of earlier
-            // tests' rejected joins
+            // 成功的 join 会重置每 IP join 失败计数器，
+            // 下面的洪水无论此前各测试有多少次被拒 join，
+            // 都能拿到完整的尝试预算
             const primed = track(connect());
             primed.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'reset'), channel_password: 'flood-pw' });
             await once(primed, 'serverInfo');
 
-            // 9 concurrent wrong-password joins (a 10th failure would arm the
-            // per-IP cooldown and get silently dropped) — each triggers an
-            // scrypt verify. scryptSync used to queue all of them on the event
-            // loop, stalling every HTTP request for hundreds of ms; the async
-            // form runs on the threadpool and the loop stays free. (Threshold
-            // generous for CI noise — the deterministic structural twin of
-            // this assertion lives in test-channelStore describe 0.)
+            // 9 个并发错密码 join（第 10 次失败会触发每 IP 冷却被静默丢弃）
+            // ——每次都触发一次 scrypt 验证。scryptSync 曾把所有验证排在
+            // 事件循环上，令每个 HTTP 请求停滞数百毫秒；
+            // async 形态跑在线程池上，循环保持空闲。
+            // （阈值放宽以容忍 CI 噪声——本断言的确定性
+            // 结构孪生版在 test-channelStore describe 0。）
+            //
             const rejects = Array.from({ length: 9 }, () => {
                 const s = track(connect());
                 const got = once(s, 'channelPasswordRequired');
@@ -621,7 +621,7 @@ describe('test-server (signaling integration)', function () {
             await Promise.all(rejects);
             worst.should.be.below(250);
 
-            // hand the failure budget back to the tests that follow
+            // 把失败预算还给后续测试
             const reset = track(connect());
             reset.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'reset2'), channel_password: 'flood-pw' });
             await once(reset, 'serverInfo');
@@ -649,8 +649,8 @@ describe('test-server (signaling integration)', function () {
             entry.members.map((m) => m.name).should.containEql('alice');
             entry.members.find((m) => m.uuid === ub).ghost.should.be.false();
 
-            const kicked = once(b, 'kickOut'); // kickOut goes to the TARGET
-            const gone = once(a, 'removePeer'); // removal broadcast goes to the room
+            const kicked = once(b, 'kickOut'); // kickOut 发给被踢者本人
+            const gone = once(a, 'removePeer'); // 移除广播发给整个房间
             const kickRes = await adminApi('POST', '/api/admin/kick', { channel: room, uuid: ub });
             (await kickRes.json()).success.should.be.true();
             (await kicked).reason.should.equal('removed by admin');
@@ -686,7 +686,7 @@ describe('test-server (signaling integration)', function () {
             res.headers.get('content-type').should.equal('application/gzip');
             const buf = Buffer.from(await res.arrayBuffer());
             buf.length.should.be.greaterThan(0);
-            buf[0].should.equal(0x1f); // gzip magic
+            buf[0].should.equal(0x1f); // gzip 魔数
             buf[1].should.equal(0x8b);
         });
 
@@ -701,7 +701,7 @@ describe('test-server (signaling integration)', function () {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ channelId: 'troom', username: 'nobody', password: 'whatever' }),
             });
-            // troom has no hosts and no DEFAULT_CHANNEL_MODERATOR → login fails
+            // troom 没有 hosts 也没有 DEFAULT_CHANNEL_MODERATOR → 登录失败
             login.status.should.equal(401);
         });
     });
@@ -727,9 +727,9 @@ describe('test-server (signaling integration)', function () {
             a.emit('join', joinPayload(room, uuid, 'twin'));
             await once(a, 'serverInfo');
 
-            // a second socket joining with the SAME uuid reaps the live one and
-            // takes over (last writer wins); repeated takeovers must never
-            // leave duplicate or zombie sessions behind
+            // 第二个 socket 用相同 uuid 加入会收割活会话并接管
+            // （后写者胜）；反复接管绝不能留下
+            // 重复或僵尸会话
             const b = track(connect());
             const aGone = once(a, 'removePeer');
             b.emit('join', joinPayload(room, uuid, 'twin'));

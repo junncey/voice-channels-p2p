@@ -1,17 +1,17 @@
 /**
- * Screen Wake Lock holder — mobile browsers kill the WebRTC voice session
- * when the screen locks, so the channel page keeps the screen awake while a
- * voice session is live. Re-arms itself when the page becomes visible again
- * (the system releases the sentinel while hidden); silently degrades where
- * the API is unsupported or denied.
+ * 屏幕 Wake Lock 持有器 —— 移动浏览器在锁屏时会杀掉
+ * WebRTC 语音会话，所以语音会话进行期间，
+ * 频道页要保持屏幕常亮。页面重新变为可见时自行重新武装
+ * （隐藏期间系统会释放 sentinel）；
+ * 在 API 不支持或被拒绝的地方静默降级。
  */
 
 export function createWakeLock({ wanted = () => false } = {}) {
-    let sentinel = null; // active WakeLockSentinel; null = not held
-    let busy = false; // request() round-trip in flight
+    let sentinel = null; // 活动的 WakeLockSentinel；null = 未持有
+    let busy = false; // request() 往返正在进行
 
     async function sync() {
-        if (!('wakeLock' in navigator)) return; // unsupported: degrade silently
+        if (!('wakeLock' in navigator)) return; // 不支持：静默降级
         if (!wanted()) {
             release();
             return;
@@ -22,8 +22,8 @@ export function createWakeLock({ wanted = () => false } = {}) {
             const held = await navigator.wakeLock.request('screen');
             if (wanted()) {
                 sentinel = held;
-                // system revoked it (screen off, battery saver): drop the
-                // handle so the visibilitychange handler can request a fresh one
+                // 系统收回它（锁屏、省电模式）：丢掉句柄，
+                // 让 visibilitychange 处理器能重新请求新的
                 held.addEventListener('release', () => {
                     if (sentinel === held) sentinel = null;
                 });
@@ -31,7 +31,7 @@ export function createWakeLock({ wanted = () => false } = {}) {
                 held.release().catch(() => {});
             }
         } catch {
-            /* denied — the session just loses the keep-awake nicety */
+            /* 被拒绝 —— 会话只是失去常亮这份贴心而已 */
         } finally {
             busy = false;
         }
@@ -43,7 +43,7 @@ export function createWakeLock({ wanted = () => false } = {}) {
         try {
             held?.release?.().catch?.(() => {});
         } catch {
-            /* already released */
+            /* 早已释放 */
         }
     }
 

@@ -1,28 +1,28 @@
 /*
-Link quality engines — the self-healing family's quality half (split out of
-recovery.js at the 1000-line budget, same family as channel/relay.js; the state
-it needs stays page-owned via injected references).
+链路质量引擎 —— 自愈家族的质量半区（1000 行预算时从
+recovery.js 拆出，与 channel/relay.js 同族；所需状态经注入
+的引用仍由页面持有）。
 
-Fed by the recovery engine's path poll (checkPeerPath -> note(info)):
+由恢复引擎的路径轮询喂养（checkPeerPath -> note(info)）：
 
-  - inbound link quality: cumulative RTP counters say nothing about a RATE, so
-    every poll diffs packetsLost/packetsReceived/jitter/concealment. Sustained
-    high loss flips the "unstable" member-card badge (hysteresis so a single
-    bad poll doesn't flicker it); the per-poll values feed the path-badge hover
-    detail (the path-badge rendering lives here too).
-  - outbound loss adaptation: the peer's receiver report (fractionLost) about
-    OUR stream floors that link's send bitrate until the report cleans up,
-    climbing back on a probe ladder.
-  - jitter/concealment boost: raise the receive-side playout-buffer target
-    while the glitch the listener HEARS persists (NetEQ concealment ratio is
-    the ground truth), restore the browser default once it calms.
-  - zombie + quality restart: a link that STAYS connected while media dies
-    (zero inbound RTP / severe sustained loss / outbound black hole) gets one
-    iceRestart — the route itself needs a re-punch, adaptation only eases the
-    symptoms. Cooldown'd and glare-safe (see pokeIce).
+  - 入向链路质量：累计 RTP 计数器说明不了任何「速率」，所以
+    每次轮询都对 packetsLost/packetsReceived/jitter/掩蔽做差分。
+    持续高丢包翻转成员卡片的「不稳定」徽章（带迟滞，单次坏
+    轮询不会让它闪烁）；逐轮数值喂给路径徽章的悬停详情
+    （路径徽章的渲染也在这里）。
+  - 出向丢包适应：对端接收端报告（fractionLost）反映的是
+    我们发出的流，据此把该链路的发送码率压到地板，直到报告
+    转好，再沿探测阶梯爬回。
+  - 抖动/掩蔽加深：当听者「听得到」的毛刺持续存在时
+    （NetEQ 掩蔽率是 ground truth），抬高接收侧播放缓冲
+    目标；平息后恢复浏览器默认。
+  - 僵尸链路 + 质量重启：媒体已死却「仍保持连接」的链路
+    （入向 RTP 为零 / 严重持续丢包 / 出向黑洞）做一次
+    iceRestart —— 是路由本身需要重新打洞，适应只是缓解
+    症状。带冷却且防 glare（见 pokeIce）。
 
-peerRecovery membership is respected everywhere: a link already riding the
-recovery ladder is left to it.
+处处尊重 peerRecovery 的成员资格：已在恢复阶梯上的链路
+交给它处理。
 */
 
 export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, t }) {
@@ -47,20 +47,20 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             node.removeAttribute('title');
             return;
         }
-        // inline latency right after the link label; null = the selected pair
-        // report didn't expose currentRoundTripTime — badge stays label-only.
-        // the lone space text node is swallowed by the flex layout (gap: 4px
-        // already separates) but keeps "P2P 45ms" as the badge's text content
+        // 延迟内联在链路标签之后；null = 选中的候选对报告没有
+        // 暴露 currentRoundTripTime —— 徽章保持只有标签。
+        // 单独的空格文本节点会被 flex 布局吞掉（gap: 4px 已做
+        // 分隔），但让「P2P 45ms」保留为徽章的文本内容
         const quality = lossStreaks.get(peerId);
         if (info.rtt !== null) node.append(' ', el('span', { class: 'rtt', text: `${info.rtt}ms` }));
-        // current loss marker: noticeable at a glance without hovering
+        // 当前丢包标记：不悬停也能一眼看到
         if (quality && quality.loss !== null && quality.loss >= 5)
             node.append(
                 ' ',
                 el('span', { class: 'loss', text: t('channel.pathLoss', { n: Math.round(quality.loss) }) })
             );
-        // hover detail: candidate types on both ends (host/srflx/prflx/relay) + RTT
-        // + inbound quality (loss / jitter / bitrate, diffed between polls)
+        // 悬停详情：两端的候选类型（host/srflx/prflx/relay）+ RTT
+        // + 入向质量（丢包 / 抖动 / 码率，逐轮差分）
         const parts = [t(info.type === 'p2p' ? 'channel.pathP2pTitle' : 'channel.pathRelayTitle')];
         if (info.local && info.remote) parts.push(`${info.local} ↔ ${info.remote}`);
         if (info.rtt !== null) parts.push(t('channel.pathRtt', { n: info.rtt }));
@@ -69,12 +69,12 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             if (quality.jitter !== null) parts.push(t('channel.pathJitter', { n: quality.jitter }));
             if (quality.conceal !== null && quality.conceal > 0)
                 parts.push(t('channel.pathConceal', { n: quality.conceal }));
-            // achieved playout-buffer depth — whether a boost target landed
+            // 实际达成的播放缓冲深度 —— 加深目标是否落地
             if (quality.jbDelay !== null && quality.jbDelay > 0)
                 parts.push(t('channel.pathPlayout', { n: quality.jbDelay }));
             if (quality.kbps !== null) parts.push(t('channel.pathBitrate', { n: quality.kbps }));
-            // outbound twins (what the peer reports about OUR stream + our
-            // encoder's actual output) — the send-side half of the picture
+            // 出向孪生指标（对端对我们流的报告 + 我们编码器的
+            // 实际输出）—— 画面里的发送侧一半
             if (quality.outLoss !== null && quality.outLoss > 0)
                 parts.push(t('channel.pathOutLoss', { n: quality.outLoss }));
             if (quality.outJitter !== null && quality.outJitter >= 5)
@@ -85,64 +85,64 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
     }
 
     // -------------------------------------------------------------------------
-    // inbound link quality — cumulative RTP counters say nothing about a RATE, so
-    // every path poll diffs packetsLost/packetsReceived since the previous one.
-    // Sustained high loss flips an "unstable" badge on the member card (with
-    // hysteresis so a single bad poll doesn't flicker it); the per-poll values
-    // feed the path-badge hover detail. Only an ALIVE link is judged — a broken
-    // one already shows the recovery badge.
+    // 入向链路质量 —— 累计 RTP 计数器说明不了任何「速率」，所以
+    // 每次路径轮询都与上一轮差分 packetsLost/packetsReceived。
+    // 持续高丢包在成员卡片上翻转「不稳定」徽章
+    // （带迟滞，单次坏轮询不会让它闪烁）；
+    // 逐轮数值喂给路径徽章的悬停详情。
+    // 只评判「活着」的链路 —— 损坏的链路已经显示恢复徽章。
     // -------------------------------------------------------------------------
 
-    const LOSS_BAD_PCT = 10; // a poll at/above this counts as bad
-    const LOSS_OK_PCT = 5; // at/below this counts as good (in between: neither)
-    const UNSTABLE_BAD_POLLS = 3; // ~15s at the 5s poll cadence → badge on
-    const UNSTABLE_GOOD_POLLS = 2; // clean polls before the badge clears
-    // outbound loss (the peer's receiver report about OUR stream) → send-side
-    // adaptation, same thresholds/hysteresis shape as the badge
+    const LOSS_BAD_PCT = 10; // 达到/超过此值的一轮算坏
+    const LOSS_OK_PCT = 5; // 低于/等于此值算好（介于其间：都不算）
+    const UNSTABLE_BAD_POLLS = 3; // 按 5s 轮询节奏约 15s → 徽章点亮
+    const UNSTABLE_GOOD_POLLS = 2; // 徽章熄灭前需要的干净轮数
+    // 出向丢包（对端接收端报告关于我们的流）→ 发送侧适应，
+    // 阈值/迟滞形态与徽章相同
     const ADAPT_BAD_POLLS = 3;
     const ADAPT_GOOD_POLLS = 2;
-    const ADAPT_FLOOR_MIN_BPS = 24000; // never adapt below the voice bitrate floor
-    // receive-side playout boost: NetEQ self-tunes but minimizes delay, so a
-    // jittery link keeps glitching — sustained trouble justifies asking for a
-    // deeper jitter buffer target until the path calms down again. Two stages:
-    // mild first (less added latency when a moderate target already suffices),
-    // deep only when the mild one rode along and the glitches persisted
+    const ADAPT_FLOOR_MIN_BPS = 24000; // 适应绝不低于语音码率地板
+    // 接收侧播放加深：NetEQ 会自调但以最小延迟为目标，所以
+    // 抖动链路会一直毛刺 —— 持续的故障有理由请求更深的
+    // jitter buffer 目标，直到路径再次平息。分两级：
+    // 先轻度（中等目标够用时少加延迟），
+    // 只有轻度生效而毛刺依旧时才深度加深
     const JITTER_BAD_MS = 40;
     const JITTER_OK_MS = 25;
     const JITTER_BOOST_MILD_MS = 60;
     const JITTER_BOOST_MS = 120;
-    // NetEQ concealment ratio: the fraction of received audio NetEQ had to
-    // synthesize (PLC) — the glitch the listener actually HEARS. Network jitter
-    // can look calm while a shallow buffer still conceals on bursts/reordering
-    // (Wi-Fi power save), so it joins as a ground-truth trigger for the boost.
+    // NetEQ 掩蔽率：接收到的音频中 NetEQ 不得不合成（PLC）的
+    // 比例 —— 听者真正「听到」的毛刺。网络抖动看起来平稳时，
+    // 浅缓冲仍可能在突发/乱序时掩蔽（Wi-Fi 省电），所以它作为
+    // ground truth 触发条件加入加深判定
     const CONCEAL_BAD_PCT = 3;
     const CONCEAL_OK_PCT = 1.5;
-    // the deep boost scales with the measured jitter instead of a fixed 120ms —
-    // a 90ms-jitter link needs more than twice that to stop concealing
+    // 深度加深按实测抖动缩放，而非固定 120ms ——
+    // 90ms 抖动的链路需要两倍以上才能停止掩蔽
     const JITTER_BOOST_MAX_MS = 240;
-    const JITTER_HONORED_TOL_MS = 15; // achieved delay within this of the target = honored
-    // quality restart: severe sustained loss on a link that STAYS connected —
-    // adaptation (bitrate floor / buffer boost) eases the symptoms, but when
-    // the route itself degraded only a re-punch helps. Both directions count:
-    // inbound severe loss, and the outbound black hole (the peer's receiver
-    // report says nearly everything we send dies — they hear nothing while ICE
-    // consent stays green; the zombie engine only catches EXACT zero inbound).
+    const JITTER_HONORED_TOL_MS = 15; // 实际延迟与目标相差在此范围内 = 已生效
+    // 质量重启：链路「仍保持连接」却严重持续丢包 ——
+    // 适应（码率地板 / 缓冲加深）只能缓解症状，路由本身
+    // 劣化时只有重新打洞才有救。两个方向都算数：
+    // 入向严重丢包，以及出向黑洞（对端接收端报告说我们发送的
+    // 几乎全部死掉 —— ICE consent 依然绿色他们却什么都听不到；
+    // 僵尸引擎只抓「恰好为零」的入向）。
     const LOSS_SEVERE_PCT = 20;
-    const SEVERE_BAD_POLLS = 6; // ~30s at the 5s poll cadence
+    const SEVERE_BAD_POLLS = 6; // 按 5s 轮询节奏约 30s
     const OUT_SEVERE_PCT = 90;
-    const OUT_BLACKHOLE_POLLS = 3; // ~15s
+    const OUT_BLACKHOLE_POLLS = 3; // 约 15s
     const QUALITY_RESTART_COOLDOWN_MS = 90000;
-    // zombie links: connected + the peer broadcasts that it's sending, yet
-    // exactly zero RTP bytes AND packets across this many polls → the media
-    // path is black-holed while ICE consent survives (some DPI/policy changes
-    // do exactly that). Opus DTX silence still emits comfort-noise packets
-    // (~every 400ms), a muted/PTT peer flips peer_audio_status off — a live
-    // sender never sits at exact zero for long, so the streak can't false-fire
-    // on quiet talkers. The cooldown keeps a truly dead path from looping
-    // restarts forever; ICE consent eventually failing hands it to the ladder.
-    const ZOMBIE_POLLS = 6; // ~30s at the 5s poll cadence
+    // 僵尸链路：已连接 + 对端广播自己在发送，却连续这么多轮
+    // RTP 字节与包数「恰好为零」 → 媒体路径被黑洞化而 ICE
+    // consent 仍存活（某些 DPI/策略变更正是如此）。
+    // Opus DTX 静默仍会发舒适噪声包（约每 400ms 一个），
+    // 被静音/PTT 的对端会把 peer_audio_status 翻成 off ——
+    // 活跃发送者绝不会长期停在恰好为零，因此该连击不会对
+    // 安静的说话者误触发。冷却时间防止真死路径无限循环
+    // 重启；ICE consent 最终失败则交给恢复阶梯。
+    const ZOMBIE_POLLS = 6; // 按 5s 轮询节奏约 30s
     const ZOMBIE_COOLDOWN_MS = 60000;
-    // restart refused mid-negotiation (reverse offer in flight) → retry once after this
+    // 协商中被拒的 restart（对向 offer 在途）→ 此后重试一次
     const POKE_RETRY_MS = 6000;
     // peerId -> { last, loss, jitter, kbps, conceal, jbDelay, outLoss, outJitter, outKbps, outLast, outTarget, bad, good, unstable, outTs, obad, ogood, adapted, probing, floorBps, floorWarned, rbad, osev, restartAt, jbad, jgood, jbBoost, jbLevel, zombie, zombieAt, pokeTimer }
     const lossStreaks = new Map();
@@ -189,15 +189,15 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
                 const dLost = inbound.packetsLost - prev.packetsLost;
                 const dRecv = inbound.packetsReceived - prev.packetsReceived;
                 const dSec = (inbound.timestamp - prev.timestamp) / 1000;
-                // negative deltas = counter reset (SSRC switch): skip the rate, rebase
+                // 负增量 = 计数器重置（SSRC 切换）：跳过速率，重定基线
                 if (dLost >= 0 && dRecv >= 0) {
                     const total = dLost + dRecv;
                     const loss = total > 0 ? (dLost / total) * 100 : 0;
                     rec.loss = Math.round(loss * 10) / 10;
                     rec.kbps =
                         dSec > 0 ? Math.round(((inbound.bytesReceived - prev.bytesReceived) * 8) / dSec / 1000) : null;
-                    // NetEQ concealment ratio over the same window; either counter
-                    // unreported → null, which every consumer treats as "no verdict"
+                    // 同一窗口内的 NetEQ 掩蔽率；任一计数器
+                    // 未上报 → null，所有消费方都视为「无结论」
                     rec.conceal =
                         prev.concealedSamples !== null &&
                         inbound.concealedSamples !== null &&
@@ -210,10 +210,10 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
                                       1000
                               ) / 10
                             : null;
-                    // achieved playout-buffer delay over the same window — closes
-                    // the jitter-boost loop: a target the browser actually honored
-                    // shows up here (delay is cumulative seconds, count cumulative
-                    // frames; their per-window ratio is the average depth in ms)
+                    // 同一窗口内实际达成的播放缓冲延迟 —— 闭环
+                    // 抖动加深：浏览器真正生效的目标会在这里显现
+                    // （delay 是累计秒数，count 是累计帧数；两者的
+                    // 窗口比值即平均深度 ms）
                     rec.jbDelay =
                         prev.jitterBufferDelay !== null &&
                         inbound.jitterBufferDelay !== null &&
@@ -233,12 +233,12 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
                         rec.good += 1;
                         rec.bad = 0;
                     }
-                    // severe-loss streak for the quality restart (see its constants)
+                    // 供质量重启用的严重丢包连击（常量见上）
                     if (loss >= LOSS_SEVERE_PCT) rec.rbad += 1;
                     else if (loss <= LOSS_OK_PCT) rec.rbad = 0;
                     noteZombie(peerId, rec, info, inbound.bytesReceived - prev.bytesReceived, dRecv);
                 } else {
-                    rec.zombie = 0; // SSRC/counter reset (rebuild): rebase the streak
+                    rec.zombie = 0; // SSRC/计数器重置（重建）：连击重定基线
                     rec.conceal = null;
                     rec.jbDelay = null;
                     rec.rbad = 0;
@@ -246,10 +246,10 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             }
             rec.last = inbound;
         }
-        // outbound loss (the peer's receiver report about OUR stream) rides RTCP
-        // and may REPEAT between path polls — the same stale report must not
-        // double-feed the streaks below. Each report counts once: a timestamp
-        // identical to the previous poll's is a re-read, not a new verdict.
+        // 出向丢包（对端接收端报告关于我们的流）走 RTCP，
+        // 在两次路径轮询之间可能「重复出现」—— 同一份过期报告
+        // 绝不能给下面的连击重复计数。每份报告只算一次：时间戳
+        // 与上一轮相同即为重读，不是新结论。
         const outTs = info?.outboundTs;
         const freshReport = outTs === null || outTs === undefined || outTs !== rec.outTs;
         if (outTs !== null && outTs !== undefined) rec.outTs = outTs;
@@ -258,8 +258,8 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             rec.outLoss = info.outboundLoss;
         }
         rec.outJitter = info?.outboundJitter ?? null;
-        // our encoder's actual output, diffed like the inbound counters — the
-        // ground truth for "did the bitrate floor actually land" (below)
+        // 我们编码器的实际输出，与入向计数器一样做差分 ——
+        // 「码率地板是否真正落地」的 ground truth（见下）
         const outb = info?.outbound;
         if (outb) {
             const prevOut = rec.outLast;
@@ -274,8 +274,8 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             rec.outKbps = null;
             rec.outTarget = null;
         }
-        // outbound black-hole streak — counted in EVERY mode: music/share links
-        // where the bitrate floor refuses to act still deserve the re-punch
+        // 出向黑洞连击 —— 每种模式都计数：码率地板拒绝生效的
+        // 音乐/共享链路同样值得重新打洞
         if (outbound !== null && outbound !== undefined) {
             if (outbound >= OUT_SEVERE_PCT) rec.osev += 1;
             else if (outbound <= LOSS_OK_PCT) rec.osev = 0;
@@ -290,7 +290,7 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
         noteQualityRestart(peerId, info, rec);
     }
 
-    /** Zero-RTP streak on a link that claims to be alive (see ZOMBIE_POLLS). */
+    /** 自称存活的链路上的零 RTP 连击（见 ZOMBIE_POLLS）。 */
     function noteZombie(peerId, rec, info, dBytes, dPackets) {
         if (info.state !== 'connected' || members.get(peerId)?.peer_audio_status !== true) {
             rec.zombie = 0;
@@ -304,22 +304,22 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
         if (rec.zombie < ZOMBIE_POLLS || Date.now() - rec.zombieAt < ZOMBIE_COOLDOWN_MS) return;
         rec.zombie = 0;
         rec.zombieAt = Date.now();
-        // the signal lives ONLY on this side (the sender sees a healthy link):
-        // the detector acts regardless of session-id order
+        // 该信号只存在于这一侧（发送方看自己的链路是健康的）：
+        // 检测方无视 session-id 顺序直接行动
         pokeIce(peerId, rec, '[mesh] zombie link: connected but no inbound RTP, restarting ICE', {
             detectorOnly: true,
         });
     }
 
     /**
-     * The last rung the quality engines can reach: a link that STAYS connected
-     * while loss runs severe has a route problem, not a load problem — the
-     * bitrate floor and buffer boost only ease the symptoms. One iceRestart
-     * re-runs the checks that nominated the pair (a degraded relay path or a
-     * rebindable NAT often has a better alternative). Fired for sustained
-     * inbound severe loss (detector-side, see pokeIce) and for the outbound
-     * black hole (lower-uuid arbitration — the peer's own streak fires there
-     * too); a link already riding the recovery ladder is left to it.
+     * 质量引擎够得着的最后一阶：链路「仍保持连接」而丢包持续
+     * 严重，是路由问题而非负载问题 —— 码率地板与缓冲加深
+     * 只是缓解症状。一次 iceRestart 会重跑当初提名该候选对的
+     * 检查（劣化的 relay 路径或可重绑定的 NAT 往往有更好的
+     * 选择）。触发条件：入向严重丢包持续
+     * （检测方直接行动，见 pokeIce）与出向黑洞（低 uuid 仲裁
+     * —— 对端自己的连击也会在那边触发）；已在恢复阶梯上的
+     * 链路交给它处理。
      */
     function noteQualityRestart(peerId, info, rec) {
         if (info?.state !== 'connected' || peerRecovery.has(peerId)) return;
@@ -331,9 +331,9 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
         rec.rbad = 0;
         rec.osev = 0;
         rec.restartAt = now;
-        // inbound severe loss is detector-only (see pokeIce); the outbound
-        // black hole is symmetric — the peer's own rbad streak fires there —
-        // so it keeps the lower-uuid arbitration against double restarts
+        // 入向严重丢包只有检测方行动（见 pokeIce）；出向黑洞是
+        // 对称信号 —— 对端自己的 rbad 连击会在那边触发 ——
+        // 因此保留低 uuid 仲裁以防双重重启
         pokeIce(
             peerId,
             rec,
@@ -342,15 +342,15 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
         );
     }
 
-    /** iceRestart with ONE deferred retry: these engines fire on 30-90s
-     *  cooldowns, and a restart refused mid-negotiation burns one for nothing.
-     *  detectorOnly marks the ASYMMETRIC signals — zombie (the peer's view of
-     *  its own link is healthy, it will never restart on its own) and inbound
-     *  severe loss (the sender's receiver report never crosses ITS thresholds)
-     *  — where waiting for the lower uuid means waiting forever whenever the
-     *  receiver IS the higher uuid. The detector acts; a colliding offer from
-     *  the peer resolves through the standard perfect-negotiation glare path,
-     *  and an iceRestart offer restarts the checks on BOTH ends anyway. */
+    /** 带一次延迟重试的 iceRestart：这些引擎按 30-90s 冷却触发，
+     *  一次在协商中被拒的 restart 就白白烧掉一个冷却周期。
+     *  detectorOnly 标记「非对称信号」—— 僵尸链路（对端看自己
+     *  的链路是健康的，永远不会主动重启）与入向严重丢包
+     *  （发送方的接收端报告永远不会越过它自己的阈值）——
+     *  若接收方恰好是较高 uuid，等低 uuid 就等于永远等下去。
+     *  检测方直接行动；对端撞车的 offer 走标准完美协商的
+     *  glare 路径解决，
+     *  而 iceRestart offer 反正会在两端都重启检查。 */
     function pokeIce(peerId, rec, warnMsg, { detectorOnly = false } = {}) {
         if (!s.selfUuid || (!detectorOnly && s.selfUuid >= peerId)) return;
         console.warn(warnMsg, peerId);
@@ -366,16 +366,16 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
     }
 
     /**
-     * Send-side answer to sustained OUTBOUND loss (mesh links are
-     * independent: the inbound badge says the peer is hard to hear, while
-     * fractionLost in the peer's receiver report says OUR stream is the one
-     * dropping). Floor this link's encoder cap at half the configured bitrate
-     * until the report cleans up — setParameters, no renegotiation involved.
-     * The way back up is a probe ladder (floor → 3/4 cap → full cap): jumping
-     * straight from the floor to the configured cap is exactly the load that
-     * floored the link, and re-triggering it oscillates forever.
-     * Speech mode only (usedtx caps): music/share fidelity is an explicit user
-     * choice, the badge alone tells them the link is bad.
+     * 持续「出向」丢包的发送侧应对（mesh 链路彼此独立：入向
+     * 徽章说的是对端难听清，而对端接收端报告里的 fractionLost
+     * 说的是我们的流在丢）。把该链路的编码器上限压到配置码率的
+     * 一半，直到报告转好 —— 走 setParameters，
+     * 不涉及重协商。
+     * 回升走探测阶梯（地板 → 3/4 上限 → 全额上限）：从地板
+     * 直接跳回配置上限，恰好就是压垮链路的那种负载，
+     * 再触发一次，就永远振荡下去。
+     * 仅语音模式（usedtx 上限生效时）：音乐/共享的保真是用户
+     * 显式选择，徽章本身就足以告知链路糟糕。
      */
     function noteOutboundAdaptation(peerId, outbound, rec) {
         const fmtp = s.mesh?.getOpusFmtp?.();
@@ -395,8 +395,8 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
                 s.mesh.setPeerBitrateFloor(peerId, floor);
                 console.warn('[mesh] loss adaptation: send bitrate floored', peerId, `${floor / 1000}kbps`);
             } else if (rec.adapted && !rec.probing && rec.ogood >= ADAPT_GOOD_POLLS) {
-                // clean long enough to risk a probe: step UP to 3/4 of the cap,
-                // one bad report puts the floor straight back
+                // 干净得足够久，可以试探了：上探到上限的 3/4，
+                // 一份坏报告就把地板直接压回
                 rec.probing = true;
                 rec.ogood = 0;
                 const probe = Math.floor((fmtp.maxaveragebitrate * 3) / 4);
@@ -417,17 +417,17 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
                 console.log('[mesh] loss adaptation: bitrate restored', peerId);
             }
         } else if (rec.adapted && fmtp?.usedtx !== 1) {
-            // mode left speech (music/share): the user's caps rule the link again
+            // 模式离开语音（音乐/共享）：用户的上限重新接管链路
             rec.adapted = false;
             rec.probing = false;
             rec.floorBps = null;
             s.mesh.setPeerBitrateFloor(peerId, null);
         }
-        // readback: while a floor/probe is in force the encoder's reported
-        // target should sit near it — a setParameters the browser resolved
-        // but ignored leaves this whole engine running on air. Warn-once per
-        // floor; the generous tolerance absorbs speech-mode RED roughly
-        // doubling the wire rate over the encoder's own target.
+        // 回读：地板/探测生效期间，编码器上报的目标应贴近地板 ——
+        // 浏览器 resolve 却不执行的 setParameters 会让整个引擎
+        // 白转。每个地板只警告一次；宽松的容差是为了吸收
+        // 语音模式下 RED 把线上速率抬到编码器自身目标
+        // 约两倍的情况。
         if (rec.floorBps && rec.outTarget !== null && rec.outTarget > rec.floorBps * 2.5 && !rec.floorWarned) {
             rec.floorWarned = true;
             console.warn(
@@ -441,18 +441,18 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
     }
 
     /**
-     * Receive-side answer to a jittery/lossy/glitching inbound link: raise that
-     * link's audio playout buffer target while the trouble lasts (mesh.
-     * setPeerJitterTarget — receiver-side, no renegotiation), restore the
-     * browser's adaptive default once it calms. Same hysteresis shape as the
-     * other engines; unlike the send-side bitrate floor this carries no
-     * fidelity trade, so it runs in every mode (music glitches cut worse).
+     * 对抖动/丢包/毛刺入向链路的接收侧应对：故障持续期间抬高
+     * 该链路的音频播放缓冲目标（mesh.setPeerJitterTarget ——
+     * 接收侧，无重协商），平息后恢复
+     * 浏览器的自适应默认值。迟滞形态与其他引擎相同；与发送侧
+     * 码率地板不同，这没有保真代价，
+     * 所以每种模式都运行（音乐毛刺更刺耳）。
      */
     function noteJitterBoost(peerId, rec) {
         const jitterBad = rec.jitter !== null && rec.jitter >= JITTER_BAD_MS;
         const lossBad = rec.loss !== null && rec.loss >= LOSS_BAD_PCT;
-        // concealment is the audible symptom the two network-level signals above
-        // can miss — it joins both sides of the hysteresis
+        // 掩蔽是上面两个网络层信号都可能漏掉的可闻症状 ——
+        // 它同时加入迟滞的两侧
         const glitchBad = rec.conceal !== null && rec.conceal >= CONCEAL_BAD_PCT;
         const calm =
             (rec.jitter === null || rec.jitter <= JITTER_OK_MS) &&
@@ -465,7 +465,7 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             rec.jgood += 1;
             rec.jbad = 0;
         } else {
-            return; // in between: hold the current state
+            return; // 介于其间：维持现状
         }
         if (!rec.jbBoost && rec.jbad >= ADAPT_BAD_POLLS) {
             rec.jbBoost = true;
@@ -473,15 +473,15 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
             s.mesh?.setPeerJitterTarget(peerId, JITTER_BOOST_MILD_MS);
             console.warn('[mesh] jitter boost: playout target raised', peerId, `${JITTER_BOOST_MILD_MS}ms`);
         } else if (rec.jbBoost && rec.jbLevel === 1 && rec.jbad >= ADAPT_BAD_POLLS * 2) {
-            // closed loop via the achieved delay: only stack a deeper target
-            // when the mild one actually landed (or is unobservable) — a
-            // browser that ignored 60ms will ignore 120ms just the same
+            // 用实际达成延迟闭环：只有轻度目标真正落地（或无法
+            // 观测）时才叠加更深目标 —— 无视 60ms 的浏览器
+            // 同样会无视 120ms
             const honored = rec.jbDelay === null || rec.jbDelay >= JITTER_BOOST_MILD_MS - JITTER_HONORED_TOL_MS;
             if (!honored) return;
             rec.jbLevel = 2;
-            // scale the deep target with the measured jitter (rounded to 10ms),
-            // clamped to sane audio bounds — a 90ms-jitter link needs more than
-            // a fixed 120ms to stop concealing, a 35ms one doesn't need more
+            // 深度目标按实测抖动缩放（取整到 10ms），并夹在
+            // 合理的音频界限内 —— 90ms 抖动的链路需要超过固定
+            // 120ms 才能停止掩蔽，35ms 的则不需要更多
             const deep = Math.min(
                 JITTER_BOOST_MAX_MS,
                 Math.max(JITTER_BOOST_MS, Math.ceil(((rec.jitter || 0) * 3) / 10) * 10)
@@ -500,7 +500,7 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
         const node = $(`#memberList .member[data-id="${peerId}"]`);
         if (node) node.classList.toggle('unstable', !!lossStreaks.get(peerId)?.unstable);
     }
-    /** Forget a departing member's quality record (deferred-retry timer included). */
+    /** 遗忘离场成员的质量记录（含延迟重试定时器）。 */
     function forget(peerId) {
         const rec = lossStreaks.get(peerId);
         if (rec?.pokeTimer) clearTimeout(rec.pokeTimer);

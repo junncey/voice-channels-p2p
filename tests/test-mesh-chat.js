@@ -1,12 +1,12 @@
 'use strict';
 
 // npx mocha test-mesh-chat.js
-// Browser-module unit tests for the Mesh pieces that are pure bookkeeping:
-// the DataChannel send-queue budget (frames + bytes), the late-voice attach
-// (replaceAudioTrack on a link that connected while we were text-only), the
-// connPath stats readback (incl. receiver-report identity), the adaptive-state
-// restamp after SDP rounds, and drainChat.
-// Peer "connections" are plain objects — no RTCPeerConnection needed.
+// 针对 Mesh 中纯记账逻辑的浏览器模块单测：DataChannel 发送队列预算
+// （帧数 + 字节数）、中途开麦挂载（我们还是纯文字时就连上的链路上调
+// replaceAudioTrack）、connPath 统计读数（含 receiver-report 身份）、
+// SDP 轮次之后的自适应状态重打，以及 drainChat。
+// 对端的“连接”就是普通对象——
+// 不需要真的 RTCPeerConnection。
 
 require('should');
 const { pathToFileURL } = require('url');
@@ -19,7 +19,7 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
         ({ Mesh } = await import(pathToFileURL(path.join(__dirname, '..', 'public', 'js', 'core', 'webrtc.js'))));
     });
 
-    /** A Mesh whose entries are faked per test (signaling only needs .emit). */
+    /** 一个 entries 由各测试自行伪造的 Mesh（信令只需要 .emit）。 */
     function bareMesh() {
         return new Mesh({ signaling: { emit() {} }, handlers: {} });
     }
@@ -48,7 +48,7 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
 
             const sent = [];
             entry.dc = { readyState: 'open', send: (raw) => sent.push(raw) };
-            entry.queue.splice(0).forEach((raw) => entry.dc.send(raw)); // flush shape mirrors _attachChat.onopen
+            entry.queue.splice(0).forEach((raw) => entry.dc.send(raw)); // 冲刷形态照搬 _attachChat.onopen
             sent.should.have.length(2);
             JSON.parse(sent[0]).msg.should.equal('hi');
         });
@@ -57,14 +57,14 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             const mesh = bareMesh();
             const entry = connectingEntry();
             mesh.entries.set('p1', entry);
-            // ~1MB JSON frames against the 4MB budget: three fit, the fourth
-            // must refuse — a queued image burst may never buffer without bound
+            // ~1MB 的 JSON 帧对着 4MB 预算：塞得进三帧，第四帧必须被拒——
+            // 排队中的图片爆发绝不允许无界缓冲
             const frame = { type: 'img-chunk', d: 'a'.repeat(1024 * 1024) };
             for (let i = 0; i < 3; i++) mesh.sendChat(frame);
             entry.queue.should.have.length(3);
             entry.queueBytes.should.be.above(3 * 1024 * 1024);
             (() => mesh.sendChat(frame)).should.throw('dc-send-failed');
-            entry.queue.should.have.length(3); // refused frame is not half-queued
+            entry.queue.should.have.length(3); // 被拒的帧不会排进一半
         });
 
         it('should refuse once the FRAME budget is exhausted (tiny frames)', () => {
@@ -87,9 +87,9 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             mesh.entries.set('open', open);
             const frame = { type: 'img-chunk', d: 'a'.repeat(1024 * 1024) };
             for (let i = 0; i < 3; i++) mesh.sendChat(frame);
-            open.dc.sent.should.equal(3); // every send reached the open channel
-            (() => mesh.sendChat(frame)).should.throw('dc-send-failed'); // stuck peer refused
-            open.dc.sent.should.equal(4); // the refusal still delivered to the open peer
+            open.dc.sent.should.equal(3); // 每次发送都抵达了已打开的频道
+            (() => mesh.sendChat(frame)).should.throw('dc-send-failed'); // 卡住的 peer 被拒绝
+            open.dc.sent.should.equal(4); // 拒绝的同时，打开的 peer 仍收到了这一帧
         });
     });
 
@@ -98,7 +98,7 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             const mesh = bareMesh();
             const entry = { pc: {}, dc: { readyState: 'open', bufferedAmount: 1024 } };
             mesh.entries.set('p1', entry);
-            await mesh.drainChat(); // resolves without waiting
+            await mesh.drainChat(); // 立即 resolve，无需等待
         });
 
         it('should wait for a congested buffer to drain', async () => {
@@ -110,7 +110,7 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             }, 90);
             const started = Date.now();
             await mesh.drainChat();
-            (Date.now() - started).should.be.aboveOrEqual(50); // actually polled
+            (Date.now() - started).should.be.aboveOrEqual(50); // 确实经过轮询等待
         });
     });
 
@@ -131,8 +131,8 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             };
             mesh.entries.set('p1', entry);
             mesh.replaceAudioTrack(track, mesh.localStream);
-            // the old code SKIPPED !tracksAdded entries — a mid-call voice
-            // enabler transmitted to nobody until a full reconnect
+            // 旧代码会跳过 !tracksAdded 的条目——通话中途开麦
+            // 在完整重连之前谁也收不到
             added.should.have.length(1);
             entry.tracksAdded.should.equal(true);
         });
@@ -186,7 +186,7 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             info.type.should.equal('p2p');
             info.rtt.should.equal(45);
             info.outboundLoss.should.equal(5);
-            info.outboundTs.should.equal(12345); // dedupe identity travels with the report
+            info.outboundTs.should.equal(12345); // 去重身份随报告一同返回
             info.outboundJitter.should.equal(7);
             info.outbound.should.eql({ bytesSent: 40000, timestamp: 12345, targetBitrate: 32000 });
         });
@@ -204,8 +204,8 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
     });
 
     describe('adaptive state restamp after SDP rounds', () => {
-        /** Mesh with an fmtp cap, plus an entry whose pc records every
-         *  setParameters call and exposes one audio sender/receiver pair. */
+        /** 带 fmtp 上限的 Mesh，其条目的 pc 会记录每次 setParameters
+         *  调用，并暴露一对音频 sender/receiver。 */
         function adaptiveMesh({ bitrateFloor = null, jitterTarget = null } = {}) {
             const mesh = new Mesh({
                 signaling: { emit() {} },
@@ -255,8 +255,8 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
         it('should re-apply the fmtp cap and jitter target after ANSWERING a re-offer', async () => {
             const { mesh, params, receiver } = adaptiveMesh({ jitterTarget: 80 });
             await mesh._applySessionDescription('p1', mesh.entries.get('p1'), { type: 'offer', sdp: 'v=0' });
-            // an SDP round may drop sender encodings / receiver buffer hints —
-            // the restamp puts the adaptive engines' tuning back on the link
+            // 一轮 SDP 可能把 sender encodings / receiver 缓冲提示冲掉——
+            // 重打把自适应引擎的调校重新按回链路上
             params.encodings[0].maxBitrate.should.equal(64000);
             receiver.jitterBufferTarget.should.equal(80);
         });
@@ -265,7 +265,7 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             const { mesh, params } = adaptiveMesh({ bitrateFloor: 32000, jitterTarget: 120 });
             const sent = await mesh.renegotiate('p1');
             sent.should.be.true();
-            params.encodings[0].maxBitrate.should.equal(32000); // floor beats the fmtp cap
+            params.encodings[0].maxBitrate.should.equal(32000); // 地板优先于 fmtp 上限
         });
 
         it('should leave receivers untouched when no jitter target is in force', async () => {
@@ -276,8 +276,8 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
     });
 
     describe('legacy playoutDelayHint conversion', () => {
-        /** Entry whose receiver predates jitterBufferTarget (pre-M110
-         *  Chromium webviews) — only the deprecated hint exists there. */
+        /** receiver 还没有 jitterBufferTarget 的条目（M110 之前的
+         *  Chromium webview）——那里只有已废弃的 hint。 */
         function legacyMesh() {
             const mesh = bareMesh();
             const receiver = { track: { kind: 'audio' }, playoutDelayHint: null };
@@ -288,8 +288,8 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
         it('should convert milliseconds to SECONDS for the legacy hint', () => {
             const { mesh, receiver } = legacyMesh();
             mesh.setPeerJitterTarget('p1', 60);
-            // the hint is clamped to [0,10] SECONDS — an unconverted 60 pins
-            // playout at the ceiling instead of asking for 60ms
+            // hint 以 SECONDS 为单位钳制在 [0,10]——不换算的 60 会把
+            // 播放延迟钉死在上限，而不是请求 60ms
             receiver.playoutDelayHint.should.equal(0.06);
         });
 
@@ -297,8 +297,8 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             const { mesh, receiver } = legacyMesh();
             mesh.setPeerJitterTarget('p1', 120);
             mesh.setPeerJitterTarget('p1', null);
-            // null / 1000 === 0 would PIN the minimum delay — null must
-            // hand control back to the browser's adaptive buffer
+            // null / 1000 === 0 会把最小延迟钉死——null 必须把控制权
+            // 交还给浏览器的自适应缓冲
             should(receiver.playoutDelayHint).be.null();
         });
     });

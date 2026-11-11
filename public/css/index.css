@@ -1,5 +1,5 @@
 /* ============================================================
-   Homepage — public channel list
+   首页 — 公开频道列表
    ============================================================ */
 
 .page {
@@ -58,7 +58,7 @@ button.topbar-link {
     font: inherit;
 }
 
-/* ---------- clear local data modal ---------- */
+/* ---------- 清除本地数据弹窗 ---------- */
 
 .clear-desc {
     font-size: 13px;
@@ -162,8 +162,8 @@ button.topbar-link {
     gap: 10px;
 }
 
-/* password/temp chips hug the title; the online count owns the right edge
-   (space-between alone would float a lone badge to the card's middle) */
+/* 密码/临时徽章紧贴标题；右缘归在线人数所有
+   （只用 space-between 会把唯一的徽章浮到卡片中部） */
 .channel-card-top .badge {
     flex: 0 0 auto;
     padding: 2px 8px;
@@ -261,7 +261,7 @@ button.topbar-link {
     font-size: 15px;
 }
 
-/* ---------- theme toggle pill (topbar) ---------- */
+/* ---------- 主题切换胶囊（顶栏） ---------- */
 
 .theme-toggle {
     display: inline-flex;
@@ -300,7 +300,7 @@ button.topbar-link {
 }
 
 /* ============================================================
-   New: language switch, live search, favorites + recent rows
+   新增：语言切换、实时搜索、收藏 + 最近访问行
    ============================================================ */
 
 .lang-switch {
@@ -382,10 +382,10 @@ button.topbar-link {
     fill: var(--warn);
 }
 
-/* ---------- narrow screens: keep the topbar on one line ----------
-   the brand text was wrapping at 390px because the actions group
-   (lang + theme pill + clear link) leaves no slack; tighten the
-   paddings instead of hiding any control */
+/* ---------- 窄屏：让顶栏保持单行 ----------
+   390px 宽度下品牌文字会折行，因为操作组
+   （语言 + 主题胶囊 + 清除链接）不留余量；
+   这里收紧内边距而不是隐藏任何控件 */
 @media (max-width: 480px) {
     .page {
         padding: 0 14px 60px;

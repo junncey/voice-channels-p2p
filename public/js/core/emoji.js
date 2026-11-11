@@ -1,16 +1,16 @@
 /**
- * Emoji domain — the shared palette + glyph detection used by the chat
- * message list (emoji-only bubbles), the reaction picker and the composer
- * emoji button. Plain textContent, one popover at a time, closes on
- * outside click / Esc / pick.
+ * emoji 域——聊天消息列表（纯 emoji 气泡）、回应选择器与输入框
+ * emoji 按钮共用的调色板 + 字形检测。
+ * 纯 textContent 渲染，同一时间只有一个弹层，
+ * 点击外部 / Esc / 选中即关闭。
  */
 
 import { el } from './utils.js';
 
-// emoji glyph runs: pictographics, skin tones, ZWJ sequences, keycaps,
-// regional-indicator pairs, variation selectors and surrounding whitespace
-// (the astral \u{...} escapes inside the character classes are deliberate —
-// these regexes exist to match exactly those code points)
+// emoji 字形串：象形字符、肤色修饰、ZWJ 序列、键帽符号、
+// 区域指示符对、变体选择符与周边空白
+// （字符类里的星体 \u{...} 转义是有意为之——
+// 这些正则的存在就是为了精确匹配那些码点）
 /* eslint-disable no-misleading-character-class */
 const EMOJI_RUN_RE =
     /^(?:[\p{Extended_Pictographic}\p{Emoji_Component}\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}\s])+$/u;
@@ -18,9 +18,9 @@ const EMOJI_CORE_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{20E3}]/u;
 /* eslint-enable no-misleading-character-class */
 
 /**
- * A message made only of a few emoji (no letters/digits) renders without the
- * bubble chrome — a lone emoji inside a normal bubble is indistinguishable
- * from a stray reaction chip.
+ * 仅由少量 emoji 组成（不含字母/数字）的消息渲染时去掉气泡外框——
+ * 普通气泡里的单个 emoji 看起来会与散落的回应 chip
+ * 难以区分。
  * @param {string} text
  */
 export function isEmojiOnly(text) {
@@ -30,7 +30,7 @@ export function isEmojiOnly(text) {
     return EMOJI_CORE_RE.test(trimmed);
 }
 
-/** Palette offered by the reaction picker and the composer emoji button. */
+/** 回应选择器与输入框 emoji 按钮提供的调色板。 */
 export const EMOJIS = [
     '👍',
     '👎',
@@ -83,8 +83,8 @@ function emojiPickerEsc(event) {
 }
 
 /**
- * @param {HTMLElement} anchor element to position near
- * @param {function(string): void} onPick called with the chosen emoji
+ * @param {HTMLElement} anchor 定位参考元素
+ * @param {function(string): void} onPick 选中 emoji 时以该 emoji 回调
  */
 export function openEmojiPicker(anchor, onPick) {
     closeEmojiPicker();
@@ -106,7 +106,7 @@ export function openEmojiPicker(anchor, onPick) {
     document.body.append(emojiPickerNode);
     const rect = anchor.getBoundingClientRect();
     const pick = emojiPickerNode.getBoundingClientRect();
-    // clamp inside the viewport: prefer above-right of the anchor
+    // 限制在视口内：优先放在锚点上方偏右
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - pick.width - 8));
     const top =
         rect.top - pick.height - 6 > 8
@@ -114,7 +114,7 @@ export function openEmojiPicker(anchor, onPick) {
             : Math.min(rect.bottom + 6, window.innerHeight - pick.height - 8);
     emojiPickerNode.style.left = `${left}px`;
     emojiPickerNode.style.top = `${top}px`;
-    // the opening click itself must not count as "outside"
+    // 打开它的那次点击本身不能算作「外部」
     setTimeout(() => {
         document.addEventListener('click', emojiPickerOutside, true);
         document.addEventListener('keydown', emojiPickerEsc, true);

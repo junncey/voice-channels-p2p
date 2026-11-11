@@ -8,17 +8,17 @@ http://patorjk.com/software/taag/#p=display&f=ANSI%20Regular&t=Server
 ██║██║╚████║███████╗   ██║   ██║  ██║██████╔╝╚██████╗██║  ██║╚██████╔╝███████╗
 ╚═╝╚═╝ ╚═══╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 
-Voice channel edition — persistent channels + admin console + guest direct join.
+语音频道版——持久化频道 + 管理后台 + 访客直接加入。
 
-Based on MiroTalk P2P (https://github.com/miroslavpejic85/mirotalk, AGPLv3).
+基于 MiroTalk P2P（https://github.com/miroslavpejic85/mirotalk，AGPLv3）。
 
-Assembly point: this file wires the express app, the HTTPS/HTTP server and
-socket.io, the persistent stores, and the feature modules —
+装配点：本文件把 express 应用、HTTPS/HTTP 服务器与
+socket.io、持久化 store、功能模块接线到一起——
 
-  rooms.js        in-memory room state + ghost/session lifecycle
-  signaling.js    socket protocol (join/addPeer/relaySDP/relayICE/removePeer)
-  chatGateway.js  chat socket domain (history copy + lifecycle broadcasts)
-  adminApi.js     /api/admin/* + /api/host/* REST + backup/restore
+  rooms.js        内存房间状态 + 幽灵/会话生命周期
+  signaling.js    socket 协议（join/addPeer/relaySDP/relayICE/removePeer）
+  chatGateway.js  聊天 socket 域（历史副本 + 生命周期广播）
+  adminApi.js     /api/admin/* + /api/host/* REST + 备份/恢复
 */
 
 'use strict';
@@ -51,13 +51,13 @@ const { createChatGateway } = require('./chatGateway');
 const { registerSignaling } = require('./signaling');
 const { registerAdminApi, BACKUP_INTERVAL_HOURS, BACKUP_KEEP } = require('./adminApi');
 
-// one constant-time compare implementation for the whole server (channelStore
-// owns it — it lives next to the password hashing it was built for)
+// 全服务器共用的一个常数时间比较实现（由 channelStore 持有——
+// 它就住在为之而建的密码哈希旁边）
 const safeEqualStrings = ChannelStore.constantTimeEquals;
 
 const log = new Logs('server');
 
-// Central configuration (reads .env via dotenv internally)
+// 中央配置（内部经 dotenv 读取 .env）
 const config = require('./config');
 
 const app = express();
@@ -67,19 +67,19 @@ const host = config.server.host;
 const trustProxy = config.server.trustProxy;
 
 // ---------------------------------------------------------------------------
-// HTTPS / HTTP server + Socket.IO
+// HTTPS / HTTP 服务器 + Socket.IO
 // ---------------------------------------------------------------------------
 
-// Two supported TLS forms (docs/self-hosting.md):
-//  - reverse proxy terminates TLS → container serves plain HTTP (default, no certs)
-//  - native HTTPS → operator mounts real certs at app/ssl/, port serves HTTPS only
+// 两种支持的 TLS 形式（docs/self-hosting.md）：
+//  - 反向代理终结 TLS → 容器走纯 HTTP（默认，无需证书）
+//  - 原生 HTTPS → 运维者把真实证书挂到 app/ssl/，端口只服务 HTTPS
 const keyPath = path.join(__dirname, '../ssl/key.pem');
 const certPath = path.join(__dirname, '../ssl/cert.pem');
 const keyExists = fs.existsSync(keyPath);
 const certExists = fs.existsSync(certPath);
 if (keyExists !== certExists) {
-    // half-mounted certs are a misconfiguration, not the plain-HTTP default:
-    // silently serving HTTP would strand an HTTPS-expecting proxy upstream
+    // 证书只挂一半是配置错误，不是纯 HTTP 默认：
+    // 静默改走 HTTP 会让上游期待 HTTPS 的代理束手无策
     log.error(
         `Native TLS needs both app/ssl/key.pem and app/ssl/cert.pem — only ${
             keyExists ? 'key.pem' : 'cert.pem'
@@ -113,45 +113,45 @@ const corsOptions = {
 };
 
 const io = new Server({
-    // 2MB: chat-history image relay events carry ONE compressed image each
-    // (up to ~1.6MB of base64, see the 'chat' handler). A packet over the
-    // limit closes its own connection, so the raise stays self-limiting.
+    // 2MB：聊天历史的图片中转事件每次只携带一张压缩图片
+    // （base64 至多 ~1.6MB，见 'chat' 处理器）。超过上限的包
+    // 只会关掉它自己的连接，因此这个提升保持自我克制。
     maxHttpBufferSize: 2e6,
     transports: ['websocket'],
     cors: corsOptions,
-    // reap connections that died without a FIN (ghost members) within ~18s
+    // 在 ~18s 内回收没有 FIN 就死掉的连接（幽灵成员）
     pingInterval: config.server.pingInterval,
     pingTimeout: config.server.pingTimeout,
 }).listen(server);
 
 // ---------------------------------------------------------------------------
-// STUN / TURN ICE servers
+// STUN / TURN ICE 服务器
 // ---------------------------------------------------------------------------
 
-// Two TURN modes:
-//  - static: TURN_SERVER_USERNAME/CREDENTIAL relayed as-is (legacy coturn
-//    long-term credentials — fine on a trusted LAN, risky on the open net)
-//  - REST/HMAC (recommended when TURN_SERVER_SECRET is set): coturn runs with
-//    use-auth-secret; this server mints short-lived credentials
-//    (username = unix expiry, password = base64(hmac-sha1(secret, username)))
-//    and refreshes them at half-life. Nothing long-lived ever reaches a client.
-const iceServers = []; // static entries (STUN + optionally static TURN)
+// 两种 TURN 模式：
+//  - 静态：TURN_SERVER_USERNAME/CREDENTIAL 原样下发（coturn 老式
+//    长期凭证——可信局域网尚可，公网上有风险）
+//  - REST/HMAC（设置 TURN_SERVER_SECRET 时推荐）：coturn 以
+//    use-auth-secret 运行；本服务器铸造短时凭证
+//    （username = unix 到期时间，password = base64(hmac-sha1(secret, username))），
+//    并在半衰期刷新。任何长期凭证都绝不会下发到客户端。
+const iceServers = []; // 静态条目（STUN + 可选的静态 TURN）
 const stunServerUrl = config.webrtc.stun.url;
 const turnServerUrl = config.webrtc.turn.url;
 const turnServerUsername = config.webrtc.turn.username;
 const turnServerCredential = config.webrtc.turn.credential;
-const turnSecret = config.webrtc.turn.secret; // REST/HMAC mode (overrides static TURN auth)
+const turnSecret = config.webrtc.turn.secret; // REST/HMAC 模式（覆盖静态 TURN 认证）
 const turnTtlSec = config.webrtc.turn.credentialTtlSec || 12 * 3600;
-// STUN_SERVER_URL may hold comma-separated URLs (several resolvers as mutual
-// backups, mirroring the TURN handling below)
+// STUN_SERVER_URL 可含逗号分隔的多个 URL（多个解析器互为备份，
+// 与下方 TURN 的处理方式一致）
 const stunServerUrls = (stunServerUrl || '')
     .split(',')
     .map((url) => url.trim())
     .filter(Boolean);
 if (config.webrtc.stun.enabled) stunServerUrls.forEach((url) => iceServers.push({ urls: url }));
-// TURN_SERVER_URL may hold several comma-separated URLs -> one RTCIceServer per relay
-// (multiple coturn instances act as mutual backups; the browser collects a relay
-// candidate per server and ICE picks whichever answers first)
+// TURN_SERVER_URL 可含逗号分隔的多个 URL -> 每个 relay 一个 RTCIceServer
+// （多个 coturn 实例互为备份；浏览器向每台服务器各收集一个 relay
+// candidate，ICE 选用最先应答的那个）
 const turnServerUrls = (turnServerUrl || '')
     .split(',')
     .map((url) => url.trim())
@@ -160,8 +160,8 @@ const turnStaticAuth =
     config.webrtc.turn.enabled && turnServerUrls.length && turnServerUsername && turnServerCredential;
 const turnDynamicAuth = config.webrtc.turn.enabled && turnServerUrls.length && turnSecret;
 if (turnDynamicAuth) {
-    // REST/HMAC wins when both are configured: nothing long-lived should keep
-    // travelling to clients just because static creds are still in the env.
+    // 两者都配置时 REST/HMAC 优先：不能因为静态凭证还留在 env 里，
+    // 就让长期凭证继续下发到客户端。
     log.info('TURN REST/HMAC credentials enabled (use-auth-secret)', {
         ttl_sec: turnTtlSec,
         urls: turnServerUrls.length,
@@ -172,13 +172,13 @@ if (turnDynamicAuth) {
     });
 }
 
-// Minted credentials are shared by every client of the process and cached
-// until half of their TTL has passed (a rejoin mid-call keeps working).
+// 铸造的凭证由进程内的所有客户端共享，并缓存到 TTL 过半为止
+// （通话中途 rejoin 仍能继续工作）。
 let turnCredCache = null; // { servers, expiresAtSec }
 
 function mintTurnCredentials() {
     const expiresAtSec = Math.floor(Date.now() / 1000) + turnTtlSec;
-    const username = String(expiresAtSec); // coturn REST API: username = expiry timestamp
+    const username = String(expiresAtSec); // coturn REST API：username = 到期时间戳
     const password = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
     return {
         servers: turnServerUrls.map((url) => ({ urls: url, username, credential: password })),
@@ -186,7 +186,7 @@ function mintTurnCredentials() {
     };
 }
 
-/** ICE server list for a fresh addPeer (static array, or cached HMAC set). */
+/** 供新 addPeer 使用的 ICE 服务器列表（静态数组，或缓存的 HMAC 集）。 */
 function getIceServers() {
     if (!turnDynamicAuth) return iceServers;
     if (!turnCredCache || turnCredCache.expiresAtSec - Math.floor(Date.now() / 1000) < turnTtlSec / 2) {
@@ -196,42 +196,42 @@ function getIceServers() {
 }
 
 // ---------------------------------------------------------------------------
-// Persistent channel registry + admin console
+// 持久化频道注册表 + 管理后台
 // ---------------------------------------------------------------------------
 
 const channelsCfg = config.channels || {};
 
-// Wire the pre-fix password compatibility shim: registries written before
-// passwords were compared verbatim hold hashes of DOMPurify-sanitized secrets;
-// verifyPasswordCompat re-derives that form as a fallback (raw first).
+// 接上修复前的密码兼容垫片：在密码改为原文比对之前写入的注册表，
+// 保存的是经 DOMPurify 清洗后密钥的哈希；
+// verifyPasswordCompat 以该形式回退重推（原文优先）。
 const channelStore = new ChannelStore({
     filePath: path.join(__dirname, 'channels.json'),
     autoInit: channelsCfg.autoInit !== false,
     defaultModerator: channelsCfg.defaultModerator,
     legacySanitize: (pw) => checkXSS(pw),
-    // env seeds the first-boot default; afterwards the admin toggle persists
+    // env 播种首次启动的默认值；此后由 admin 开关持久化
     defaultSettings: { tempRooms: channelsCfg.tempRooms !== false },
 });
 
-// Runtime source of truth for the temporary-rooms feature (admin-managed,
-// persisted in channels.json — the env value only seeded the initial default)
+// 临时房间功能的运行时权威来源（由 admin 管理，
+// 持久化在 channels.json——env 值只播种了初始默认）
 const tempRoomsEnabled = () => channelStore.settings.tempRooms !== false;
 
-// Text chat history: delivery stays P2P over the DataChannel mesh, but the
-// SENDER relays a copy of every text message here so late joiners can catch
-// up. Retention is admin-tunable (chatRetentionHours in channels.json, 0 =
-// keep nothing); a channel may override the global window (its own
-// chatRetentionHours field, null/absent = inherit). Temp rooms keep history
-// in memory only.
+// 文字聊天历史：投递仍走 DataChannel mesh 的 P2P，但发送者（SENDER）
+// 会把每条文字消息在这里中转一份副本，让迟到的加入者能追上进度。
+// 留存时长可由 admin 调整（channels.json 的 chatRetentionHours，
+// 0 = 一律不保留）；单个频道可覆盖全局窗口（自己的
+// chatRetentionHours 字段，null/缺省 = 继承）。临时房间的历史
+// 只存内存。
 const chatStore = new ChatStore({
     dir: path.join(__dirname, 'chat_history'),
     retentionHours: (roomId) =>
         channelStore.get(roomId)?.chatRetentionHours ?? channelStore.settings.chatRetentionHours,
 });
 
-// The admin console stays completely DISABLED (404 on /admin and every
-// /api/admin/* route) until BOTH a password and a dedicated JWT secret are
-// configured — there are no insecure defaults.
+// 在密码与专用 JWT secret 两者都配置之前，admin 后台完全禁用
+// （/admin 与所有 /api/admin/* 路由一律 404）
+// ——没有任何不安全的默认值。
 const consoleEnabled = Boolean(channelsCfg.adminPassword && channelsCfg.adminJwtSecret);
 if (!consoleEnabled) {
     log.warn(
@@ -239,36 +239,36 @@ if (!consoleEnabled) {
     );
 }
 
-// Append-only audit trail: membership changes (join/leave/kick) and admin
-// data operations land here even with debug logging off. VC_AUDIT_FILE
-// redirects it (the integration tests point it at a throwaway file).
+// 追加式审计轨迹：即使 debug 日志关闭，成员变动（join/leave/kick）
+// 与 admin 数据操作也会落在这里。VC_AUDIT_FILE
+// 可重定向（集成测试把它指向临时文件）。
 const audit = new Audit(process.env.VC_AUDIT_FILE || path.join(__dirname, 'audit.jsonl'));
 
-// Room state + session lifecycle (shared by the signaling protocol, the chat
-// gateway and the admin console REST surface)
+// 房间状态 + 会话生命周期（由信令协议、聊天网关
+// 与 admin 后台 REST 面共享）
 const rooms = createRooms({ channelStore, chatStore, audit, log });
 
-// Chat socket domain: history-copy persistence + lifecycle broadcasts
+// 聊天 socket 域：历史副本持久化 + 生命周期广播
 const chatGateway = createChatGateway({ rooms, chatStore, channelStore, audit, log });
 
-/** Sign admin / host tokens with the dedicated console secret. */
+/** 用专用的后台 secret 签发 admin / host token。 */
 function signConsoleToken(payload, expiresIn) {
     return jwt.sign(payload, channelsCfg.adminJwtSecret, { expiresIn: expiresIn || channelsCfg.adminJwtExp || '24h' });
 }
 
-/** @returns {object|null} decoded payload or null when invalid/expired */
+/** @returns {object|null} 解码后的 payload，无效/过期时为 null */
 function verifyConsoleToken(token) {
     if (!token || typeof token !== 'string') return null;
     try {
-        // pin the algorithm so tokens signed with another alg are never accepted
+        // 钉死算法，用其他 alg 签发的 token 绝不被接受
         return jwt.verify(token, channelsCfg.adminJwtSecret, { algorithms: ['HS256'] });
     } catch {
         return null;
     }
 }
 
-// Login rate limiting shared by admin / host login (throttled by IP only: a
-// client-supplied username can be varied per request to get a fresh bucket).
+// admin / host 登录共用的登录限流（只按 IP 节流：客户端提供的
+// username 每次请求都可变，能换到新桶）。
 const maxAttempts = config.host.maxLoginAttempts;
 const minBlockTime = config.host.minLoginBlockTime;
 const loginLimiter = rateLimit({
@@ -278,10 +278,10 @@ const loginLimiter = rateLimit({
     keyGenerator: (req) => getIP(req),
 });
 
-// Coarse safety net for the public REST surface (/api/channels, /api/version,
-// …) which is otherwise unauthenticated and unlimited. Generous enough that
-// the homepage's 15s polling never trips it (≈ 12 req/5min per open tab);
-// admin routes carry their own JWTs and only need the headroom for backups.
+// 公共 REST 面（/api/channels、/api/version 等）的粗粒度安全网，
+// 否则它们无认证且无限制。额度足够宽裕，
+// 首页 15s 轮询绝不会触顶（每个打开的标签页 ≈ 12 req/5min）；
+// admin 路由自带 JWT，只需要为备份留出余量。
 const apiLimiter = rateLimit({
     windowMs: 5 * 60 * 1000,
     max: 600,
@@ -291,7 +291,7 @@ const apiLimiter = rateLimit({
 });
 
 // ---------------------------------------------------------------------------
-// Views
+// 页面视图
 // ---------------------------------------------------------------------------
 
 const dir = {
@@ -306,15 +306,15 @@ const views = {
 };
 
 // ---------------------------------------------------------------------------
-// Middlewares
+// 中间件
 // ---------------------------------------------------------------------------
 
 app.set('trust proxy', trustProxy);
 
 const ipWhitelist = config.ipWhitelist;
 
-// Guardrail: IP_WHITELIST_ENABLED=true without TRUST_PROXY=true is almost
-// always a misconfiguration (X-Forwarded-For would be attacker-controlled).
+// 护栏：IP_WHITELIST_ENABLED=true 而没有 TRUST_PROXY=true 几乎总是
+// 配置错误（X-Forwarded-For 会是攻击者可控的）。
 if (ipWhitelist.enabled && !trustProxy) {
     const optIn = String(process.env.IP_WHITELIST_ALLOW_UNTRUSTED_PROXY || '').toLowerCase() === 'true';
     if (!optIn) {
@@ -333,13 +333,13 @@ app.use(
         directives: {
             defaultSrc: ["'self'"],
             scriptSrc: ["'self'"],
-            // 404.html carries an inline <style> block; inline styles cannot execute script
+            // 404.html 带有内联 <style> 块；内联样式无法执行脚本
             styleSrc: ["'self'", "'unsafe-inline'"],
-            // chat images travel as data: URLs; audio playback and the
-            // composer's pending-image previews (object URLs) use blob:
+            // 聊天图片以 data: URL 传输；音频播放与输入框的
+            // 待发图片预览（object URL）用 blob:
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:', 'data:'],
-            connectSrc: ["'self'"], // socket.io websocket (same-origin) is covered by 'self'
+            connectSrc: ["'self'"], // socket.io websocket（同源）已由 'self' 覆盖
             fontSrc: ["'self'"],
             objectSrc: ["'none'"],
             baseUri: ["'self'"],
@@ -348,20 +348,20 @@ app.use(
     }),
     helmet.noSniff(),
     helmet.referrerPolicy({ policy: 'no-referrer' }),
-    // HSTS (180-day default); over plain HTTP browsers ignore the header
+    // HSTS（默认 180 天）；纯 HTTP 下浏览器会忽略该头
     helmet.hsts()
 );
 app.use(applyEmbedHeaders);
 
 const staticOptions = {
-    // "/" must reach the page route so index.html is served with its build id
+    // "/" 必须落到页面路由，index.html 才能带着自己的 build id 下发
     index: false,
     setHeaders: (res, filePath) => {
         if (filePath.endsWith('.js')) res.setHeader('Content-Type', 'application/javascript');
-        // Cache policy: icons/images never change in place → cache hard.
-        // Everything else (js/css/lang) gets a short freshness window and must
-        // revalidate afterwards, so a deploy shows up within minutes while the
-        // version-check banner still covers the gap (HTML itself is no-cache).
+        // 缓存策略：图标/图片绝不原地变更 → 长缓存。
+        // 其余（js/css/lang）给短新鲜窗口，之后必须回源验证，
+        // 部署几分钟内即可生效，版本检查横幅兜底
+        // （HTML 本身 no-cache）。
         if (path.dirname(filePath).endsWith(path.join('public', 'images'))) {
             res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
         } else {
@@ -371,15 +371,15 @@ const staticOptions = {
 };
 app.use(express.static(dir.public, staticOptions));
 
-// CORS before the API limiter: preflight OPTIONS requests are protocol
-// overhead, not API traffic, and must not burn the rate budget
+// CORS 放在 API 限流器之前：预检 OPTIONS 请求是协议开销，
+// 不是 API 流量，不能烧掉限流额度
 app.use(cors(corsOptions));
 
-// REST-wide safety net (login endpoints keep their stricter limiter — order
-// matters: the specific limiter must run first, so mount this after routes…
-// except Express matches in registration order, hence the skip below)
+// REST 全域安全网（登录端点保留自己更严的限流器——顺序有讲究：
+// 专用限流器必须先跑，所以本应挂在这些路由之后……
+// 但 Express 按注册顺序匹配，因此有了下面的 skip）
 app.use('/api', (req, res, next) => {
-    // already throttled harder by their own limiter
+    // 已被自己的限流器更严地节流
     if (req.path === '/admin/login' || req.path === '/host/login') return next();
     return apiLimiter(req, res, next);
 });
@@ -402,13 +402,13 @@ app.use((req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// Pages
+// 页面
 // ---------------------------------------------------------------------------
 
-// Pages carry their build id in a <meta> (see app/src/version.js) and are sent
-// `Cache-Control: no-cache`, so a reload always revalidates the HTML instead of
-// running a stale copy out of the HTTP cache. Rendered copies are memoized:
-// frontend files never change inside a running container.
+// 页面在 <meta> 里携带自己的 build id（见 app/src/version.js），
+// 并以 `Cache-Control: no-cache` 下发，重载时总是回源验证 HTML，
+// 而不是从 HTTP 缓存里跑一份过期副本。渲染结果做了记忆化：
+// 运行中的容器里前端文件不会变。
 const renderedPages = new Map();
 
 function sendPage(res, file, status = 200) {
@@ -421,21 +421,21 @@ function sendPage(res, file, status = 200) {
     res.status(status).set('Cache-Control', 'no-cache').type('html').send(html);
 }
 
-/** 404 page with an error callback: a missing 404.html must not hang the
- *  request (sendFile without one never ends the response on failure). */
+/** 404 页面带错误回调：缺少 404.html 时绝不能挂起请求
+ *  （不带回调的 sendFile 在失败时永远不会结束响应）。 */
 function sendNotFound(res) {
     res.status(404).sendFile(views.notFound, (err) => {
         if (err && !res.headersSent) res.status(500).type('text').send('Not found');
     });
 }
 
-// Channel list (homepage)
+// 频道列表（首页）
 app.get('/', (req, res) => {
     sendPage(res, views.index);
 });
 
-// Voice channel page — registered channels always resolve; any other valid id
-// resolves when temporary rooms are enabled (the room is spawned on first join)
+// 语音频道页面——已注册频道总能解析；其他合法 id 在临时房间开启时
+// 也解析（房间在首次 join 时生成）
 app.get('/c/:channelId', (req, res) => {
     const { channelId } = req.params;
     const known = channelStore.exists(channelId) || channelStore.isTemp(channelId);
@@ -445,18 +445,18 @@ app.get('/c/:channelId', (req, res) => {
     sendPage(res, views.channel);
 });
 
-// Legacy links compatibility: /join/<room> -> /c/<room>
+// 旧链接兼容：/join/<room> -> /c/<room>
 app.get('/join/:roomId', (req, res) => {
     res.redirect(301, `/c/${req.params.roomId}`);
 });
 
-// Admin console (404 unless enabled via env)
+// admin 后台（未用 env 启用时 404）
 app.get('/admin', (req, res) => {
     if (!consoleEnabled) return sendNotFound(res);
     sendPage(res, views.admin);
 });
 
-// Legacy single-segment links -> /c/<id> (old shared /<room> URLs)
+// 旧版单段链接 -> /c/<id>（老的 /<room> 分享 URL）
 app.get('/:roomId', (req, res) => {
     const { roomId } = req.params;
     if (!roomId || roomId === 'admin' || roomId === 'favicon.ico') {
@@ -469,8 +469,8 @@ app.get('/:roomId', (req, res) => {
 // Public API
 // ---------------------------------------------------------------------------
 
-// Public channels with online counts (homepage); active temporary rooms are
-// appended with a `temporary` flag so visitors can discover and join them
+// 公开频道 + 在线人数（首页）；活跃的临时房间以 `temporary` 标记
+// 追加在后，访客可以发现并加入它们
 app.get('/api/channels', (req, res) => {
     res.json({
         settings: { tempRooms: tempRoomsEnabled() },
@@ -481,17 +481,17 @@ app.get('/api/channels', (req, res) => {
     });
 });
 
-// Channel metadata for the channel page (works for unlisted channels too).
-// includePrivate stays off: host usernames are operator data for the admin
-// console, not for anonymous visitors.
+// 频道页所需的频道元数据（未公开频道也可用）。
+// includePrivate 保持关闭：host 用户名是管理后台的运营数据，
+// 不是给匿名访客看的。
 app.get('/api/channels/:channelId', (req, res) => {
     const id = req.params.channelId;
     const channel = channelStore.get(id) || channelStore.getTemp(id);
     if (channel) {
         return res.json(channelStore.sanitize(channel, { online: rooms.getPeerCount(id) }));
     }
-    // unknown id: with temp rooms enabled, any valid id MAY become a room the
-    // moment someone joins — serve a virtual preview instead of a 404
+    // 未知 id：临时房间开启时，任何合法 id 在有人 join 的瞬间就可能
+    // 变成房间——返回虚拟预览而不是 404
     if (tempRoomsEnabled() && channelStore.isValidId(id)) {
         return res.json({
             id,
@@ -506,15 +506,15 @@ app.get('/api/channels/:channelId', (req, res) => {
     return res.status(404).json({ error: 'Channel not found' });
 });
 
-// Frontend version + public/ fingerprint: open pages poll this and prompt a
-// reload when the build they were loaded with is no longer current
+// 前端版本 + public/ 指纹：已打开的页面轮询它，
+// 当自己加载时的 build 不再是最新的就提示重载
 app.get('/api/version', (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json(Version.getVersionInfo(dir.public));
 });
 
-// Admin console + host REST surface (all /api/admin/* and /api/host/*,
-// including backup/restore and the scheduled backup)
+// 管理后台 + host 的 REST 面（所有 /api/admin/* 与 /api/host/*，
+// 含备份/恢复与定时备份）
 const adminApi = registerAdminApi(app, {
     rooms,
     channelStore,
@@ -532,7 +532,7 @@ const adminApi = registerAdminApi(app, {
 });
 
 // ---------------------------------------------------------------------------
-// Legacy API v1 (stats only, API-key gated)
+// 旧版 API v1（仅统计，API-key 门控）
 // ---------------------------------------------------------------------------
 
 app.get('/api/v1/stats', (req, res) => {
@@ -557,7 +557,7 @@ app.get('/api/v1/stats', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// 404 + error handler
+// 404 + 错误处理器
 // ---------------------------------------------------------------------------
 
 app.use((req, res) => {
@@ -576,7 +576,7 @@ app.use((err, req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// Socket.IO signaling — mesh P2P (unchanged protocol core)
+// Socket.IO 信令——mesh P2P（协议核心未变）
 // ---------------------------------------------------------------------------
 
 registerSignaling(io, {
@@ -595,7 +595,7 @@ registerSignaling(io, {
 });
 
 // ---------------------------------------------------------------------------
-// Start
+// 启动
 // ---------------------------------------------------------------------------
 
 server.listen(port, null, () => {
@@ -622,7 +622,7 @@ server.listen(port, null, () => {
 });
 
 /**
- * Get ip (honours trust proxy settings)
+ * 获取 IP（遵循 trust proxy 设置）
  */
 function getIP(req) {
     return req.ip || (req.socket && req.socket.remoteAddress);
@@ -638,8 +638,8 @@ process.on('SIGTERM', () => {
     process.exit();
 });
 
-// A rejected async socket handler must never take the whole process down
-// (Node >= 15 terminates on unhandled rejections): log and keep serving.
+// 被 reject 的异步 socket 处理器绝不能带崩整个进程
+// （Node >= 15 遇未处理 rejection 会终止）：记日志并继续服务。
 process.on('unhandledRejection', (reason) => {
     log.error(
         'Unhandled promise rejection',

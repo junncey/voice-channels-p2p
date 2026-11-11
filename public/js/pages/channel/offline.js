@@ -1,10 +1,10 @@
 /*
-Offline banner — a slim danger-tinted strip pinned to the top of the channel
-page while navigator.onLine is false. Losing the network here kills the socket
-AND every DataChannel at once, so the strip explains why nothing responds
-while recovery.js keeps retrying underneath. Purely informational: it owns no
-state and drives no reconnect logic — online/offline events flip it, that's
-all. Reuses the update-bar layout from base.css.
+离线横幅 —— navigator.onLine 为 false 时，钉在频道页顶部的
+窄条警示。这里断网会同时杀掉 socket 和全部 DataChannel，
+横幅用来解释为什么一切都没有响应，而 recovery.js 仍在
+底层持续重试。纯信息展示：不持有状态、不驱动任何
+重连逻辑 —— online/offline 事件翻转它，仅此而已。
+复用 base.css 的更新条布局。
 */
 
 export function createOfflineBanner({ t }) {

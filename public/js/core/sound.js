@@ -1,13 +1,13 @@
 /**
- * Operation sound effects — short chimes for channel activity: peer join /
- * leave, incoming chat messages, mic on/off feedback. Built-in files ship in
- * /sounds (taken from upstream MiroTalk); every event can be re-pointed at
- * another built-in or at a user-uploaded audio file. Custom files are kept
- * ONLY in this browser's localStorage (validated data:audio/ URLs) and are
- * never sent to the server or other peers.
+ * 操作音效——频道活动的短提示音：peer 加入/离开、
+ * 收到聊天消息、麦克风开/关反馈。内置文件位于 /sounds
+ * （取自上游 MiroTalk）；每个事件都可以改指向另一个内置音
+ * 或用户上传的音频文件。自定义文件只保存在本浏览器的
+ * localStorage（经校验的 data:audio/ URL），
+ * 绝不发送到服务器或其他 peer。
  *
- * Settings (vc_sound_settings): { enabled, volume, events: { peerJoin: { on,
- * sound, custom }, … } } — sound is a library file name or 'custom'.
+ * 设置（vc_sound_settings）：{ enabled, volume, events: { peerJoin: { on,
+ * sound, custom }, … } } — sound 是库文件名或 'custom'。
  */
 
 import { createDropdown } from '/js/core/dropdown.js';
@@ -15,13 +15,13 @@ import { t } from '/js/core/i18n.js';
 import { $, el } from '/js/core/utils.js';
 
 const SETTINGS_KEY = 'vc_sound_settings';
-const CUSTOM_MAX_BYTES = 512 * 1024; // uploaded sound file size cap
-const CUSTOM_MAX_CHARS = 700 * 1024; // its base64 data URL length cap
-// only ever handed to new Audio() as a source — but validate anyway so a
-// hand-edited localStorage value can't smuggle in a non-audio URL
+const CUSTOM_MAX_BYTES = 512 * 1024; // 上传音效文件的大小上限
+const CUSTOM_MAX_CHARS = 700 * 1024; // 其 base64 data URL 长度上限
+// 只会作为源交给 new Audio()——但仍然校验，
+// 防止手改过的 localStorage 值夹带非音频 URL
 const AUDIO_DATA_URL_RE = /^data:audio\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/;
 
-/** Built-in sound library — file names under /sounds (from upstream MiroTalk). */
+/** 内置音效库——/sounds 下的文件名（来自上游 MiroTalk）。 */
 export const SOUND_LIBRARY = [
     'addPeer',
     'removePeer',
@@ -38,7 +38,7 @@ export const SOUND_LIBRARY = [
     'eject',
 ];
 
-/** App events that can chime, and their default library sound. */
+/** 可发声的应用事件及其默认库音效。 */
 export const SOUND_EVENTS = [
     { key: 'peerJoin', sound: 'addPeer', label: 'sound.eventPeerJoin' },
     { key: 'peerLeave', sound: 'removePeer', label: 'sound.eventPeerLeave' },
@@ -52,12 +52,12 @@ const PLAY_SVG =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>';
 
 let settings = loadSettings();
-let sinkRouter = null; // (audioEl) => void, routes playback to the selected speaker
-let uploadTarget = null; // event key awaiting the custom-sound file picker
-let fileInputEl = null; // hidden <input type="file"> for custom sound uploads
+let sinkRouter = null; // (audioEl) => void，把播放路由到选中的扬声器
+let uploadTarget = null; // 等待自定义音效文件选择器的事件键
+let fileInputEl = null; // 用于自定义音效上传的隐藏 <input type="file">
 
 // ---------------------------------------------------------------------------
-// settings persistence
+// 设置持久化
 // ---------------------------------------------------------------------------
 
 function defaultSettings() {
@@ -105,12 +105,12 @@ function saveSettings() {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
         return true;
     } catch {
-        return false; // storage full / disabled — settings live for this session only
+        return false; // 存储已满/被禁用——设置仅在本会话内有效
     }
 }
 
 // ---------------------------------------------------------------------------
-// playback
+// 播放
 // ---------------------------------------------------------------------------
 
 function sourceFor(eventKey) {
@@ -123,9 +123,9 @@ function sourceFor(eventKey) {
 }
 
 /**
- * Play an event's chime. { force } bypasses the master/per-event switches
- * (used by the settings preview) but never throws — a blocked autoplay or a
- * missing file just stays silent.
+ * 播放某事件的提示音。{ force } 绕过总开关/单事件开关
+ * （设置预览用），但绝不抛错——自动播放被拦或文件缺失
+ * 只会静默无声。
  */
 export function playSound(event, { force = false } = {}) {
     const ev = settings.events[event];
@@ -139,14 +139,14 @@ export function playSound(event, { force = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// settings UI (channel settings modal)
+// 设置 UI（频道设置弹窗）
 // ---------------------------------------------------------------------------
 
 /**
- * Wire the sound section of the channel settings modal. Call after initI18n.
+ * 绑定频道设置弹窗的音效区块。在 initI18n 之后调用。
  * @param {object} options
- * @param {function(HTMLAudioElement):void} options.applySink route playback to the selected output device
- * @param {function(string,string):void} options.toast error reporting (message, kind)
+ * @param {function(HTMLAudioElement):void} options.applySink 把播放路由到选中的输出设备
+ * @param {function(string,string):void} options.toast 错误上报（message, kind）
  */
 export function initSoundSettings({ applySink = null, toast = () => {} } = {}) {
     sinkRouter = applySink;
@@ -171,7 +171,7 @@ export function initSoundSettings({ applySink = null, toast = () => {} } = {}) {
     document.body.append(fileInputEl);
     fileInputEl.addEventListener('change', async () => {
         const file = fileInputEl.files?.[0];
-        fileInputEl.value = ''; // allow re-picking the same file
+        fileInputEl.value = ''; // 允许重复选择同一个文件
         const target = uploadTarget;
         uploadTarget = null;
         if (!file || !target) return;
@@ -235,7 +235,7 @@ function renderEventRows() {
     );
 }
 
-/** Store a user-picked audio file as this event's custom sound. '' = ok. */
+/** 把用户选择的音频文件存为该事件的自定义音效。'' = 成功。 */
 async function importCustomSound(eventKey, file) {
     if (!file.type.startsWith('audio/')) return 'sound.unsupported';
     if (file.size > CUSTOM_MAX_BYTES) return 'sound.tooLarge';
@@ -251,9 +251,9 @@ async function importCustomSound(eventKey, file) {
     settings.events[eventKey].custom = dataUrl;
     settings.events[eventKey].sound = 'custom';
     if (!saveSettings()) {
-        settings.events[eventKey] = previous; // quota exceeded — don't keep what wasn't stored
+        settings.events[eventKey] = previous; // 配额超限——没存进去的就别保留
         return 'sound.storageFull';
     }
-    playSound(eventKey, { force: true }); // immediate confirmation
+    playSound(eventKey, { force: true }); // 即时确认
     return '';
 }

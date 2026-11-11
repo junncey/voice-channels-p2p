@@ -1,9 +1,9 @@
 /* ============================================================
-   Design tokens — voice channel edition
+   设计令牌 — 语音频道版
    ============================================================ */
 
 :root {
-    /* surfaces */
+    /* 表面色 */
     --bg-0: #0d1117;
     --bg-1: #131a23;
     --bg-2: #1a2330;
@@ -11,46 +11,46 @@
     --border: #2a3648;
     --border-soft: #202a39;
 
-    /* text */
+    /* 文字色 */
     --text-1: #e9eef6;
     --text-2: #9fabbd;
     --text-3: #67748a;
 
-    /* accent (speaking / online) */
+    /* 强调色（说话中 / 在线） */
     --accent: #3ddc97;
     --accent-strong: #5ceaa9;
     --accent-dim: rgba(61, 220, 151, 0.14);
     --accent-glow: rgba(61, 220, 151, 0.45);
 
-    /* status */
+    /* 状态色 */
     --danger: #ff7a76;
     --danger-dim: rgba(255, 122, 118, 0.14);
     --warn: #ffc45e;
     --warn-dim: rgba(255, 196, 94, 0.14);
     --info: #6cb2ff;
 
-    /* geometry */
+    /* 几何尺寸 */
     --radius-s: 8px;
     --radius-m: 12px;
     --radius-l: 18px;
     --header-h: 60px;
 
-    /* effects */
+    /* 效果 */
     --shadow-1: 0 10px 32px rgba(0, 0, 0, 0.38);
     --speed: 0.18s;
     --ease: cubic-bezier(0.33, 1, 0.68, 1);
 
-    /* type */
+    /* 字体 */
     --font:
         system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
         'Noto Sans SC', sans-serif;
     --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
 }
 
-/* Light theme — QQ-style white/blue. Dark (above) stays the default;
-   the choice is applied pre-paint by /js/core/theme-boot.js */
+/* 浅色主题 — QQ 风格白/蓝。深色（上方）仍是默认；
+   主题选择由 /js/core/theme-boot.js 在首帧绘制前应用 */
 html[data-theme='light'] {
-    /* surfaces */
+    /* 表面色 */
     --bg-0: #e8ecf2;
     --bg-1: #f2f4f8;
     --bg-2: #ffffff;
@@ -58,24 +58,24 @@ html[data-theme='light'] {
     --border: #d8dfe9;
     --border-soft: #e7ebf2;
 
-    /* text */
+    /* 文字色 */
     --text-1: #1a1f28;
     --text-2: #5b6472;
     --text-3: #99a2b0;
 
-    /* accent (QQ blue) */
+    /* 强调色（QQ 蓝） */
     --accent: #0099ff;
     --accent-strong: #0077e6;
     --accent-dim: rgba(0, 153, 255, 0.12);
     --accent-glow: rgba(0, 153, 255, 0.35);
 
-    /* status */
+    /* 状态色 */
     --danger: #e5484d;
     --danger-dim: rgba(229, 72, 77, 0.12);
     --warn: #b97e0f;
     --warn-dim: rgba(255, 179, 0, 0.15);
     --info: #2f7fd6;
 
-    /* effects */
+    /* 效果 */
     --shadow-1: 0 10px 32px rgba(23, 34, 51, 0.12);
 }

@@ -1,5 +1,5 @@
 /* ============================================================
-   Base reset + shared components
+   基础重置 + 共享组件
    ============================================================ */
 
 *,
@@ -74,7 +74,7 @@ select {
     background: var(--accent-dim);
 }
 
-/* scrollbars */
+/* 滚动条 */
 * {
     scrollbar-width: thin;
     scrollbar-color: var(--bg-3) transparent;
@@ -94,7 +94,7 @@ select {
     background: transparent;
 }
 
-/* ---------- buttons ---------- */
+/* ---------- 按钮 ---------- */
 
 .btn {
     display: inline-flex;
@@ -161,7 +161,7 @@ select {
     cursor: not-allowed;
 }
 
-/* ---------- inputs ---------- */
+/* ---------- 输入框 ---------- */
 
 .input {
     width: 100%;
@@ -200,7 +200,7 @@ select {
     color: var(--text-3);
 }
 
-/* ---------- badges ---------- */
+/* ---------- 徽章 ---------- */
 
 .badge {
     display: inline-flex;
@@ -234,7 +234,7 @@ select {
     color: var(--accent);
 }
 
-/* ---------- overlay / modal ---------- */
+/* ---------- 遮罩 / 弹窗 ---------- */
 
 .overlay {
     position: fixed;
@@ -271,10 +271,10 @@ select {
     margin-top: 6px;
 }
 
-/* ---------- update bar (soft prompt, in flow so it never covers content) ---------- */
+/* ---------- 更新提示条（软提示，占据文档流因而绝不遮挡内容） ---------- */
 
 .update-bar {
-    /* the channel page body is a flex column — never squeeze the bar away */
+    /* 频道页 body 是 flex 纵向布局 — 绝不能让提示条被挤压掉 */
     flex: 0 0 auto;
     position: relative;
     display: flex;
@@ -333,15 +333,15 @@ select {
     color: var(--text-1);
 }
 
-/* offline strip (channel page) — update-bar layout, danger palette, no close
-   button: it disappears on its own when the network returns */
+/* 离线横条（频道页）— 更新条布局、危险配色、无关闭按钮：
+   网络恢复后自行消失 */
 .offline-bar {
     padding-right: 16px;
     background: var(--danger-dim);
     color: var(--text-1);
 }
 
-/* ---------- toasts ---------- */
+/* ---------- 轻提示 ---------- */
 
 .toasts {
     position: fixed;
@@ -384,7 +384,7 @@ select {
     color: var(--accent);
 }
 
-/* ---------- misc ---------- */
+/* ---------- 杂项 ---------- */
 
 .hidden {
     display: none !important;
@@ -419,7 +419,7 @@ select {
     }
 }
 
-/* ---------- light theme overrides (dark stays the default) ---------- */
+/* ---------- 浅色主题覆盖（深色仍为默认） ---------- */
 
 html[data-theme='light'] body {
     background:
@@ -427,8 +427,8 @@ html[data-theme='light'] body {
         radial-gradient(900px 380px at 95% 0%, rgba(0, 153, 255, 0.04), transparent 55%), var(--bg-0);
 }
 
-/* primary keeps white text on its solid blue; danger reads red-on-tint at
-   rest in light mode — its dim background is far too pale for white text */
+/* primary 在纯色蓝底上保持白字；浅色模式下 danger 静置时是淡底红字 —
+   其暗淡底色太浅，衬白字不可读 */
 html[data-theme='light'] .btn.primary {
     color: #fff;
 }

@@ -1,8 +1,8 @@
 'use strict';
 
 // npx mocha test-opusFmtp.js
-// mungeOpusFmtp lives in a browser ES module — import it dynamically via its
-// file URL (the package itself stays CommonJS).
+// mungeOpusFmtp 位于浏览器 ES 模块——经其 file URL 动态导入
+// （包本身保持 CommonJS）。
 
 require('should');
 const { pathToFileURL } = require('url');
@@ -43,26 +43,26 @@ describe('test-opusFmtp', () => {
     });
 
     it('should remove params set to null — mode switches leave no residue', () => {
-        // voice first: usedtx negotiated onto the live connection…
+        // 先语音：usedtx 协商到活连接上…
         const voice = mungeOpusFmtp(SDP, { maxaveragebitrate: 64000, usedtx: 1, stereo: null });
         voice.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=64000;usedtx=1');
-        // …then music on the SAME connection (a later offer munges over the
-        // previous local description): usedtx must be gone, not lingering
+        // …再在同一条连接上切音乐（后续 offer 会改写上一个 local
+        // description）：usedtx 必须消失，不能残留
         const music = mungeOpusFmtp(voice, { maxaveragebitrate: 192000, stereo: 1, usedtx: null });
         music.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000;stereo=1');
         music.should.not.containEql('usedtx');
-        // …and back to voice: stereo must be gone too
+        // …再切回语音：stereo 也必须消失
         const voiceAgain = mungeOpusFmtp(music, { maxaveragebitrate: 64000, usedtx: 1, stereo: null });
         voiceAgain.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=64000;usedtx=1');
         voiceAgain.should.not.containEql('stereo');
     });
 
     it('should negotiate both stereo declarations in music mode (sprop-stereo)', () => {
-        // Chrome only encodes true stereo when the decoder (stereo=1) AND the
-        // sent stream (sprop-stereo=1) are both declared — mirror the exact
-        // param set channel.js opusFmtp() emits for music mode with a stereo
-        // capture. FEC rides in music mode too (cheap at high rates), DTX stays
-        // off.
+        // Chrome 只有在解码端（stereo=1）与发送流（sprop-stereo=1）同时声明时
+        // 才会编码真立体声——完全复刻 channel.js opusFmtp() 在立体声采样的
+        // 音乐模式下发出的参数集。
+        // FEC 在音乐模式下也保留（高码率下代价很小），
+        // DTX 保持关闭。
         const music = mungeOpusFmtp(SDP, {
             maxaveragebitrate: 192000,
             stereo: 1,
@@ -74,7 +74,7 @@ describe('test-opusFmtp', () => {
             'a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000;stereo=1;sprop-stereo=1'
         );
         music.should.not.containEql('usedtx');
-        // …and back to voice: BOTH stereo declarations must leave together
+        // …再切回语音：两处 stereo 声明必须一起消失
         const voice = mungeOpusFmtp(music, {
             maxaveragebitrate: 64000,
             usedtx: 1,
@@ -87,9 +87,9 @@ describe('test-opusFmtp', () => {
     });
 
     it('should drop both stereo declarations in music mode when the mic is mono', () => {
-        // watchMicHealth flips settings.micChannels to 1 for mono captures:
-        // the music dict then states stereo:null/'sprop-stereo':null so the
-        // encoder ships mono at full per-channel rate instead of dual-mono
+        // watchMicHealth 对单声道采样会把 settings.micChannels 置为 1：
+        // 此时音乐模式字典声明 stereo:null/'sprop-stereo':null，让编码器
+        // 以单声道全每声道码率输出，而不是双单声道
         const monoMusic = mungeOpusFmtp(SDP, {
             maxaveragebitrate: 192000,
             stereo: null,
@@ -100,7 +100,7 @@ describe('test-opusFmtp', () => {
         monoMusic.should.containEql('a=fmtp:111 minptime=10;useinbandfec=1;maxaveragebitrate=192000');
         monoMusic.should.not.containEql('stereo');
         monoMusic.should.not.containEql('usedtx');
-        // …a stereo mic lands mid-call: both declarations must arrive together
+        // …通话中途插入立体声麦克风：两处声明必须同时出现
         const stereoMusic = mungeOpusFmtp(monoMusic, {
             maxaveragebitrate: 192000,
             stereo: 1,
@@ -114,10 +114,10 @@ describe('test-opusFmtp', () => {
     });
 
     it('should keep FEC across the voice↔music mode switch', () => {
-        // Chrome only sends Opus inband FEC when the receiving side negotiated
-        // useinbandfec — mirror the exact voice dict from channel.js opusFmtp()
-        // applied to an SDP that never carried the parameter; music mode keeps
-        // it (a sliver of 192k headroom buys continuity on lossy links)
+        // Chrome 只有在接收端协商了 useinbandfec 时才会发送 Opus inband FEC
+        // ——复刻 channel.js opusFmtp() 的语音模式字典，套在一个从未带过该
+        // 参数的 SDP 上；音乐模式保留 FEC（用一点点 192k 余量换取易丢包
+        // 链路上的连续性）
         const noFec = SDP.replace(';useinbandfec=1', '');
         const voice = mungeOpusFmtp(noFec, {
             maxaveragebitrate: 64000,
@@ -127,7 +127,7 @@ describe('test-opusFmtp', () => {
             'sprop-stereo': null,
         });
         voice.should.containEql('a=fmtp:111 minptime=10;maxaveragebitrate=64000;usedtx=1;useinbandfec=1');
-        // …music on the SAME connection: DTX leaves, FEC and stereo stay
+        // …同一条连接上切音乐：DTX 撤走，FEC 与 stereo 保留
         const music = mungeOpusFmtp(voice, {
             maxaveragebitrate: 192000,
             stereo: 1,

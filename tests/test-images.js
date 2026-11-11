@@ -1,10 +1,10 @@
 'use strict';
 
 // npx mocha test-images.js
-// Image transfer protocol: chunk roundtrip through the receiver, the sender's
-// backpressure pump (the `ready` hook awaited between chunk bursts) and the
-// no-progress timeout (progress re-arms it, a stall still fails promptly).
-// Browser ES module imported via its file URL, same pattern as test-opusFmtp.
+// 图片传输协议：分块经接收端回环、发送端背压泵（分块爆发之间 await
+// `ready` 钩子）以及无进展超时（有进展就重置计时，真停滞仍快速失败）。
+// 浏览器 ES 模块经其 file URL 导入，
+// 与 test-opusFmtp 同一套路。
 
 require('should');
 const { pathToFileURL } = require('url');
@@ -22,7 +22,7 @@ describe('test-images (DC image protocol)', () => {
     });
 
     it('should round-trip a multi-chunk image through the receiver', async () => {
-        const base64 = 'Q'.repeat(100 * 1024); // 9 chunks at 12KB each
+        const base64 = 'Q'.repeat(100 * 1024); // 每块 12KB，共 9 块
         const dataUrl = `data:image/png;base64,${base64}`;
         const frames = [];
         await sendImageData({ send: (f) => frames.push(f), from: 'alice', mime: 'image/png', dataUrl, batch: 'b1' });
@@ -42,11 +42,11 @@ describe('test-images (DC image protocol)', () => {
         done.should.be.ok();
         done.dataUrl.should.equal(dataUrl);
         done.batch.should.equal('b1');
-        done.peerId.should.equal('peer1'); // trusted over the self-declared from
+        done.peerId.should.equal('peer1'); // 以信任的 socket 来源为准，而非自报的 from
     });
 
     it('should pump the backpressure hook between chunk bursts', async () => {
-        const dataUrl = `data:image/png;base64,${'Q'.repeat(100 * 1024)}`; // 9 chunks
+        const dataUrl = `data:image/png;base64,${'Q'.repeat(100 * 1024)}`; // 9 块
         let readyCalls = 0;
         const order = [];
         await sendImageData({
@@ -59,17 +59,17 @@ describe('test-images (DC image protocol)', () => {
             mime: 'image/png',
             dataUrl,
         });
-        // every 4th chunk awaits the drain hook: chunks 0-3, then ready, …
+        // 每 4 个分块 await 一次排空钩子：分块 0-3，然后 ready，…
         readyCalls.should.equal(2);
         order.indexOf('ready').should.be.above(0);
-        order.indexOf('ready').should.be.below(order.length - 1); // interleaved, not batched at the end
+        order.indexOf('ready').should.be.below(order.length - 1); // 交织在中间，而非攒到最后批量执行
     });
 
     it('should stay effectively synchronous without a hook', async () => {
-        const dataUrl = `data:image/png;base64,${'Q'.repeat(24 * 1024)}`; // 2 chunks
+        const dataUrl = `data:image/png;base64,${'Q'.repeat(24 * 1024)}`; // 2 块
         const frames = [];
         await sendImageData({ send: (f) => frames.push(f), from: 'a', mime: 'image/png', dataUrl });
-        frames.should.have.length(4); // start + 2 chunks + end
+        frames.should.have.length(4); // start + 2 个分块 + end
     });
 
     it('should fail a stalled transfer on the no-progress timeout', async () => {
@@ -82,10 +82,10 @@ describe('test-images (DC image protocol)', () => {
         receive({ type: 'img-start', id: 't1', from: 'a', mime: 'image/png', size: 1000, total: 1 }, 'peer1');
         await sleep(300);
         failed.should.equal('timeout');
-        // the entry is gone: a late img-end cannot resurrect it
+        // 条目已被清除：迟到的 img-end 无法将其复活
         receive({ type: 'img-end', id: 't1', from: 'a' }, 'peer1');
         await sleep(50);
-        failed.should.equal('timeout'); // still the timeout, not a second verdict
+        failed.should.equal('timeout'); // 仍是超时，而不是二次判定
     });
 
     it('should keep a slow-but-alive transfer past the initial window (progress re-arms)', async () => {
@@ -96,12 +96,12 @@ describe('test-images (DC image protocol)', () => {
             onFail: (reason) => (failed = reason),
             stallMs: 200,
         });
-        const base64 = 'A'.repeat(20 * 1024); // 2 chunks
+        const base64 = 'A'.repeat(20 * 1024); // 2 块
         receive({ type: 'img-start', id: 't2', from: 'a', mime: 'image/png', size: base64.length, total: 2 }, 'peer1');
-        await sleep(150); // 150 < 200: inside the first window
+        await sleep(150); // 150 < 200：还在第一个窗口期内
         receive({ type: 'img-chunk', id: 't2', i: 0, d: base64.slice(0, 12 * 1024) }, 'peer1');
-        await sleep(150); // 300 since start, but only 150 since the last chunk
-        should(failed).be.null(); // the old fixed 200ms window would have killed it
+        await sleep(150); // 距 start 已 300ms，但距最后一个分块只有 150ms
+        should(failed).be.null(); // 旧的固定 200ms 窗口会把它误杀
         receive({ type: 'img-chunk', id: 't2', i: 1, d: base64.slice(12 * 1024) }, 'peer1');
         receive({ type: 'img-end', id: 't2', from: 'a' }, 'peer1');
         should(failed).be.null();

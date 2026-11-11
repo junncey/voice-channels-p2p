@@ -1,14 +1,14 @@
-/* Applied synchronously in <head> (CSP forbids inline scripts) so the
- * correct palette is on <html> before the first paint — no dark flash
- * when a light-theme user loads a page. Preference values: 'dark' (default),
- * 'light', 'auto' (= follow the OS, live). */
+/* 在 <head> 中同步执行（CSP 禁止内联脚本），让正确的配色
+ * 在首次绘制前就落到 <html> 上——浅色主题用户加载页面时
+ * 不会闪一下深色。偏好取值：'dark'（默认）、
+ * 'light'、'auto'（= 跟随操作系统，实时）。 */
 (function () {
     var pref = 'dark';
     try {
         var stored = localStorage.getItem('vc_theme');
         if (stored === 'light' || stored === 'dark' || stored === 'auto') pref = stored;
     } catch (e) {
-        /* private mode etc. — stay on the default */
+        /* 隐私模式等——保持默认 */
     }
     function resolve() {
         if (pref !== 'auto') return pref;
@@ -31,16 +31,16 @@
         if (mq.addEventListener) mq.addEventListener('change', onChange);
         else if (mq.addListener) mq.addListener(onChange);
     } catch (e) {
-        /* no live switching on this engine — the next reload re-resolves */
+        /* 该引擎不支持实时切换——下次刷新时重新解析 */
     }
 
-    /* Service worker (offline shell + cached assets) — registered after load
-     * so it never competes with first paint. Best-effort: every page works
-     * without it. Strategy lives in /sw.js. */
+    /* SW（离线 shell + 缓存资产）——在 load 之后注册，
+     * 因此绝不与首次绘制争抢。尽力而为：没有它每个页面
+     * 照常工作。策略在 /sw.js。 */
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', function () {
             navigator.serviceWorker.register('/sw.js').catch(function (e) {
-                /* unsupported/blocked — the plain HTTP path is unaffected */
+                /* 不支持/被拦截——普通 HTTP 路径不受影响 */
             });
         });
     }
