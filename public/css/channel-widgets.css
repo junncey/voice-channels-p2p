@@ -255,6 +255,29 @@
     font-size: 13.5px;
 }
 
+/* 按键说话绑定键行（设置弹窗）：标签左、录制按钮右；录制态呼吸高亮提示等待按键 */
+.ptt-key-row {
+    justify-content: space-between;
+    margin: 2px 0 6px;
+}
+
+.ptt-key-row .btn {
+    min-width: 88px;
+    text-align: center;
+}
+
+.ptt-key-row .btn.recording {
+    border-color: var(--accent);
+    color: var(--accent);
+    animation: ptt-key-rec 1.2s ease-in-out infinite;
+}
+
+@keyframes ptt-key-rec {
+    50% {
+        opacity: 0.55;
+    }
+}
+
 .volume-row input[type='range'] {
     flex: 1;
     accent-color: var(--accent);

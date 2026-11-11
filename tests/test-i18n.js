@@ -43,4 +43,26 @@ describe('test-i18n (dictionary parity)', () => {
             placeholders(zh[key]).should.equal(placeholders(en[key]), `placeholder mismatch at ${key}`);
         }
     });
+
+    // parity alone can't catch a key missing from BOTH dictionaries — the
+    // PTT key-binding UI and keyLabel() degrade silently without these
+    it('should carry the PTT binding and key-label entries in both dictionaries', () => {
+        for (const key of [
+            'settings.pttKey',
+            'settings.pttKeyRecord',
+            'settings.pttKeyInvalid',
+            'settings.pushToTalkHint',
+            'channel.pttOn',
+            'key.space',
+            'key.tab',
+            'key.capsLock',
+            'key.backquote',
+            'key.enter',
+            'key.numpadEnter',
+            'key.numpad',
+        ]) {
+            should.exist(zh[key], `zh is missing ${key}`);
+            should.exist(en[key], `en is missing ${key}`);
+        }
+    });
 });

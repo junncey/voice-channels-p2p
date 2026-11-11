@@ -486,7 +486,11 @@
                             <span data-i18n="settings.pushToTalk">按键通话</span>
                             <input type="checkbox" id="pttToggle" class="switch" />
                         </label>
-                        <p class="settings-hint" data-i18n="settings.pushToTalkHint">开启后默认闭麦，按住 V 键说话</p>
+                        <div class="volume-row ptt-key-row">
+                            <span data-i18n="settings.pttKey">说话按键</span>
+                            <button type="button" id="pttKeyBtn" class="btn ghost sm">V</button>
+                        </div>
+                        <p class="settings-hint" id="pttHint">开启后默认闭麦，按住 V 说话</p>
                         <button type="button" id="testMicBtn" class="btn ghost sm" data-i18n="settings.testMic">
                             测试麦克风
                         </button>

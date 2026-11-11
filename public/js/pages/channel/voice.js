@@ -11,8 +11,9 @@ cross-module calls via the late-bound `x` surface (both owned by
 channel.js); member-card helpers come through `mem` (members.js).
 */
 
+import { keyLabel, normalizePttKey } from '/js/core/utils.js';
+
 export function createVoice({ s, x, mem, members, audioEls, settings, channelId, screenLock, playSound, t, $, el }) {
-    const PTT_KEY_CODE = 'KeyV';
     let pttActive = false;
     let lastOnAir = false; // last peerStatus(audio) we broadcast
     let lastDeafenSent = null; // last peerStatus(deafen) we broadcast
@@ -24,6 +25,11 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     /** mic is actually transmitting right now */
     function onAir() {
         return !!s.localStream && s.micOn && (!settings.ptt || pttActive);
+    }
+
+    /** micBtn title while PTT mode is on — shows the user's bound key. */
+    function pttTitle() {
+        return t('channel.pttOn', { key: keyLabel(normalizePttKey(settings.pttKey)) });
     }
 
     /**
@@ -156,7 +162,10 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
                 }
                 return;
             }
-            if (event.code !== PTT_KEY_CODE || event.repeat) return;
+            // the bound key only counts as PTT when pressed ALONE — Ctrl/Cmd/Alt
+            // + key are shortcut territory (Ctrl+V paste must never open the mic)
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            if (event.code !== normalizePttKey(settings.pttKey) || event.repeat) return;
             if (!settings.ptt || !s.joined || !s.localStream || !s.micOn) return;
             const target = event.target;
             if (
@@ -172,7 +181,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             applyMicState();
         });
         window.addEventListener('keyup', (event) => {
-            if (event.code !== PTT_KEY_CODE || !pttActive) return;
+            if (event.code !== normalizePttKey(settings.pttKey) || !pttActive) return;
             pttActive = false;
             applyMicState();
         });
@@ -460,7 +469,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             mem.setIconBtn(micBtn, mem.MIC_OFF_SVG, t('channel.enableVoice'));
         } else if (s.micOn && settings.ptt) {
             micBtn.classList.toggle('muted', !live);
-            mem.setIconBtn(micBtn, live ? mem.MIC_ON_SVG : mem.MIC_OFF_SVG, t('channel.pttOn'));
+            mem.setIconBtn(micBtn, live ? mem.MIC_ON_SVG : mem.MIC_OFF_SVG, pttTitle());
         } else if (s.micOn) {
             micBtn.classList.remove('muted');
             mem.setIconBtn(micBtn, mem.MIC_ON_SVG, t('channel.micOn'));

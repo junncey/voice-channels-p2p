@@ -6,6 +6,7 @@ Shared page state arrives via the `s` accessor object, cross-module calls
 via the late-bound `x` surface (both owned by channel.js); member-card
 helpers come through `mem` (members.js).
 */
+import { isModifierCode, keyLabel, normalizePttKey } from '/js/core/utils.js';
 
 export function createSettings({
     s,
@@ -105,6 +106,7 @@ export function createSettings({
             saveAudioSettings();
             x.applyMicState();
         });
+        bindPttKeyUi();
 
         $('#micVolumeSlider').addEventListener('input', (event) => {
             settings.micVolume = Number(event.target.value) / 100;
@@ -148,9 +150,63 @@ export function createSettings({
         });
     }
 
+    // ----- PTT 绑定键：点击按钮进入录制态，按下任意单键即完成绑定 -----
+    // 录制监听挂在 window 的 capture 阶段并吞掉事件，抢在（bubble 阶段的）
+    // voice.js 全局 PTT/Ctrl+M 处理器之前，录制中的按键不会误开麦。
+
+    let pttRecording = false;
+
+    /** 按钮与提示文案的当前态回显：录制中显示等待提示，否则显示键名。 */
+    function reflectPttKey() {
+        const key = keyLabel(normalizePttKey(settings.pttKey));
+        $('#pttKeyBtn').textContent = pttRecording ? t('settings.pttKeyRecord') : key;
+        $('#pttKeyBtn').classList.toggle('recording', pttRecording);
+        $('#pttHint').textContent = t('settings.pushToTalkHint', { key });
+    }
+
+    function stopPttRecording() {
+        if (!pttRecording) return;
+        pttRecording = false;
+        window.removeEventListener('keydown', onPttKeyRecord, true);
+        reflectPttKey();
+    }
+
+    function onPttKeyRecord(event) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.code === 'Escape') {
+            stopPttRecording();
+            return;
+        }
+        // 纯修饰键单独按住、或带着 Ctrl/Cmd/Alt 的组合键都构不成说话键——
+        // 提示后继续等待下一个按键
+        if (isModifierCode(event.code) || event.ctrlKey || event.metaKey || event.altKey) {
+            toast(t('settings.pttKeyInvalid'), 'warn');
+            return;
+        }
+        settings.pttKey = event.code;
+        saveAudioSettings();
+        stopPttRecording();
+        x.applyMicState(); // 连带刷新 micBtn 悬停文案里的键名
+    }
+
+    function bindPttKeyUi() {
+        $('#pttKeyBtn').addEventListener('click', () => {
+            if (pttRecording) {
+                stopPttRecording();
+                return;
+            }
+            pttRecording = true;
+            reflectPttKey();
+            window.addEventListener('keydown', onPttKeyRecord, true);
+        });
+    }
+
     function openSettings() {
         updateAvatarPreview();
         reflectMusicMode();
+        stopPttRecording();
+        reflectPttKey();
         $('#pttToggle').checked = settings.ptt;
         $('#notifyToggle').checked = x.isNotifyEnabled();
         spkDropdown.setDisabled(!sinkSupported);
@@ -194,6 +250,7 @@ export function createSettings({
     }
 
     function closeSettings() {
+        stopPttRecording();
         micDropdown?.close();
         spkDropdown?.close();
         $('#settingsModal').classList.add('hidden');

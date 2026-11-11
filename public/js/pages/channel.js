@@ -79,6 +79,7 @@ const defaultAudioSettings = {
     echoCancellation: true,
     autoGainControl: true,
     ptt: false,
+    pttKey: 'KeyV', // 按键说话的绑定键（event.code，用户可在设置里录制替换）
     musicMode: false,
     opusBitrate: 64, // encoder cap in kbps (BITRATE_MIN..BITRATE_MAX)
     micChannels: 1, // channels the CURRENT capture actually delivers (1|2, refreshed by watchMicHealth)
