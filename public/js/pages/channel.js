@@ -637,7 +637,7 @@ function bindUi() {
     });
     $('#micBtn').addEventListener('click', voice.onMicBtnClick);
     $('#deafenBtn').addEventListener('click', voice.toggleDeafen);
-    $('#shareSoundBtn').addEventListener('click', () => (shareSound.active() ? shareSound.stop() : shareSound.start()));
+    voice.bindShareSoundButton();
     voice.bindPttHoldButton();
     $('#chatForm').addEventListener('submit', composer.onChatSubmit);
     composer.bindChatInput();

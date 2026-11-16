@@ -223,6 +223,98 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         btn.addEventListener('contextmenu', (event) => event.preventDefault());
     }
 
+    // ----- 「一起听」按钮：空闲时先选来源，共享中点击即停止 -----
+    // 菜单开合模型与 composer 的发送键菜单一致（点按钮开合、点外
+    // 部 / Esc 收起）。条目一走 display 标签页采集；条目二列出本机
+    // 小工具（app-audio-bridge）探测到的「能发声的应用」，点选后频
+    // 道页直接拉流——桌面客户端/游戏专用，本地零重音（编排见
+    // ./share.js，设置步骤见 docs/share-app-audio.md）。
+
+    function bindShareSoundButton() {
+        const btn = $('#shareSoundBtn');
+        const menu = $('#shareSourceMenu');
+        const helperEntry = $('#shareHelperEntry');
+        const helperList = $('#shareHelperList');
+        if (!btn || !menu || !helperEntry || !helperList) return;
+        const toggle = (open) => {
+            menu.classList.toggle('hidden', !open);
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (!open) helperList.classList.add('hidden');
+        };
+        btn.addEventListener('click', () => {
+            if (x.shareSound.active()) return x.shareSound.stop();
+            toggle(menu.classList.contains('hidden'));
+        });
+        menu.querySelector('.share-source-option[data-surface="tab"]')?.addEventListener('click', () => {
+            toggle(false);
+            x.shareSound.start();
+        });
+        // 展开即现取应用列表：小工具按活跃音频会话枚举，正在播放的排最前
+        helperEntry.addEventListener('click', () => {
+            if (helperList.classList.contains('hidden')) {
+                renderHelperList();
+                helperList.classList.remove('hidden');
+            } else {
+                helperList.classList.add('hidden');
+            }
+        });
+        async function renderHelperList() {
+            helperList.replaceChildren(el('div', { class: 'share-helper-empty', text: '…' }));
+            const base = await x.shareSound.findHelper();
+            let apps = null;
+            if (base) {
+                try {
+                    apps = (await (await fetch(`${base}/api/processes`)).json()).apps;
+                } catch {
+                    /* 小工具刚好退出：走未检测提示 */
+                }
+            }
+            if (!apps) {
+                helperList.replaceChildren(
+                    el('div', { class: 'share-helper-empty', text: t('channel.shareHelperMissing') })
+                );
+                return;
+            }
+            if (!apps.length) {
+                helperList.replaceChildren(
+                    el('div', { class: 'share-helper-empty', text: t('channel.shareHelperNoApp') })
+                );
+                return;
+            }
+            helperList.replaceChildren(
+                ...apps.map((app) =>
+                    el(
+                        'button',
+                        {
+                            type: 'button',
+                            class: 'share-helper-option',
+                            onclick: () => {
+                                toggle(false);
+                                // 播放中的进程已排最前（多进程时取首个会话）
+                                x.shareSound.startHelper(app.pids[0].pid, app.name);
+                            },
+                        },
+                        el('span', { class: 'share-helper-name', text: app.name }),
+                        el('span', {
+                            class: 'share-helper-badge ' + (app.active ? 'on' : 'off'),
+                            text:
+                                t(app.active ? 'channel.shareHelperPlaying' : 'channel.shareHelperIdle') +
+                                (app.pids.length > 1 ? ' ×' + app.pids.length : ''),
+                        })
+                    )
+                )
+            );
+        }
+        document.addEventListener('click', (event) => {
+            if (!menu.classList.contains('hidden') && !menu.contains(event.target) && !btn.contains(event.target)) {
+                toggle(false);
+            }
+        });
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') toggle(false);
+        });
+    }
+
     /** 按住中途 PTT 模式被关掉：释放按键状态。 */
     function resetPtt() {
         pttActive = false;
@@ -627,6 +719,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         broadcastShare,
         bindPttKeys,
         bindPttHoldButton,
+        bindShareSoundButton,
         syncPttHoldButton,
         buildAudioConstraints,
         refreshOutgoingHint,

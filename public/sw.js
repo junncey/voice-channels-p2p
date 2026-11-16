@@ -28,7 +28,9 @@ asset layout changes so activate() drops the old buckets.
 
 'use strict';
 
-const STATIC_CACHE = 'vc-static-v1';
+// v2：频道页新增「一起听 → 本机应用」小工具直连（share/voice/channel
+// 变更 + CSP connect-src 扩容），bump 让存量客户端整体弃用旧静态缓存
+const STATIC_CACHE = 'vc-static-v2';
 const IMAGE_CACHE = 'vc-img-v1';
 const KNOWN_CACHES = [STATIC_CACHE, IMAGE_CACHE];
 

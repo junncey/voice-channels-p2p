@@ -339,7 +339,17 @@ app.use(
             // 待发图片预览（object URL）用 blob:
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:', 'data:'],
-            connectSrc: ["'self'"], // socket.io websocket（同源）已由 'self' 覆盖
+            connectSrc: [
+                "'self'", // socket.io websocket（同源）已由 'self' 覆盖
+                // 「一起听 → 分享本机应用」直连 helper/app-audio-bridge
+                // （本机 8790~8794，被占用时顺延；刻意避开 8765 等
+                // 浏览器受限端口——那些端口上 fetch 直接 ERR_UNSAFE_PORT）
+                'http://127.0.0.1:8790',
+                'http://127.0.0.1:8791',
+                'http://127.0.0.1:8792',
+                'http://127.0.0.1:8793',
+                'http://127.0.0.1:8794',
+            ],
             fontSrc: ["'self'"],
             objectSrc: ["'none'"],
             baseUri: ["'self'"],
