@@ -35,10 +35,12 @@ pub struct SessionWorker {
 impl SessionWorker {
     pub fn spawn() -> Self {
         let (tx, rx) = channel::<Request>();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("audio-enum".into())
-            .spawn(move || worker(rx))
-            .expect("启动音频会话枚举线程");
+            .spawn(move || worker(rx));
+        if spawned.is_err() {
+            crate::fatal("启动音频会话枚举线程失败");
+        }
         Self { tx }
     }
 
@@ -110,7 +112,8 @@ fn enumerate(enumerator: &IMMDeviceEnumerator) -> Result<Vec<SessionInfo>, Strin
             if pid == 0 {
                 continue;
             }
-            let active = matches!(control.GetState(), Ok(state) if state == AudioSessionStateActive);
+            let active =
+                matches!(control.GetState(), Ok(state) if state == AudioSessionStateActive);
             out.push(SessionInfo { pid, active });
         }
         Ok(out)

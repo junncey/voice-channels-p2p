@@ -181,7 +181,7 @@
             'use strict';
             const $ = (id) => document.getElementById(id);
             let mode = 'apps'; // apps = 只列能发声的应用；all = 全部进程
-            let data = { apps: [], all: [] };
+            let data = { apps: [], all: [], fallback: '' };
             const rotation = {}; // 应用名 -> 已点击次数（同名多进程轮换重试）
             const fmt = (n) => (n >= 1024 ? (n / 1024).toFixed(1) + ' GB' : n + ' MB');
 
@@ -191,6 +191,7 @@
                     const next = await res.json();
                     if (next.apps) data.apps = next.apps;
                     if (next.all) data.all = next.all;
+                    if (next.fallback !== undefined) data.fallback = next.fallback;
                     render();
                 } catch {
                     /* 服务重启瞬间忽略 */
@@ -327,6 +328,9 @@
                 try {
                     const res = await fetch('/stream', { signal: playAbort.signal });
                     const reader = res.body.getReader();
+                    // 注意：下面这段「8 字节重对齐 + 丢帧追赶」播放循环与频道页
+                    // public/js/pages/channel/share.js 的 pump 是双份手抄（本页
+                    // 内嵌进 exe、无法共享模块），改动须两处同步
                     let nextTime = 0;
                     let pending = new Uint8Array(0); // read() 按网络任意切割，跨段累积对齐到整帧（8 字节）
                     for (;;) {

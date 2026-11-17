@@ -11,10 +11,10 @@ name = "app-audio-bridge"
 path = "src/main.rs"
 
 [dependencies]
-# HTTP 服务与异步运行时
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-serde = { version = "1", features = ["derive"] }
+# HTTP 服务与异步运行时（特性按实际使用裁剪：无 #[tokio::main]、无 tokio::time、
+# query 解析用 RawQuery——不受 axum feature 门控）
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 serde_json = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 webbrowser = "1"
@@ -41,6 +41,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [profile.release]
+# 切勿加 panic = "abort"：wasapi.rs 的 catch_unwind 兜底（采集线程 panic 转
+# 正常收尾）依赖 unwind，abort 会让任何线程 panic 直接带走整个进程
 lto = "thin"
 codegen-units = 1
 strip = "symbols"

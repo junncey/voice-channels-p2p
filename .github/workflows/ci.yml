@@ -32,3 +32,32 @@ jobs:
 
       - name: Run unit tests
         run: npm test
+
+  # Rust 原生组件（一起听 → 应用音频桥）：仅 Windows 有意义，与 Node job 并行
+  helper-rust:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: helper/app-audio-bridge
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: helper/app-audio-bridge
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test

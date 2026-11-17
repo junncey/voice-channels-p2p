@@ -152,7 +152,9 @@ export function createShareSound(deps) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ pid, name }),
-                signal: AbortSignal.timeout(4000),
+                // 须长于小工具的激活等待（6s）：让服务端先返回真实错误，
+                // 客户端提前放弃会留下无主采集
+                signal: AbortSignal.timeout(8000),
             });
             if (!res.ok) throw new Error('helper rejected');
         } catch {
@@ -166,6 +168,8 @@ export function createShareSound(deps) {
         const pump = (async () => {
             const res = await fetch(`${base}/stream`, { signal: abort.signal });
             const reader = res.body.getReader();
+            // 注意：下面这段「8 字节重组 + 丢帧追赶」播放循环与小工具内嵌页
+            // (helper/app-audio-bridge/src/page.html) 是双份手抄，改动须两处同步
             let pending = new Uint8Array(0); // read() 按网络任意切割，跨段对齐到整帧（8 字节）
             let nextTime = 0;
             for (;;) {

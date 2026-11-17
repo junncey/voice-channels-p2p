@@ -16,10 +16,14 @@ use axum::body::Bytes;
 use tokio::sync::broadcast;
 use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat};
 
-use crate::state::SUB_MAX_CHUNKS;
+use crate::state::{CHANNELS, SAMPLE_RATE, SUB_MAX_CHUNKS};
 
-/// 每帧字节数（float32 × 2ch）
-const BLOCK_ALIGN: usize = 8;
+/// 每帧字节数（float32 × 声道数）——由交付格式常量推导，杜绝手抄漂移
+const BLOCK_ALIGN: usize = CHANNELS as usize * std::mem::size_of::<f32>();
+
+/// 激活结果同步等待上限。须短于频道页 share.js 的 start 客户端超时（8s）：
+/// 保证服务端总是先一步返回真实错误，客户端提前放弃不留下无主采集。
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub struct CaptureHandle {
     pub tx: broadcast::Sender<Bytes>,
@@ -28,7 +32,10 @@ pub struct CaptureHandle {
 
 /// 启动采集线程：激活成功后立即返回句柄，失败同步返回错误；
 /// 采集结束（进程退出 / 底层错误 / stop 置位）后回调 `on_end(原因)`。
-pub fn spawn(pid: u32, on_end: impl Fn(&str) + Send + Sync + 'static) -> Result<CaptureHandle, String> {
+pub fn spawn(
+    pid: u32,
+    on_end: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<CaptureHandle, String> {
     // 预检：对已退出的 pid，激活回调可能永远不来（wasapi crate 无限等待），
     // 先拦下最常见的「应用已关闭」
     if !crate::procinfo::pid_alive(pid) {
@@ -46,10 +53,16 @@ pub fn spawn(pid: u32, on_end: impl Fn(&str) + Send + Sync + 'static) -> Result<
             .name("wasapi-capture".into())
             .spawn(move || {
                 // 激活阶段：成功即向调用方回传，失败也回传（不进采集循环）
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| setup_capture(pid)));
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| setup_capture(pid)));
                 let stream = match outcome {
                     Ok(Ok(stream)) => {
                         let _ = result_tx.send(Ok(()));
+                        // 等待方已超时弃养（stop 已置位）：不进采集循环，直接收尾
+                        if stop.load(Ordering::Relaxed) {
+                            let _ = stream.audio_client.stop_stream();
+                            return;
+                        }
                         stream
                     }
                     Ok(Err(err)) => {
@@ -78,11 +91,16 @@ pub fn spawn(pid: u32, on_end: impl Fn(&str) + Send + Sync + 'static) -> Result<
             })
             .map_err(|err| err.to_string())?;
     }
-    // 同步等待激活结果（进程不存在 / 设备初始化失败等在此暴露给调用方）
-    match result_rx.recv_timeout(Duration::from_secs(8)) {
+    // 同步等待激活结果（进程不存在 / 设备初始化失败等在此暴露给调用方）；
+    // 超时即弃养——先置位 stop：若激活随后才成功，采集线程见标志自行收尾
+    // （见上方激活成功分支），不留无主线程
+    match result_rx.recv_timeout(ACTIVATE_TIMEOUT) {
         Ok(Ok(())) => Ok(CaptureHandle { tx, stop }),
         Ok(Err(err)) => Err(err),
-        Err(_) => Err("音频设备激活超时".to_string()),
+        Err(_) => {
+            stop.store(true, Ordering::Relaxed);
+            Err("音频设备激活超时".to_string())
+        }
     }
 }
 
@@ -107,14 +125,25 @@ struct Stream {
 fn setup_capture(pid: u32) -> Result<Stream, String> {
     capture_thread_init()?;
     // 请求 float32/48k/立体声 + AUTOCONVERTPCM：引擎保证按此格式交付
-    let desired_format = WaveFormat::new(32, 32, SampleType::Float, 48000, 2, None);
+    // （格式常量与频道页契约同源：state.rs 的 SAMPLE_RATE / CHANNELS）
+    let desired_format = WaveFormat::new(
+        32,
+        32,
+        SampleType::Float,
+        SAMPLE_RATE as usize,
+        CHANNELS as usize,
+        None,
+    );
     let mut audio_client = AudioClient::new_application_loopback_client(pid, true)
         .map_err(|err| format!("进程回路激活失败（目标进程不存在或拒绝采集）：{err}"))?;
     audio_client
         .initialize_client(
             &desired_format,
             Direction::Capture,
-            StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 0 },
+            StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: 0,
+            },
             None,
         )
         .map_err(|err| format!("初始化采集客户端失败：{err}"))?;
@@ -127,7 +156,11 @@ fn setup_capture(pid: u32) -> Result<Stream, String> {
     audio_client
         .start_stream()
         .map_err(|err| format!("启动采集失败：{err}"))?;
-    Ok(Stream { audio_client, capture_client, event })
+    Ok(Stream {
+        audio_client,
+        capture_client,
+        event,
+    })
 }
 
 /// Ok(原因) = 正常收尾（停止/进程退出）；Err = 底层错误。
@@ -137,8 +170,8 @@ fn capture_loop(
     tx: &broadcast::Sender<Bytes>,
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
-    // 单包最大 1 秒音频（384KB）：GetBuffer 的包帧数不会超过引擎缓冲
-    let mut scratch = vec![0u8; 48000 * BLOCK_ALIGN];
+    // 单包最大 1 秒音频（SAMPLE_RATE 帧）：GetBuffer 的包帧数不会超过引擎缓冲
+    let mut scratch = vec![0u8; SAMPLE_RATE as usize * BLOCK_ALIGN];
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok("已停止".to_string());
@@ -164,5 +197,17 @@ fn capture_loop(
         if stream.event.wait_for_event(500).is_err() && !crate::procinfo::pid_alive(pid) {
             return Ok("目标进程已退出".to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 交付格式契约：频道页 share.js / 内嵌页 hardcode 48k 立体声 float32（8 字节帧）
+    #[test]
+    fn stream_format_constants() {
+        assert_eq!((SAMPLE_RATE, CHANNELS), (48000, 2));
+        assert_eq!(BLOCK_ALIGN, 8);
     }
 }

@@ -32,8 +32,40 @@ cargo build --release   # 产物 target/release/app-audio-bridge.exe（约 2MB�
 | `src/sessions.rs` | 音频会话枚举（音量混合器名单，专职 COM 线程）                                                                                                                   |
 | `src/procinfo.rs` | 进程列表/内存/存活（Toolhelp 快照 + `GetProcessMemoryInfo`）                                                                                                    |
 | `src/http.rs`     | axum：5 个端点 + CORS/Private-Network 头 + `/stream` broadcast 分块流（慢消费者各自丢帧，上限约 6 秒）                                                          |
-| `src/main.rs`     | 托盘（`tray-icon`：图标 + 右键菜单 + Win32 消息循环，主线程）、HTTP 后台线程、致命错误弹窗                                                                      |
+| `src/state.rs`    | 共享采集状态机：`generation` 代次保护换源/停止/晚到回调，并发 start 经代次校验落座（被取代者自止，不泄漏采集线程）                                              |
+| `src/main.rs`     | 托盘（`tray-icon`：图标 + 右键菜单 + Win32 消息循环，主线程）、HTTP 后台线程、致命错误弹窗、panic 记录                                                          |
 | `src/page.html`   | 内嵌试听页面，`include_str!` 打进 exe                                                                                                                           |
+
+## 开发
+
+```bash
+cd helper/app-audio-bridge
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test          # 单元测试（状态机 / 列表合并排序 / 契约常量），CI 在 windows-latest 上同款执行
+```
+
+注意：`[profile.release]` **不能加 `panic = "abort"`**——`wasapi.rs` 用
+`catch_unwind` 把采集线程 panic 转为正常收尾，abort 会让任何线程 panic 直接
+带走整个进程。
+
+## 契约与安全
+
+- **端口双源**：本工具 `src/main.rs` 的 `PORTS`（8790~8794 顺延）与频道页
+  `public/js/pages/channel/share.js` 的 `HELPER_PORTS` 是两份手抄，改动须两处
+  同步。`/stream` 固定 48k/2ch/float32 交错（`src/state.rs` 常量），频道页与
+  内嵌页均按 8 字节帧解析。
+- **超时对齐**：`/api/start` 服务端激活等待 6s（`wasapi.rs` 的
+  `ACTIVATE_TIMEOUT`），频道页客户端超时 8s——服务端必须先返回真实错误，
+  客户端提前放弃会留下无主采集（现在双层防护：超时置位 stop + 落座代次校验）。
+- **威胁模型（有意接受的权衡）**：CORS 对任意来源开放（ACAO `*` +
+  Private-Network）——工具运行期间，任意网页都能枚举本机进程、启停采集、
+  拉取音频。接受的前提是工具仅在使用者主动启动、做「一起听」分享的时段
+  运行，进程名单与音频本就要交给频道页，以此换取单文件零配置。不用时退出
+  托盘即可。若未来要收紧（Origin 白名单 / 一次性 token），须本工具 +
+  `share.js` + 内嵌页三端同步改。
+- **panic 排查**：release 无控制台，panic 信息会 best-effort 追加到 exe 旁
+  `panic.log`（写不进则静默跳过）。
 
 ## 常见问题
 

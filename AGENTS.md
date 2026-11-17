@@ -5,11 +5,12 @@
 ## 常用命令
 
 - 启动：`npm start`（prestart 自动从 config.template.js 创建 app/src/config.js）
-- 测试：`npx mocha tests/ --exit`（当前 251 passing；含 test-server.js 信令集成测试——起真实 :3100 实例、自动备份/还原 channels.json 与 chat_history（`process.on('exit')` 兜底崩溃还原）、审计重定向到临时文件；改动 channelStore/chatStore/server.js 信令/校验逻辑必须回归）
+- 测试：`npx mocha tests/ --exit`（当前 252 passing；含 test-server.js 信令集成测试——起真实 :3100 实例、自动备份/还原 channels.json 与 chat_history（`process.on('exit')` 兜底崩溃还原）、审计重定向到临时文件；改动 channelStore/chatStore/server.js 信令/校验逻辑必须回归）
 - 检查：`npm run lint` = `eslint . && prettier --check . && node scripts/check-file-size.js`（只查不改，CI 同款）；格式化：`npm run format`（prettier --write）。ESLint flat config 在 `eslint.config.js`（CJS 服务端 + ESM 前端分组，rules 极简 + `max-lines` 预算）
 - 测试实例约定：`PORT=3100 CHANNEL_ADMIN_PASSWORD=pw CHANNEL_ADMIN_JWT_SECRET=sec node app/src/server.js`
   **绝不杀 3000 端口进程——那是用户自己的实例。** 测试后删除 `app/src/channels.json` 与临时日志。
 - PWA 图标重新生成：`node scripts/gen-pwa-icons.js`（手写 PNG 编码，无图像依赖）
+- Rust 助手检查/测试（Windows）：`cd helper/app-audio-bridge && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`（CI 有独立 windows-latest job 跑同款；`[profile.release]` 勿加 `panic = "abort"`——wasapi.rs 的 catch_unwind 兜底依赖 unwind）
 
 ## 目录与架构边界
 
@@ -26,7 +27,7 @@
     - `lang/zh.json`、`lang/en.json` 扁平键词典；`t(key, {name})` 占位符为 `{name}` 形式
     - `manifest.webmanifest` + `images/icon-*.png` — PWA 安装（图标由 `scripts/gen-pwa-icons.js` 生成）；`sw.js` — service worker（导航 network-first 且双键缓存「路由 URL + shell 资产路径」，`/images/**` cache-first，其余同源 GET SWR；`/api/**`、`/socket.io/**`、非 GET、跨域直通；**版本横幅的重载前必经 version.js 的 `vc-purge-static` 消息清静态缓存**，改缓存策略须同步 bump 缓存名后缀），注册在 `js/core/theme-boot.js`
 - `tests/` — mocha + should（channelStore/chatStore/validate/xss/version/opusFmtp/redCodecs/meshChat（DC 队列预算/中途开麦挂载/统计读数）/images（分块回环/背压泵/无进展超时）/backup 含 tar reader/restore/audit/logs/i18n 词典对齐/embedHeaders CSP/server 信令集成）。**测试文件里不得提前 require `app/src/config.js`**——config 按 env 缓存，会污染 test-server.js 的 env 预设（参见 test-embed-headers.js 的缓存自清理）
-- `helper/` — 「一起听 → 分享本机应用的声音」的本机小工具 `app-audio-bridge/`（Rust 单文件 exe，托盘应用；曾为 Python 实现，已移除）。5 个 HTTP 端点 + 端口 8790~8794 顺延；WASAPI 进程回路采集走 `wasapi` crate、会话枚举/进程列表为裸 Win32（专职 COM 线程 + Toolhelp 快照）、HTTP 为 axum + broadcast 分块流（慢消费者各自丢帧）、内嵌页面 `src/page.html` 与托盘图标 `assets/icon-192.png`（源自 `public/images/`，改动需同步拷贝）均 `include_bytes!` 进 exe。托盘：`tray-icon` crate（主线程 Win32 消息循环，右键菜单「打开页面/退出」）；release 为 GUI 子系统（`#![cfg_attr(not(debug_assertions), windows_subsystem)]`）**无控制台，println 会 panic——日志一律走 `debug_log`（debug 构建才有控制台）**。前端对接点：`public/js/pages/channel/share.js`（探测 `/api/status` 的 `rate` 字段、`/stream` 硬编码 48k/2ch/float32 交错）
+- `helper/` — 「一起听 → 分享本机应用的声音」的本机小工具 `app-audio-bridge/`（Rust 单文件 exe，托盘应用；曾为 Python 实现，已移除）。5 个 HTTP 端点 + 端口 8790~8794 顺延（与 share.js 的 `HELPER_PORTS` 双源手抄，改动两处同步）；WASAPI 进程回路采集走 `wasapi` crate、会话枚举/进程列表为裸 Win32（专职 COM 线程 + Toolhelp 快照）、HTTP 为 axum + broadcast 分块流（慢消费者各自丢帧）、内嵌页面 `src/page.html` 与托盘图标 `assets/icon-192.png`（源自 `public/images/`，改动需同步拷贝）均 `include_bytes!` 进 exe。采集状态机在 `src/state.rs`：`generation` 代次保护换源/停止/晚到回调，并发 `/api/start` 经代次校验落座（被取代者自止，不泄漏采集线程；单测覆盖）。托盘：`tray-icon` crate（主线程 Win32 消息循环，右键菜单「打开页面/退出」）；release 为 GUI 子系统（`#![cfg_attr(not(debug_assertions), windows_subsystem)]`）**无控制台，println 会 panic——日志一律走 `debug_log!` 宏（debug 构建才有控制台，release 空实现零开销）；panic 由 hook best-effort 记到 exe 旁 panic.log**。CORS 刻意对任意来源开放（ACAO `*` + PNA，威胁模型见该 README「契约与安全」）。前端对接点：`public/js/pages/channel/share.js`（探测 `/api/status` 的 `rate` 字段、`/stream` 硬编码 48k/2ch/float32 交错、start 客户端超时 8s 须长于服务端激活等待 6s；其拉流播放循环与 `page.html` 双份手抄，改动两处同步）
 
 ## 关键约定与坑
 
