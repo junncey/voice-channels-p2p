@@ -156,21 +156,28 @@ fn build_audio_apps(worker: &SessionWorker) -> serde_json::Value {
     merge_audio_apps(&sessions, &procs, &fallback)
 }
 
-/// 会话 + 进程快照 → 应用分组列表：按应用名分组（同名多 pid 合并、正在
-/// 发声的进程排最前），应用按「播放中 + 内存」排序；查不到进程名的以
-/// `PID {n}` 兜底。纯函数。
+/// 会话 + 进程快照 → 应用分组列表：按展示名分组（同名多 pid 合并、正在
+/// 发声的进程排最前），应用按「播放中 + 内存」排序；排除本工具自身与
+/// 浏览器（见 procinfo::BROWSER_EXES），查不到进程名的以 `PID {n}` 兜底。
+/// 纯函数。
 fn merge_audio_apps(
     sessions: &[SessionInfo],
     procs: &HashMap<u32, (String, f64)>,
     fallback: &str,
 ) -> serde_json::Value {
+    let self_pid = std::process::id();
     // name -> (pid -> active)，保持会话枚举顺序
     let mut apps: HashMap<String, Vec<(u32, bool)>> = HashMap::new();
     for session in sessions {
-        let name = procs
-            .get(&session.pid)
-            .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| format!("PID {}", session.pid));
+        if session.pid == self_pid {
+            continue; // 本工具自身：试听页的声音经浏览器会话播放，自身不该入列
+        }
+        let name = match procs.get(&session.pid) {
+            // 浏览器：有自己的标签页分享方案，且活跃会话常驻排头——排除
+            Some((exe, _)) if crate::procinfo::is_browser(exe) => continue,
+            Some((exe, _)) => crate::procinfo::display_name(exe),
+            None => format!("PID {}", session.pid),
+        };
         let entry = apps.entry(name).or_default();
         match entry.iter_mut().find(|(pid, _)| *pid == session.pid) {
             Some((_, active)) => *active = *active || session.active,
@@ -336,14 +343,18 @@ mod tests {
     fn merge_groups_same_name_and_prefers_active_pid() {
         let sessions = [session(11, false), session(12, true), session(13, false)];
         let mut procs = HashMap::new();
-        procs.insert(11u32, ("chrome.exe".to_string(), 100.0));
-        procs.insert(12u32, ("chrome.exe".to_string(), 300.0));
-        procs.insert(13u32, ("chrome.exe".to_string(), 200.0));
+        procs.insert(11u32, ("cloudmusic.exe".to_string(), 100.0));
+        procs.insert(12u32, ("cloudmusic.exe".to_string(), 300.0));
+        procs.insert(13u32, ("cloudmusic.exe".to_string(), 200.0));
         let value = merge_audio_apps(&sessions, &procs, "");
         let apps = value["apps"].as_array().unwrap();
         assert_eq!(apps.len(), 1);
         let app = &apps[0];
-        assert_eq!(app["name"].as_str().unwrap(), "chrome.exe");
+        assert_eq!(
+            app["name"].as_str().unwrap(),
+            "网易云",
+            "展示产品名而非文件名"
+        );
         assert!(app["active"].as_bool().unwrap(), "任一 pid 发声即 active");
         assert_eq!(app["mem"].as_f64().unwrap(), 300.0, "mem 取同名进程最大值");
         let pids = app["pids"].as_array().unwrap();
@@ -366,6 +377,34 @@ mod tests {
             "查不到进程名以 PID 兜底"
         );
         assert!(apps[0]["active"].as_bool().unwrap());
+        assert_eq!(
+            apps[1]["name"].as_str().unwrap(),
+            "known",
+            "未知产品去 .exe 后缀"
+        );
         assert!(!apps[1]["active"].as_bool().unwrap(), "active 应用排在前面");
+    }
+
+    /// 列表卫生：浏览器与本工具自身不入「能发声的应用」名单
+    #[test]
+    fn merge_excludes_browsers_and_self() {
+        let sessions = [
+            session(21, true),
+            session(22, true),
+            session(std::process::id(), true),
+            session(23, false),
+        ];
+        let mut procs = HashMap::new();
+        procs.insert(21u32, ("msedge.exe".to_string(), 500.0));
+        procs.insert(22u32, ("chrome.exe".to_string(), 400.0));
+        procs.insert(
+            std::process::id(),
+            ("app-audio-bridge.exe".to_string(), 1.0),
+        );
+        procs.insert(23u32, ("scrcpy.exe".to_string(), 60.0));
+        let value = merge_audio_apps(&sessions, &procs, "");
+        let apps = value["apps"].as_array().unwrap();
+        assert_eq!(apps.len(), 1, "只剩非浏览器的 scrcpy");
+        assert_eq!(apps[0]["name"].as_str().unwrap(), "scrcpy");
     }
 }

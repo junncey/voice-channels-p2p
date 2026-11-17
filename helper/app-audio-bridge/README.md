@@ -67,6 +67,10 @@ node scripts/gen-helper-ico.js   # helper/app-audio-bridge/assets/icon.ico（多
 - **超时对齐**：`/api/start` 服务端激活等待 6s（`wasapi.rs` 的
   `ACTIVATE_TIMEOUT`），频道页客户端超时 8s——服务端必须先返回真实错误，
   客户端提前放弃会留下无主采集（现在双层防护：超时置位 stop + 落座代次校验）。
+- **应用列表的取舍**：「能发声的应用」排除浏览器（有自己的标签页分享方案，
+  名单见 `src/procinfo.rs` 的 `BROWSER_EXES`，可追加）与本工具自身；常见产品
+  显示产品名而非文件名（`FRIENDLY_NAMES`：cloudmusic.exe → 网易云），其余去
+  `.exe` 后缀。`?all=1` 全量列表不受影响。
 - **威胁模型（有意接受的权衡）**：CORS 对任意来源开放（ACAO `*` +
   Private-Network）——工具运行期间，任意网页都能枚举本机进程、启停采集、
   拉取音频。接受的前提是工具仅在使用者主动启动、做「一起听」分享的时段

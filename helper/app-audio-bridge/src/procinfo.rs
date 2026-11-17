@@ -15,6 +15,69 @@ pub struct ProcessInfo {
 /// 全部进程列表上限（与内嵌页展示一致）
 const MAX_PROCESSES: usize = 600;
 
+/// 浏览器进程名（小写、不含 .exe）。浏览器有自己的标签页分享方案，且其
+/// 常驻活跃会话会霸占「正在发声」排序头部，从「能发声的应用」列表排除
+/// （`?all=1` 全量列表不受影响）。补充名单直接在此追加。
+const BROWSER_EXES: &[&str] = &[
+    "chrome",
+    "msedge",
+    "firefox",
+    "opera",
+    "brave",
+    "vivaldi",
+    "librewolf",
+    "waterfox",
+    "arc",
+    "qqbrowser",
+    "360se",
+    "360chrome",
+    "2345explorer",
+    "sogouexplorer",
+    "maxthon",
+];
+
+/// 常见应用的产品名映射（exe 小写 → 展示名）：列表展示产品名而非文件名
+const FRIENDLY_NAMES: &[(&str, &str)] = &[
+    ("cloudmusic", "网易云"),
+    ("qqmusic", "QQ音乐"),
+    ("kugou", "酷狗音乐"),
+    ("kuwo", "酷我音乐"),
+    ("kwmusic", "酷我音乐"),
+    ("weixin", "微信"),
+    ("wxwork", "企业微信"),
+    ("feishu", "飞书"),
+    ("dingtalk", "钉钉"),
+];
+
+/// 去掉大小写不敏感的 .exe 后缀
+fn exe_stem(exe: &str) -> &str {
+    if exe.len() > 4 && exe[exe.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &exe[..exe.len() - 4]
+    } else {
+        exe
+    }
+}
+
+/// 是否浏览器进程（「能发声的应用」列表排除用）
+pub fn is_browser(exe: &str) -> bool {
+    BROWSER_EXES
+        .iter()
+        .any(|browser| browser.eq_ignore_ascii_case(exe_stem(exe)))
+}
+
+/// 进程名的展示形态：已知产品映射为产品名（cloudmusic.exe → 网易云），
+/// 其余去 .exe 后缀（Weixin.exe → Weixin）
+pub fn display_name(exe: &str) -> String {
+    let stem = exe_stem(exe);
+    match FRIENDLY_NAMES
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(stem))
+    {
+        Some((_, name)) => (*name).to_string(),
+        None => stem.to_string(),
+    }
+}
+
 /// 全量进程快照（pid/名称/内存）。`with_mem=false` 只刷名单（存活探测的
 /// 500ms 周期路径）；名称在快照中始终自带，内存按需刷新。
 fn scan(with_mem: bool) -> Vec<(u32, String, f64)> {
@@ -123,5 +186,31 @@ mod tests {
         assert!(items.iter().all(|p| p.pid > 0 && !p.name.is_empty()));
         assert!(items.iter().any(|p| p.pid == std::process::id()));
         assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn browser_detection_covers_common_browsers() {
+        assert!(is_browser("chrome.exe"));
+        assert!(is_browser("msedge.exe"));
+        assert!(is_browser("QQBrowser.EXE"), "大小写不敏感");
+        assert!(is_browser("360chrome.exe"));
+        assert!(!is_browser("cloudmusic.exe"));
+        assert!(
+            !is_browser("msedgewebview2.exe"),
+            "WebView2 宿主载着真实应用的声音，保留"
+        );
+    }
+
+    #[test]
+    fn display_name_maps_products_and_strips_exe() {
+        assert_eq!(display_name("cloudmusic.exe"), "网易云");
+        assert_eq!(display_name("QQMusic.exe"), "QQ音乐");
+        assert_eq!(display_name("Weixin.exe"), "微信");
+        assert_eq!(
+            display_name("Scrcpy.EXE"),
+            "Scrcpy",
+            "未知产品去 .exe 后缀、保留原大小写"
+        );
+        assert_eq!(display_name("foobar2000"), "foobar2000", "无后缀原样返回");
     }
 }
