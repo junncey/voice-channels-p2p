@@ -30,7 +30,7 @@ cargo build --release   # 产物 target/release/app-audio-bridge.exe（约 2MB�
 | 模块              | 职责                                                                                                                                                            |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/wasapi.rs`   | 进程回路采集：[`wasapi` crate](https://crates.io/crates/wasapi) 的 `new_application_loopback_client`（EventsShared + AUTOCONVERTPCM，交付固定 48k/2ch/float32） |
-| `src/sessions.rs` | 音频会话枚举（音量混合器名单，专职 COM 线程；wasapi crate 未封装会话枚举，暂无安全替代）                                                                        |
+| `src/sessions.rs` | 音频会话枚举（音量混合器名单）：wasapi 安全封装链（DeviceEnumerator → AudioSessionEnumerator），专职 COM 线程，零 unsafe                                        |
 | `src/procinfo.rs` | 进程列表/内存/存活（`sysinfo`：系统级快照、免 unsafe，受保护进程照常列出）                                                                                      |
 | `src/http.rs`     | axum：5 个端点 + CORS/Private-Network 头 + `/stream` broadcast 分块流（慢消费者各自丢帧，上限约 6 秒）                                                          |
 | `src/state.rs`    | 共享采集状态机：`generation` 代次保护换源/停止/晚到回调，并发 start 经代次校验落座（被取代者自止，不泄漏采集线程）                                              |
