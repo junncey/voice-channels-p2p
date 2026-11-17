@@ -9,6 +9,12 @@ exe，托盘应用）。用 Windows 内置的 **WASAPI 进程级音频回路**�
 
 ## 构建与使用
 
+**下载（推荐）**：自 **v1.11.0** 起，`app-audio-bridge.exe` 作为附件随
+[Releases](https://github.com/junncey/voice-channels-p2p/releases) 发布——单文件、
+免安装、无运行时依赖，拷走双击即可。
+
+**自行构建**：
+
 ```bash
 cd helper/app-audio-bridge
 cargo build --release   # 产物 target/release/app-audio-bridge.exe（约 2MB），可拷走直接双击

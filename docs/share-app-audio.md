@@ -22,9 +22,11 @@
 
 ### 步骤
 
-1. 启动小工具（一次性 `cargo build --release` 得到单文件 exe，可拷走直接双击；托盘常驻、无控制台窗口，之后每次使用前跑着即可，页面可以不开）：
+1. 取得并启动小工具（自 **v1.11.0** 起 `app-audio-bridge.exe` 随 [Releases](https://github.com/junncey/voice-channels-p2p/releases) 发布，下载后拷走即可双击，免安装；也可自行构建。托盘常驻、无控制台窗口，之后每次使用前跑着即可，页面可以不开）：
 
     ```bash
+    # 方式一：下载 Releases 附件 app-audio-bridge.exe，双击运行
+    # 方式二：本地构建
     cd helper/app-audio-bridge
     cargo build --release                  # 产物 target/release/app-audio-bridge.exe
     ./target/release/app-audio-bridge.exe  # 常驻右下角托盘（默认不弹网页）
