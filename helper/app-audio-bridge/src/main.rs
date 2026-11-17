@@ -18,12 +18,11 @@ use std::sync::Arc;
 
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::TrayIconBuilder;
-use windows::core::HSTRING;
-use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MessageBoxW, PostThreadMessageW, TranslateMessage, MB_ICONERROR,
-    MB_OK, MSG, WM_QUIT,
-};
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winsafe::prelude::*;
+use winsafe::{co::MB, HWND};
 
 use state::App;
 
@@ -124,8 +123,8 @@ async fn serve(
     Ok(())
 }
 
-/// 主线程托盘：图标 + 右键菜单（打开页面 / 退出）+ Win32 消息循环。
-/// 返回即「退出」被点选（消息循环收到 WM_QUIT）。
+/// 主线程托盘：图标 + 右键菜单（打开页面 / 退出）+ winit 事件循环。
+/// 返回即「退出」被点选（菜单处理器经 EventLoopProxy 发用户事件，循环收到后 exit）。
 fn run_tray(url: String) {
     let menu = Menu::new();
     let open_item = MenuItem::with_id("open", "打开页面", true, None);
@@ -145,34 +144,50 @@ fn run_tray(url: String) {
         Err(err) => fatal(&format!("创建托盘图标失败：{err}")),
     };
 
-    // 菜单事件在消息循环线程上回调：打开页面 → 浏览器；退出 → 投递 WM_QUIT 收循环
+    let event_loop = match EventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(err) => fatal(&format!("创建事件循环失败：{err}")),
+    };
+    // 菜单事件在消息循环线程上回调（winit 的消息泵照常派发 tray-icon 自建
+    // 隐藏窗口的消息）：打开页面 → 浏览器；退出 → 经 proxy 唤醒事件循环退出
     let open_url = url;
-    let loop_thread = unsafe { GetCurrentThreadId() };
+    let proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.0.as_str() {
         "open" => {
             let _ = webbrowser::open(&open_url);
         }
-        "quit" => unsafe {
-            let _ = PostThreadMessageW(
-                loop_thread,
-                WM_QUIT,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(0),
-            );
-        },
+        "quit" => {
+            let _ = proxy.send_event(());
+        }
         _ => {}
     }));
 
-    // tray-icon 在本线程内自建隐藏窗口：持续泵消息即可收到托盘/菜单事件
-    unsafe {
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+    let mut app = TrayLoop;
+    if let Err(err) = event_loop.run_app(&mut app) {
+        fatal(&format!("事件循环异常退出：{err}"));
     }
     drop(tray); // Drop 即 NIM_DELETE：从通知区移除图标
     std::thread::sleep(std::time::Duration::from_millis(150)); // 留时间送达移除消息
+}
+
+/// 无窗口的 winit 应用壳：托盘不建窗口，仅响应菜单经 proxy 发来的退出事件
+struct TrayLoop;
+
+impl ApplicationHandler for TrayLoop {
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
+        // 唯一的用户事件即托盘「退出」菜单
+        event_loop.exit();
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        _event: WindowEvent,
+    ) {
+    }
 }
 
 /// 解码内嵌品牌图标（assets/icon-192.png，源自 public/images，RGBA8）。
@@ -227,16 +242,9 @@ fn install_panic_hook() {
     }));
 }
 
-/// GUI 子系统没有控制台：致命错误用消息框呈现后退出
+/// GUI 子系统没有控制台：致命错误用消息框呈现后退出（winsafe 安全封装）
 pub(crate) fn fatal(msg: &str) -> ! {
-    unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(msg),
-            &HSTRING::from("应用声音桥"),
-            MB_OK | MB_ICONERROR,
-        );
-    }
+    let _ = HWND::NULL.MessageBox(msg, "应用声音桥", MB::OK | MB::ICONERROR);
     std::process::exit(1);
 }
 

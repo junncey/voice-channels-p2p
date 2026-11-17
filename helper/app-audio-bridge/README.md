@@ -34,7 +34,7 @@ cargo build --release   # 产物 target/release/app-audio-bridge.exe（约 2MB�
 | `src/procinfo.rs` | 进程列表/内存/存活（`sysinfo`：系统级快照、免 unsafe，受保护进程照常列出）                                                                                      |
 | `src/http.rs`     | axum：5 个端点 + CORS/Private-Network 头 + `/stream` broadcast 分块流（慢消费者各自丢帧，上限约 6 秒）                                                          |
 | `src/state.rs`    | 共享采集状态机：`generation` 代次保护换源/停止/晚到回调，并发 start 经代次校验落座（被取代者自止，不泄漏采集线程）                                              |
-| `src/main.rs`     | 托盘（`tray-icon`：图标 + 右键菜单 + Win32 消息循环，主线程）、HTTP 后台线程、致命错误弹窗、panic 记录                                                          |
+| `src/main.rs`     | 托盘（`tray-icon` + `winit` 事件循环：图标/右键菜单/退出，主线程）、HTTP 后台线程、致命错误弹窗（winsafe）、panic 记录——**全项目零 unsafe**                     |
 | `src/page.html`   | 内嵌试听页面，`include_str!` 打进 exe                                                                                                                           |
 | `build.rs`        | exe 资源嵌入（图标 + 版本信息，`winresource` 纯 Rust 写资源、无需 rc.exe）                                                                                      |
 

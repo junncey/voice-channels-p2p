@@ -32,13 +32,10 @@ wasapi = "0.27"
 sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
 windows-version = "0.100.0"
 
-# Windows API 绑定：仅剩托盘消息循环与致命错误消息框（tray-icon 要求自泵
-# 消息）；会话枚举已走 wasapi 安全封装，进程/版本已走 sysinfo/windows-version
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_UI_WindowsAndMessaging",
-] }
+# 托盘消息泵（winit 事件循环，tray-icon 官方推荐搭配；退出走 EventLoopProxy
+# 用户事件）与致命错误消息框（winsafe 的 HWND::MessageBox 安全封装）
+winsafe = { version = "0.0.29", features = ["kernel", "user"] }
+winit = "0.30.13"
 
 [profile.release]
 # 切勿加 panic = "abort"：wasapi.rs 的 catch_unwind 兜底（采集线程 panic 转
