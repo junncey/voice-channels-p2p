@@ -1,11 +1,12 @@
 'use strict';
 
 /**
- * 一次性 PWA 图标生成器（无图像依赖）：直接经 zlib 把应用图形——
- * 深色品牌圆角方块上、声波弧线环抱的绿色麦克胶囊——渲染成 PNG 文件。
+ * PWA 图标生成器（无图像依赖）：直接经 zlib 把应用图形——深色品牌圆角
+ * 方块上、声波弧线环抱的绿色麦克胶囊——渲染成 PNG 文件。
  * 重新生成：
  *   node scripts/gen-pwa-icons.js
  * 输出：public/images/icon-192.png、icon-512.png、icon-maskable-512.png。
+ * 渲染器与 PNG 编码同时导出，供 scripts/gen-helper-ico.js 生成 exe 图标。
  */
 
 const fs = require('fs');
@@ -148,12 +149,16 @@ function crc32(buf) {
 }
 
 const outDir = path.join(__dirname, '..', 'public', 'images');
-fs.mkdirSync(outDir, { recursive: true });
-for (const [name, size, opts] of [
-    ['icon-192.png', 192, {}],
-    ['icon-512.png', 512, {}],
-    ['icon-maskable-512.png', 512, { maskable: true }],
-]) {
-    fs.writeFileSync(path.join(outDir, name), encodePng(renderIcon(size, opts)));
-    console.log('wrote', path.join(outDir, name));
+if (require.main === module) {
+    fs.mkdirSync(outDir, { recursive: true });
+    for (const [name, size, opts] of [
+        ['icon-192.png', 192, {}],
+        ['icon-512.png', 512, {}],
+        ['icon-maskable-512.png', 512, { maskable: true }],
+    ]) {
+        fs.writeFileSync(path.join(outDir, name), encodePng(renderIcon(size, opts)));
+        console.log('wrote', path.join(outDir, name));
+    }
 }
+
+module.exports = { renderIcon, encodePng };
