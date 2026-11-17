@@ -27,17 +27,19 @@ png = "0.17"
 # WASAPI 进程级音频回路采集（激活/格式协商/事件驱动读取）
 wasapi = "0.27"
 
-# Windows API 绑定（音频会话枚举 / 进程快照 / 系统版本 / 托盘消息循环）
+# 进程枚举/存活/内存（系统级快照，免 unsafe 的 Toolhelp/OpenProcess 手写）与
+# 系统版本探测（windows-rs 官方配套，内部即 RtlGetVersion）
+sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
+windows-version = "0.100.0"
+
+# Windows API 绑定（音频会话枚举 COM / 托盘消息循环 / 消息框——wasapi crate
+# 未封装 IAudioSessionEnumerator，会话枚举暂无安全替代）
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_Threading",
-    "Win32_System_SystemInformation",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_ProcessStatus",
     "Win32_UI_WindowsAndMessaging",
-    "Wdk_System_SystemServices",
 ] }
 
 [profile.release]

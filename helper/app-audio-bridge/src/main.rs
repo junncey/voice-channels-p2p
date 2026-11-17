@@ -240,19 +240,10 @@ pub(crate) fn fatal(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-/// 读取系统 build 号（RtlGetVersion 不受应用兼容性清单伪装影响）
+/// 读取系统 build 号。windows-version 是 windows-rs 官方配套 crate（内部
+/// 即 RtlGetVersion，不受应用兼容性清单伪装影响），免去手写 unsafe
 fn windows_build() -> u32 {
-    use windows::Wdk::System::SystemServices::RtlGetVersion;
-    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
-    unsafe {
-        let mut info: OSVERSIONINFOW = std::mem::zeroed();
-        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
-        if RtlGetVersion(&mut info).0 >= 0 {
-            info.dwBuildNumber
-        } else {
-            0
-        }
-    }
+    windows_version::OsVersion::current().build
 }
 
 #[cfg(test)]

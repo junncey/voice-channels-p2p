@@ -1,18 +1,9 @@
-//! 进程枚举：CreateToolhelp32Snapshot 快照 + 工作集内存。
-//!
-//! 用快照而非 OpenProcess 存活探测：受保护进程（反作弊游戏等）会拒绝
-//! OpenProcess，但快照照常列出它们，避免误判「进程已退出」。
+//! 进程枚举：sysinfo（Windows 底层为系统级进程快照，不逐个打开进程句柄——
+//! 受保护进程（反作弊游戏等）照常列出，避免误判「进程已退出」）。
 
 use std::collections::HashMap;
 
-use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-};
-use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 pub struct ProcessInfo {
     pub pid: u32,
@@ -24,55 +15,31 @@ pub struct ProcessInfo {
 /// 全部进程列表上限（与内嵌页展示一致）
 const MAX_PROCESSES: usize = 600;
 
-/// 一次性列出全部进程（可附带逐 pid 的工作集内存）
+/// 全量进程快照（pid/名称/内存）。`with_mem=false` 只刷名单（存活探测的
+/// 500ms 周期路径）；名称在快照中始终自带，内存按需刷新。
 fn scan(with_mem: bool) -> Vec<(u32, String, f64)> {
-    let mut out = Vec::new();
-    unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
-            return out;
-        };
-        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        let mut ok = Process32FirstW(snap, &mut entry).is_ok();
-        while ok {
-            let pid = entry.th32ProcessID;
-            let name_len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
-            let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
-            if pid != 0 && !name.is_empty() {
-                let mem = if with_mem { rss_mb(pid) } else { 0.0 };
-                out.push((pid, name, mem));
-            }
-            ok = Process32NextW(snap, &mut entry).is_ok();
-        }
-        let _ = CloseHandle(snap);
+    let Ok(mut system) = System::new() else {
+        return Vec::new();
+    };
+    let mut refresh = ProcessRefreshKind::nothing();
+    if with_mem {
+        refresh = refresh.with_memory();
     }
-    out
-}
-
-/// 单进程工作集内存（MB）。打不开（权限/已退出）记 0，不阻塞列表。
-fn rss_mb(pid: u32) -> f64 {
-    unsafe {
-        let Ok(process) = OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-            false,
-            pid,
-        ) else {
-            return 0.0;
-        };
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        let ok = GetProcessMemoryInfo(
-            process,
-            &mut counters,
-            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        )
-        .is_ok();
-        let _ = CloseHandle(process);
-        if ok {
-            round_mb(counters.WorkingSetSize as u64)
-        } else {
-            0.0
-        }
-    }
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    system
+        .processes()
+        .iter()
+        .map(|(pid, process)| {
+            let name = process.name().to_string_lossy().into_owned();
+            let mem = if with_mem {
+                round_mb(process.memory())
+            } else {
+                0.0
+            };
+            (pid.as_u32(), name, mem)
+        })
+        .filter(|&(pid, ref name, _)| pid != 0 && !name.is_empty())
+        .collect()
 }
 
 /// 工作集字节数 → MB（保留 1 位小数）
@@ -146,5 +113,15 @@ mod tests {
         assert_eq!(round_mb(0), 0.0);
         assert_eq!(round_mb(1048576), 1.0);
         assert_eq!(round_mb(15 * 1048576 + 100 * 1024), 15.1);
+    }
+
+    /// 真实快照冒烟：本进程必须在场（sysinfo 快照含自身，无需打开句柄）
+    #[test]
+    fn snapshot_lists_running_processes() {
+        let items = list_processes();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|p| p.pid > 0 && !p.name.is_empty()));
+        assert!(items.iter().any(|p| p.pid == std::process::id()));
+        assert!(pid_alive(std::process::id()));
     }
 }

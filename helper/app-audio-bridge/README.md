@@ -15,7 +15,8 @@ cargo build --release   # 产物 target/release/app-audio-bridge.exe（约 2MB�
 ```
 
 **托盘运行**：exe 为 GUI 子系统——没有控制台黑窗，启动后常驻右下角托盘
-（默认不弹网页）。右键托盘图标：**打开页面**（浏览器访问
+（默认不弹网页）。exe 内嵌品牌图标与版本信息（资源管理器/任务栏/任务管理器
+显示「应用声音桥」）。右键托盘图标：**打开页面**（浏览器访问
 `http://127.0.0.1:8790`）/ **退出**。致命错误（系统过旧、端口全被占用）以
 弹窗提示。debug 构建（`cargo build`）保留控制台并输出关键事件日志，便于排查。
 
@@ -29,12 +30,13 @@ cargo build --release   # 产物 target/release/app-audio-bridge.exe（约 2MB�
 | 模块              | 职责                                                                                                                                                            |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/wasapi.rs`   | 进程回路采集：[`wasapi` crate](https://crates.io/crates/wasapi) 的 `new_application_loopback_client`（EventsShared + AUTOCONVERTPCM，交付固定 48k/2ch/float32） |
-| `src/sessions.rs` | 音频会话枚举（音量混合器名单，专职 COM 线程）                                                                                                                   |
-| `src/procinfo.rs` | 进程列表/内存/存活（Toolhelp 快照 + `GetProcessMemoryInfo`）                                                                                                    |
+| `src/sessions.rs` | 音频会话枚举（音量混合器名单，专职 COM 线程；wasapi crate 未封装会话枚举，暂无安全替代）                                                                        |
+| `src/procinfo.rs` | 进程列表/内存/存活（`sysinfo`：系统级快照、免 unsafe，受保护进程照常列出）                                                                                      |
 | `src/http.rs`     | axum：5 个端点 + CORS/Private-Network 头 + `/stream` broadcast 分块流（慢消费者各自丢帧，上限约 6 秒）                                                          |
 | `src/state.rs`    | 共享采集状态机：`generation` 代次保护换源/停止/晚到回调，并发 start 经代次校验落座（被取代者自止，不泄漏采集线程）                                              |
 | `src/main.rs`     | 托盘（`tray-icon`：图标 + 右键菜单 + Win32 消息循环，主线程）、HTTP 后台线程、致命错误弹窗、panic 记录                                                          |
 | `src/page.html`   | 内嵌试听页面，`include_str!` 打进 exe                                                                                                                           |
+| `build.rs`        | exe 资源嵌入（图标 + 版本信息，`winresource` 纯 Rust 写资源、无需 rc.exe）                                                                                      |
 
 ## 开发
 
@@ -43,6 +45,13 @@ cd helper/app-audio-bridge
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test          # 单元测试（状态机 / 列表合并排序 / 契约常量），CI 在 windows-latest 上同款执行
+```
+
+改品牌图形后，同步再生成 PWA 图标与 exe 图标（同源渲染器）：
+
+```bash
+node scripts/gen-pwa-icons.js    # public/images/icon-*.png
+node scripts/gen-helper-ico.js   # helper/app-audio-bridge/assets/icon.ico（多尺寸 ICO，构建时嵌入）
 ```
 
 注意：`[profile.release]` **不能加 `panic = "abort"`**——`wasapi.rs` 用
