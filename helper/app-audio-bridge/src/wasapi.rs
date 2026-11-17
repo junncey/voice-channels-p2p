@@ -28,7 +28,7 @@ pub struct CaptureHandle {
 
 /// 启动采集线程：激活成功后立即返回句柄，失败同步返回错误；
 /// 采集结束（进程退出 / 底层错误 / stop 置位）后回调 `on_end(原因)`。
-pub fn spawn(pid: u32, name: &str, on_end: impl Fn(&str) + Send + Sync + 'static) -> Result<CaptureHandle, String> {
+pub fn spawn(pid: u32, on_end: impl Fn(&str) + Send + Sync + 'static) -> Result<CaptureHandle, String> {
     // 预检：对已退出的 pid，激活回调可能永远不来（wasapi crate 无限等待），
     // 先拦下最常见的「应用已关闭」
     if !crate::procinfo::pid_alive(pid) {

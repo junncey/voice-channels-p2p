@@ -207,19 +207,17 @@ async fn start(State(state): State<Arc<HttpState>>, body: Bytes) -> Response {
         }
     };
 
-    let spawn_result = {
-        let name = name.clone();
-        tokio::task::spawn_blocking(move || crate::wasapi::spawn(pid, &name, on_end)).await
-    };
+    let spawn_result =
+        tokio::task::spawn_blocking(move || crate::wasapi::spawn(pid, on_end)).await;
     let handle = match spawn_result {
         Ok(Ok(handle)) => handle,
         Ok(Err(err)) => {
-            println!("[start-failed] pid={pid}: {err}");
+            crate::debug_log(&format!("[start-failed] pid={pid}: {err}"));
             return json_response(json!({"ok": false, "error": err}), StatusCode::BAD_REQUEST);
         }
         Err(join_err) => {
             let err = format!("采集线程启动失败：{join_err}");
-            println!("[start-failed] pid={pid}: {err}");
+            crate::debug_log(&format!("[start-failed] pid={pid}: {err}"));
             return json_response(json!({"ok": false, "error": err}), StatusCode::BAD_REQUEST);
         }
     };
@@ -232,7 +230,7 @@ async fn start(State(state): State<Arc<HttpState>>, body: Bytes) -> Response {
         slot.status = "running";
         slot.error.clear();
     }
-    println!("[start] pid={pid} name={name}");
+    crate::debug_log(&format!("[start] pid={pid} name={name}"));
     let (st, pid, name, error) = app.snapshot();
     json_response(
         json!({"ok": true, "status": st, "pid": pid, "name": name, "error": error, "rate": SAMPLE_RATE, "channels": CHANNELS}),

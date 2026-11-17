@@ -12,17 +12,22 @@ path = "src/main.rs"
 
 [dependencies]
 # HTTP 服务与异步运行时
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 webbrowser = "1"
 
+# 托盘图标与右键菜单（default-features 关掉仅 Linux 用的 appindicator 后端）
+tray-icon = { version = "0.26", default-features = false }
+# 解码内嵌托盘图标（RGBA8 PNG）
+png = "0.17"
+
 # WASAPI 进程级音频回路采集（激活/格式协商/事件驱动读取）
 wasapi = "0.27"
 
-# Windows API 绑定（音频会话枚举 / 进程快照 / 系统版本）
+# Windows API 绑定（音频会话枚举 / 进程快照 / 系统版本 / 托盘消息循环）
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
@@ -31,6 +36,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
+    "Win32_UI_WindowsAndMessaging",
     "Wdk_System_SystemServices",
 ] }
 
