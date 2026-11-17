@@ -303,7 +303,7 @@
     "channel.shareHelperHint": "桌面客户端 / 游戏专用——需本机运行 app-audio-bridge 小工具；本地无重音",
     "channel.shareHelperPlaying": "播放中",
     "channel.shareHelperIdle": "空闲",
-    "channel.shareHelperMissing": "未检测到小工具：请先启动 helper/app-audio-bridge（python server.py），详见 docs/share-app-audio.md",
+    "channel.shareHelperMissing": "未检测到小工具：请先启动 helper/app-audio-bridge（app-audio-bridge.exe），详见 docs/share-app-audio.md",
     "channel.shareHelperNoApp": "没有能发声的应用——先让目标应用出声，再重新展开",
     "channel.shareHelperFail": "小工具无法开始采集：目标进程可能已退出",
     "channel.shareStartedApp": "正在分享应用声音（仅该应用，本地无重音），建议佩戴耳机以免回声",

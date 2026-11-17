@@ -1,3 +1,0 @@
-proc-tap>=1.1
-psutil>=5.9
-pycaw>=20220416

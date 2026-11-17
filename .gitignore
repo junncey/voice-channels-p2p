@@ -39,3 +39,6 @@ app/src/audit.jsonl.1
 app/src/backups/
 app/src/channels.json.bak
 app/src/channels.json.restore
+
+# Rust（app-audio-bridge 构建产物）
+helper/app-audio-bridge/target/

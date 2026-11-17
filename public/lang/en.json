@@ -303,7 +303,7 @@
     "channel.shareHelperHint": "For desktop clients / games — requires the app-audio-bridge helper running; no local double sound",
     "channel.shareHelperPlaying": "playing",
     "channel.shareHelperIdle": "idle",
-    "channel.shareHelperMissing": "Helper not detected: start helper/app-audio-bridge first (python server.py), see docs/share-app-audio.md",
+    "channel.shareHelperMissing": "Helper not detected: start helper/app-audio-bridge (app-audio-bridge.exe) first, see docs/share-app-audio.md",
     "channel.shareHelperNoApp": "No sound-capable apps — play something in the target app, then reopen",
     "channel.shareHelperFail": "Helper can't start capture: the target process may have exited",
     "channel.shareStartedApp": "Sharing an app's sound (only that app, no local double sound) — headphones recommended to avoid echo",

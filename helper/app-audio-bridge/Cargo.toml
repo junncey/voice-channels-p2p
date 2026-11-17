@@ -1,0 +1,40 @@
+[package]
+name = "app-audio-bridge"
+version = "1.0.0"
+edition = "2021"
+description = "只分享一个桌面应用的声音（Windows WASAPI 进程级音频回路，单文件 exe）"
+license = "AGPL-3.0"
+publish = false
+
+[[bin]]
+name = "app-audio-bridge"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP 服务与异步运行时
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+webbrowser = "1"
+
+# WASAPI 进程级音频回路采集（激活/格式协商/事件驱动读取）
+wasapi = "0.27"
+
+# Windows API 绑定（音频会话枚举 / 进程快照 / 系统版本）
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Wdk_System_SystemServices",
+] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
