@@ -9,7 +9,8 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { tarFiles, createTarIterator, readTar } = require('../app/src/backup');
+const { createTarIterator, readTar } = require('../app/src/backup');
+const { tarFiles } = require('./helpers');
 
 describe('test-backup (tar writer)', () => {
     it('should produce a 512-aligned ustar archive with valid checksums', () => {
@@ -75,6 +76,30 @@ describe('test-backup (tar writer)', () => {
 
             Buffer.compare(buffered, streamed).should.equal(0);
             (streamed.length % 512).should.equal(0);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('streaming iterator must not tear when the source file grows mid-archive', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-tar-'));
+        try {
+            const file = path.join(dir, 'growing.jsonl');
+            const original = Buffer.from('{"ts":1,"name":"a","text":"hi"}\n');
+            fs.writeFileSync(file, original);
+
+            const chunks = [];
+            for await (const chunk of createTarIterator([{ name: 'chat_history/g.jsonl', path: file }])) {
+                chunks.push(chunk);
+                // tar 头已发出（按原 size 声明）——此刻 chatStore 式的
+                // 追加写落进来。归档必须仍精确截断到头声明的字节数，
+                // 否则后续条目全部错位、整个备份损坏
+                if (chunks.length === 1) fs.appendFileSync(file, Buffer.from('{"ts":2,"name":"a","text":"late"}\n'));
+            }
+
+            const out = new Map();
+            await readTar(Buffer.concat(chunks), { onFile: (name, data) => out.set(name, data) });
+            out.get('chat_history/g.jsonl').equals(original).should.be.true();
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }

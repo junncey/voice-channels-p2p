@@ -39,6 +39,8 @@ const path = require('path');
 
 const Logs = require('./logs');
 const limits = require('./limits');
+const events = require('./chatEvents');
+const { writeFileAtomic } = require('./fsUtil');
 
 const log = new Logs('chatStore');
 
@@ -46,18 +48,7 @@ const log = new Logs('chatStore');
 // 因此这个检查兼作路径穿越防护。
 const { CHANNEL_ID_RE: ID_PATTERN } = limits;
 
-const { IMAGE_DATA_URL_RE: DATA_URL_RE } = limits;
 const MAX_MESSAGES = 300; // 每频道：存储、驻内存并下发
-const MAX_IMAGES = 9; // 与客户端批次协议相同的上限
-const MAX_IMAGE_CHARS = limits.IMAGE_MAX_CHARS;
-const NAME_MAX = limits.PEER_NAME_MAX;
-const TEXT_MAX = limits.CHAT_TEXT_MAX;
-const REPLY_TEXT_MAX = limits.REPLY_TEXT_MAX; // 回复气泡内展示的引用摘要
-// 回应上限：每条消息的不同 emoji 数、每个 emoji 的回应者名字数，
-// 以及 emoji 字符串本身（有的 emoji 含多个码点 + 修饰符）
-const REACTIONS_MAX_EMOJI = 8;
-const REACTIONS_MAX_NAMES = 50;
-const REACTION_EMOJI_MAX = limits.REACTION_EMOJI_MAX;
 // 每频道的磁盘预算，含图片；行从最旧一端丢弃直到文件装得下
 // （图片占大头——文字行只有几百字节）。越过预算的
 // COMPACT_AT_RATIO（90%）后追加照常工作；越线只排期一个
@@ -69,11 +60,12 @@ const COMPACT_AT_RATIO = 0.9;
 // 编辑/回应/消息的爆发合并成一次重写。
 const COMPACT_DELAY_MS = 1000;
 // 追平分页：每次请求只发一页——join 时一次、每次向上滚动一页。
-// 字节预算让单次 emit 保持在 socket.io 包上限之内
-// （图片占大头——最新一行总是随行，
-// 较旧的先丢弃）。
+// 字节预算（estimateBytes 按序列化后的 UTF-8 字节精确计）让单次
+// emit 连同事件包封留在 socket.io 的 maxHttpBufferSize
+// （server.js，2e6）之内——留出封包余量。
+// （图片占大头——最新一行总是随行，较旧的先丢弃。）
 const CHAT_PAGE_SIZE = 10;
-const MAX_SEND_BYTES = 2 * 1024 * 1024;
+const MAX_SEND_BYTES = 1_900_000;
 // 后台修剪走查存储（内存条目 + 磁盘文件）的频率，
 // 让超出留存窗口的消息真正消失——即使频道无人触碰
 // （例如 admin 缩短了窗口之后）。
@@ -182,7 +174,7 @@ class ChatStore {
         let messages;
         try {
             const raw = JSON.parse(fs.readFileSync(legacy, 'utf8'));
-            messages = Array.isArray(raw?.messages) ? raw.messages.filter(isPlainMessage) : [];
+            messages = Array.isArray(raw?.messages) ? raw.messages.filter(events.isPlainMessage) : [];
         } catch (err) {
             // 损坏的历史文件绝不能拖垮服务器——隔离它
             // （与频道注册表相同的模式）并以空状态启动
@@ -239,8 +231,8 @@ class ChatStore {
                 const row = JSON.parse(line);
                 // 消息行绝不带 `e` 字段——它是事件标记
                 if (row && typeof row === 'object' && !Array.isArray(row) && row.e !== undefined) {
-                    applyEvent(messages, row); // 无效/未知事件只是不生效
-                } else if (isPlainMessage(row)) {
+                    events.applyEvent(messages, row); // 无效/未知事件只是不生效
+                } else if (events.isPlainMessage(row)) {
                     messages.push(row);
                 } else {
                     bad++;
@@ -276,15 +268,15 @@ class ChatStore {
 
         // 与客户端输入框完全一致的 trim + 上限（input.trim().slice(500)），
         // 存储的消息绝不与实时渲染的出现偏差
-        const cleanName = typeof name === 'string' ? name.slice(0, NAME_MAX) : '';
-        const cleanText = typeof text === 'string' ? text.trim().slice(0, TEXT_MAX) : '';
-        const images = sanitizeImages(imgs);
+        const cleanName = typeof name === 'string' ? name.slice(0, limits.PEER_NAME_MAX) : '';
+        const cleanText = events.cleanChatText(text);
+        const images = events.sanitizeImages(imgs);
         if (!cleanText && !images.length) return null;
 
         const entry = this.entry(id, { persistent });
         const message = { ts, name: cleanName, text: cleanText };
         if (images.length) message.imgs = images; // 纯文字行省略该字段：保持文件紧凑
-        const cleanReply = sanitizeReply(reply);
+        const cleanReply = events.sanitizeReply(reply);
         if (cleanReply) message.reply = cleanReply;
         entry.messages.push(message);
         if (!persistent) {
@@ -378,11 +370,10 @@ class ChatStore {
     edit(id, { ts, name, text }, { persistent = true } = {}) {
         const row = this.findRow(id, ts, name, { persistent });
         if (!row || row.deleted) return null;
-        const cleanText = typeof text === 'string' ? text.trim().slice(0, TEXT_MAX) : '';
+        const cleanText = events.cleanChatText(text);
         if (!cleanText) return null;
-        row.text = cleanText;
-        row.edited = true;
-        // 事件行经 applyEvent('edit') 重放——两处必须保持同步
+        // 变更与 applyEvent('edit') 重放共用同一实现（chatEvents）
+        events.applyEditText(row, cleanText);
         this.persistEvent(id, persistent, { e: 'edit', ts, name, text: cleanText });
         return row;
     }
@@ -394,11 +385,8 @@ class ChatStore {
     remove(id, { ts, name }, { persistent = true } = {}) {
         const row = this.findRow(id, ts, name, { persistent });
         if (!row || row.deleted) return null;
-        row.deleted = true;
-        row.text = '';
-        delete row.imgs;
-        delete row.reactions;
-        // 事件行经 applyEvent('del') 重放——两处必须保持同步
+        // 变更与 applyEvent('del') 重放共用同一实现（chatEvents）
+        events.applyDeleteRow(row);
         this.persistEvent(id, persistent, { e: 'del', ts, name });
         return row;
     }
@@ -410,30 +398,14 @@ class ChatStore {
     react(id, { ts, name, emoji, who, op }, { persistent = true } = {}) {
         const row = this.findRow(id, ts, name, { persistent });
         if (!row || row.deleted) return null;
-        const cleanEmoji = typeof emoji === 'string' ? emoji.trim().slice(0, REACTION_EMOJI_MAX) : '';
-        const whoName = typeof who === 'string' ? who.slice(0, NAME_MAX) : '';
+        const cleanEmoji = typeof emoji === 'string' ? emoji.trim().slice(0, limits.REACTION_EMOJI_MAX) : '';
+        const whoName = typeof who === 'string' ? who.slice(0, limits.PEER_NAME_MAX) : '';
         if (!cleanEmoji || !whoName) return null;
 
-        // 每个 emoji 的数组也要拷贝：原地变异会泄漏进 row.reactions，
-        // 让下面的 changed 检查总是相等
-        const reactions = { ...(row.reactions || {}) };
-        const names = [...(reactions[cleanEmoji] || [])];
-        const idx = names.indexOf(whoName);
-        if (op === 'remove') {
-            if (idx !== -1) names.splice(idx, 1);
-        } else if (idx === -1) {
-            // 添加（幂等）：竞态客户端的重复添加是无操作
-            if (Object.keys(reactions).length >= REACTIONS_MAX_EMOJI && !reactions[cleanEmoji]) return row;
-            if (names.length >= REACTIONS_MAX_NAMES) return row;
-            names.push(whoName);
-        }
-        if (names.length) reactions[cleanEmoji] = names;
-        else delete reactions[cleanEmoji];
-        const changed = JSON.stringify(reactions) !== JSON.stringify(row.reactions || {});
-        if (Object.keys(reactions).length) row.reactions = reactions;
-        else delete row.reactions;
+        // 变更与 applyEvent('react') 重放共用同一实现（chatEvents）；
+        // changed=false（重复/封顶/空移除）不落事件行
+        const changed = events.toggleReaction(row, cleanEmoji, whoName, op);
         if (changed) {
-            // 事件行经 applyEvent('react') 重放——两处必须保持同步
             this.persistEvent(id, persistent, {
                 e: 'react',
                 ts,
@@ -464,7 +436,7 @@ class ChatStore {
         if (!ID_PATTERN.test(id) || this.retentionMs(id) <= 0) return null;
         if (!Number.isFinite(ts) || ts <= 0 || typeof name !== 'string' || !name) return null;
         const entry = this.entry(id, { persistent });
-        return findRowIn(entry.messages, ts, name);
+        return events.findRowIn(entry.messages, ts, name);
     }
 
     /**
@@ -495,7 +467,7 @@ class ChatStore {
         let used = 0;
         let i = end - 1;
         for (; i >= start; i--) {
-            const size = estimateBytes(messages[i]);
+            const size = events.estimateBytes(messages[i]);
             // 页内最新一行总是随行；一旦触及预算，较旧的先丢弃，
             // 等下一页
             if (picked.length && used + size > maxBytes) break;
@@ -570,11 +542,11 @@ class ChatStore {
             // 从最旧一端收缩，直到文件装进磁盘预算。
             // 用字节长度而非 String#length：UTF-8 下中日韩文字
             // 每个码单元 3 字节，而预算是磁盘预算。
-            let lines = serializeLines(entry.messages);
+            let lines = events.serializeLines(entry.messages);
             let bytes = Buffer.byteLength(lines, 'utf8');
             while (bytes > this.maxBytes && entry.messages.length > 1) {
                 entry.messages.shift();
-                lines = serializeLines(entry.messages);
+                lines = events.serializeLines(entry.messages);
                 bytes = Buffer.byteLength(lines, 'utf8');
             }
             this.writeFile(id, entry.messages, lines);
@@ -588,19 +560,8 @@ class ChatStore {
         }
     }
 
-    writeFile(id, messages, lines = serializeLines(messages)) {
-        const file = this.fileFor(id);
-        const tmp = `${file}.tmp`;
-        fs.writeFileSync(tmp, lines, 'utf8');
-        try {
-            fs.renameSync(tmp, file);
-        } catch (err) {
-            // Docker bind-mount 单文件（同 channels.json 情形）：rename()
-            // 无法替换挂载点，改为把载荷复制过去
-            if (!['EBUSY', 'EXDEV', 'EPERM'].includes(err.code)) throw err;
-            fs.copyFileSync(tmp, file);
-            fs.unlinkSync(tmp);
-        }
+    writeFile(id, messages, lines = events.serializeLines(messages)) {
+        writeFileAtomic(this.fileFor(id), lines);
     }
 
     /**
@@ -824,162 +785,6 @@ class ChatStore {
     }
 }
 
-/**
- * 把一条生命周期事件行重放到有序行列表上。与在线变更器
- * （edit/remove/react + 前缀丢弃）完全镜像，
- * 重放文件总能得到与写入进程内存中相同的行；
- * 更新版本带来的未知事件种类被跳过。
- */
-function applyEvent(messages, evt) {
-    switch (evt.e) {
-        case 'drop': {
-            // 前缀丢弃：留存窗口 / MAX_MESSAGES 上限移走了前 n 行
-            // ——精确计数，不依赖 ts/名字假设（`ts` 字段只是为了让
-            // restore 校验接受这一行）
-            if (!Number.isInteger(evt.n) || evt.n <= 0) return;
-            messages.splice(0, Math.min(evt.n, messages.length));
-            return;
-        }
-        case 'edit': {
-            if (!isEventTarget(evt)) return;
-            const text = typeof evt.text === 'string' ? evt.text.trim().slice(0, TEXT_MAX) : '';
-            if (!text) return;
-            const row = findRowIn(messages, evt.ts, evt.name);
-            if (!row || row.deleted) return;
-            row.text = text;
-            row.edited = true;
-            return;
-        }
-        case 'del': {
-            if (!isEventTarget(evt)) return;
-            const row = findRowIn(messages, evt.ts, evt.name);
-            if (!row || row.deleted) return;
-            row.deleted = true;
-            row.text = '';
-            delete row.imgs;
-            delete row.reactions;
-            return;
-        }
-        case 'react': {
-            if (!isEventTarget(evt)) return;
-            const emoji = typeof evt.emoji === 'string' ? evt.emoji.trim().slice(0, REACTION_EMOJI_MAX) : '';
-            const who = typeof evt.who === 'string' ? evt.who.slice(0, NAME_MAX) : '';
-            if (!emoji || !who) return;
-            const row = findRowIn(messages, evt.ts, evt.name);
-            if (!row || row.deleted) return;
-            const reactions = { ...(row.reactions || {}) };
-            const names = [...(reactions[emoji] || [])];
-            const idx = names.indexOf(who);
-            if (evt.op === 'remove') {
-                if (idx !== -1) names.splice(idx, 1);
-            } else if (idx === -1) {
-                // same caps as the live toggle: a capped or repeated add
-                // replays as the no-op it was when it happened
-                if (Object.keys(reactions).length >= REACTIONS_MAX_EMOJI && !reactions[emoji]) return;
-                if (names.length >= REACTIONS_MAX_NAMES) return;
-                names.push(who);
-            }
-            if (names.length) reactions[emoji] = names;
-            else delete reactions[emoji];
-            if (Object.keys(reactions).length) row.reactions = reactions;
-            else delete row.reactions;
-            return;
-        }
-        default:
-            return;
-    }
-}
-
-/** edit/del/react 事件行携带的行身份（ts + 发送者名字）。 */
-function isEventTarget(evt) {
-    return Number.isFinite(evt.ts) && typeof evt.name === 'string' && !!evt.name;
-}
-
-/** 在普通行列表中按 ts + 发送者名字找行（与重放共享）。 */
-function findRowIn(messages, ts, name) {
-    if (!Number.isFinite(ts) || typeof name !== 'string') return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const row = messages[i];
-        if (row.ts === ts && row.name === name) return row;
-    }
-    return null;
-}
-
-function serializeLines(messages) {
-    return messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
-}
-
-function isPlainMessage(m) {
-    return (
-        m &&
-        typeof m === 'object' &&
-        !Array.isArray(m) &&
-        Number.isFinite(m.ts) &&
-        typeof m.name === 'string' &&
-        typeof m.text === 'string' &&
-        (m.reply === undefined || isPlainReply(m.reply)) &&
-        (m.edited === undefined || typeof m.edited === 'boolean') &&
-        (m.deleted === undefined || typeof m.deleted === 'boolean') &&
-        (m.reactions === undefined || isPlainReactions(m.reactions)) &&
-        (m.imgs === undefined ||
-            // 旧版行（≤ voice.21）只存图片数量——加载时接受，
-            // 升级绝不丢掉更早的历史；客户端以「[image×N]」
-            // 占位符展示（数据本身从未存在）
-            Number.isInteger(m.imgs) ||
-            (Array.isArray(m.imgs) && m.imgs.every((s) => typeof s === 'string')))
-    );
-}
-
-/** 被回复行的引用摘要——与实时聊天事件相同的上限。 */
-function isPlainReply(reply) {
-    return (
-        reply &&
-        typeof reply === 'object' &&
-        !Array.isArray(reply) &&
-        typeof reply.name === 'string' &&
-        typeof reply.text === 'string' &&
-        Number.isFinite(reply.ts)
-    );
-}
-
-/** 回应映射：emoji -> 回应者名字数组（仅纯字符串）。 */
-function isPlainReactions(reactions) {
-    if (!reactions || typeof reactions !== 'object' || Array.isArray(reactions)) return false;
-    for (const names of Object.values(reactions)) {
-        if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) return false;
-    }
-    return true;
-}
-
-/** 归一化传入的回复载荷以供存储；null = 丢弃。 */
-function sanitizeReply(reply) {
-    if (!isPlainReply(reply)) return null;
-    return { name: reply.name.slice(0, NAME_MAX), text: reply.text.slice(0, REPLY_TEXT_MAX), ts: reply.ts };
-}
-
-/** 只保留白名单内、尺寸封顶的 data:image/* URL，至多 MAX_IMAGES 张。 */
-function sanitizeImages(input) {
-    const images = [];
-    if (!Array.isArray(input)) return images;
-    for (const item of input) {
-        if (images.length >= MAX_IMAGES) break;
-        if (typeof item === 'string' && item.length > 0 && item.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(item)) {
-            images.push(item);
-        }
-    }
-    return images;
-}
-
-/** 单行序列化大小的粗估——对发送预算而言足够了。 */
-function estimateBytes(message) {
-    let size = 80 + (message.name?.length || 0) + (message.text?.length || 0);
-    if (Array.isArray(message.imgs)) for (const img of message.imgs) size += img.length + 8;
-    return size;
-}
-
 module.exports = ChatStore;
 module.exports.MAX_MESSAGES = MAX_MESSAGES;
-module.exports.MAX_FILE_BYTES = MAX_FILE_BYTES;
-module.exports.MAX_SEND_BYTES = MAX_SEND_BYTES;
 module.exports.CHAT_PAGE_SIZE = CHAT_PAGE_SIZE;
-module.exports.SWEEP_INTERVAL_MS = SWEEP_INTERVAL_MS;

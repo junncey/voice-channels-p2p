@@ -18,6 +18,7 @@ const zlib = require('zlib');
 const Logs = require('./logs');
 const { readTar } = require('./backup');
 const limits = require('./limits');
+const { writeFileAtomic } = require('./fsUtil');
 
 const log = new Logs('restore');
 
@@ -170,24 +171,19 @@ async function applyBackupArchive(gzipBuf, { channelStore, chatStore }) {
     }
 
     // 历史文件：按其在归档里的扩展名写入（旧版 .json 条目在首次加载时
-    // 迁移为 .jsonl，与老安装的行为完全一致）
-    for (const [id, entry] of histories) {
-        const file = path.join(chatStore.dir, `${id}${entry.ext}`);
-        const tmp = `${file}.tmp`;
-        fs.writeFileSync(tmp, entry.data, 'utf8');
-        try {
-            fs.renameSync(tmp, file);
-        } catch (err) {
-            if (!['EBUSY', 'EXDEV', 'EPERM'].includes(err.code)) throw err;
-            fs.copyFileSync(tmp, file);
-            fs.unlinkSync(tmp);
+    // 迁移为 .jsonl，与老安装的行为完全一致）。即使中途失败也必须在
+    // finally 里 reload——内存缓存绝不能继续持有已被替换前的旧行。
+    try {
+        for (const [id, entry] of histories) {
+            writeFileAtomic(path.join(chatStore.dir, `${id}${entry.ext}`), entry.data);
         }
+        // 全量状态语义：归档里没有的频道，其历史文件一律删除
+        for (const id of chatStore.listFiles()) {
+            if (!histories.has(id)) chatStore.removeChannel(id);
+        }
+    } finally {
+        chatStore.reload(); // 内存缓存惰性加载新文件
     }
-    // 全量状态语义：归档里没有的频道，其历史文件一律删除
-    for (const id of chatStore.listFiles()) {
-        if (!histories.has(id)) chatStore.removeChannel(id);
-    }
-    chatStore.reload(); // 内存缓存惰性加载新文件
 
     log.info('Backup restored', { channels: registry.channels.length, histories: histories.size });
     return { channels: registry.channels.length, histories: histories.size };

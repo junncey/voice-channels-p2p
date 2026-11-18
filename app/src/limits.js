@@ -28,6 +28,14 @@ const CHAT_TEXT_MAX = 500;
 const REPLY_TEXT_MAX = 80;
 // 表情回应的 emoji 字符串（有的 emoji 含多个码点+修饰符）
 const REACTION_EMOJI_MAX = 16;
+// 表情回应：每条消息的不同 emoji 数、每个 emoji 的回应者名字数
+const REACTIONS_MAX_EMOJI = 8;
+const REACTIONS_MAX_NAMES = 50;
+// 单条消息携带的图片张数——与客户端批次协议相同的上限
+// （chatGateway 的 head/imgs 事件与 chatStore 存储共用）
+const MAX_IMAGES_PER_MESSAGE = 9;
+// 图片批次 id（客户端生成的字符串）的长度上限
+const IMG_BATCH_ID_MAX = 64;
 // 单图传输上限——镜像客户端上限（images.js 的 MAX_TRANSFER_CHARS）
 const IMAGE_MAX_CHARS = 1600 * 1024;
 // 自定义头像：同一 data-URL 白名单、更小的上限（客户端对应在 channel.js）
@@ -43,6 +51,10 @@ module.exports = {
     CHAT_TEXT_MAX,
     REPLY_TEXT_MAX,
     REACTION_EMOJI_MAX,
+    REACTIONS_MAX_EMOJI,
+    REACTIONS_MAX_NAMES,
+    MAX_IMAGES_PER_MESSAGE,
+    IMG_BATCH_ID_MAX,
     IMAGE_MAX_CHARS,
     AVATAR_MAX_CHARS,
     DEFAULT_MAX_PARTICIPANTS,

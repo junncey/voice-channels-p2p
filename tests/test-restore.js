@@ -14,8 +14,8 @@ const zlib = require('zlib');
 
 const ChannelStore = require('../app/src/channelStore');
 const ChatStore = require('../app/src/chatStore');
-const { tarFiles } = require('../app/src/backup');
 const { applyBackupArchive, RestoreError } = require('../app/src/restore');
+const { tarFiles } = require('./helpers');
 
 function tempDir(name) {
     const dir = path.join(os.tmpdir(), `vc-restore-test-${process.pid}-${name}`);

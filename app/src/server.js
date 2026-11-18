@@ -49,7 +49,8 @@ const { applyEmbedHeaders } = require('./middleware/embedHeaders');
 const { createRooms } = require('./rooms');
 const { createChatGateway } = require('./chatGateway');
 const { registerSignaling } = require('./signaling');
-const { registerAdminApi, BACKUP_INTERVAL_HOURS, BACKUP_KEEP } = require('./adminApi');
+const { registerAdminApi } = require('./adminApi');
+const { createScheduledBackup, BACKUP_INTERVAL_HOURS, BACKUP_KEEP } = require('./scheduledBackup');
 
 // 全服务器共用的一个常数时间比较实现（由 channelStore 持有——
 // 它就住在为之而建的密码哈希旁边）
@@ -457,7 +458,7 @@ app.get('/c/:channelId', (req, res) => {
 
 // 旧链接兼容：/join/<room> -> /c/<room>
 app.get('/join/:roomId', (req, res) => {
-    res.redirect(301, `/c/${req.params.roomId}`);
+    res.redirect(301, `/c/${encodeURIComponent(req.params.roomId)}`);
 });
 
 // admin 后台（未用 env 启用时 404）
@@ -472,7 +473,7 @@ app.get('/:roomId', (req, res) => {
     if (!roomId || roomId === 'admin' || roomId === 'favicon.ico') {
         return res.redirect('/');
     }
-    res.redirect(301, `/c/${roomId}`);
+    res.redirect(301, `/c/${encodeURIComponent(roomId)}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -523,9 +524,12 @@ app.get('/api/version', (req, res) => {
     res.json(Version.getVersionInfo(dir.public));
 });
 
+// 定时滚动备份（载荷收集也供管理端下载端点复用）
+const scheduledBackup = createScheduledBackup({ channelStore, chatStore, audit, log });
+
 // 管理后台 + host 的 REST 面（所有 /api/admin/* 与 /api/host/*，
-// 含备份/恢复与定时备份）
-const adminApi = registerAdminApi(app, {
+// 含备份下载与恢复）
+registerAdminApi(app, {
     rooms,
     channelStore,
     chatStore,
@@ -539,6 +543,7 @@ const adminApi = registerAdminApi(app, {
     verifyConsoleToken,
     safeEqualStrings,
     getIP,
+    scheduledBackup,
 });
 
 // ---------------------------------------------------------------------------
@@ -628,7 +633,7 @@ server.listen(port, null, () => {
         api_key_secret: config.api.keySecret ? 'configured' : 'not set',
         scheduled_backup: BACKUP_INTERVAL_HOURS > 0 ? `every ${BACKUP_INTERVAL_HOURS}h, keep ${BACKUP_KEEP}` : 'off',
     });
-    if (BACKUP_INTERVAL_HOURS > 0) adminApi.startScheduledBackup();
+    if (BACKUP_INTERVAL_HOURS > 0) scheduledBackup.start();
 });
 
 /**

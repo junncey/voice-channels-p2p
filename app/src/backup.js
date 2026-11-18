@@ -42,47 +42,52 @@ function fileHeader(name, size, mtime) {
 }
 
 /**
- * 把多个文件打包进单个 tar buffer。
- * @param {Array<{name: string, data: Buffer, mtime?: number}>} files
- * @returns {Buffer} tar 归档（以两个全零块结尾）
- */
-function tarFiles(files) {
-    const chunks = [];
-    for (const file of files) {
-        if (!Buffer.isBuffer(file.data)) continue;
-        const mtime = Number.isFinite(file.mtime) ? Math.floor(file.mtime / 1000) : Math.floor(Date.now() / 1000);
-        chunks.push(fileHeader(file.name, file.data.length, mtime));
-        chunks.push(file.data);
-        const pad = (BLOCK - (file.data.length % BLOCK)) % BLOCK;
-        if (pad) chunks.push(Buffer.alloc(pad));
-    }
-    chunks.push(Buffer.alloc(BLOCK * 2)); // 归档结束标记
-    return Buffer.concat(chunks);
-}
-
-/**
- * 异步生成器，逐块产出与 tarFiles() 相同的归档——这是 HTTP 备份的
- * 流式对应版：文件载荷绝不整体驻留内存，
- * 每个条目按块从磁盘读取，背压由消费侧的
- * stream.Readable.from 处理。
+ * 异步生成器，逐块产出 tar 归档——HTTP 备份的流式实现：
+ * 文件载荷绝不整体驻留内存，每个条目按块从磁盘读取，
+ * 背压由消费侧的 stream.Readable.from 处理。
  * @param {Array<{name: string, path?: string, data?: Buffer, mtime?: number}>} files
  *   带 `data` 的条目原样 yield；带 `path` 的条目从磁盘流式读取
  *   （调用方必须已确认文件存在且可读）。
  */
 async function* createTarIterator(files) {
     for (const file of files) {
-        const size = Buffer.isBuffer(file.data) ? file.data.length : fs.statSync(file.path).size;
         const mtime = Number.isFinite(file.mtime) ? Math.floor(file.mtime / 1000) : Math.floor(Date.now() / 1000);
-        yield fileHeader(file.name, size, mtime);
         if (Buffer.isBuffer(file.data)) {
+            yield fileHeader(file.name, file.data.length, mtime);
             yield file.data;
-        } else {
-            for await (const chunk of fs.createReadStream(file.path, { highWaterMark: 64 * 1024 })) {
-                yield chunk;
+            const pad = (BLOCK - (file.data.length % BLOCK)) % BLOCK;
+            if (pad) yield Buffer.alloc(pad);
+            continue;
+        }
+        // fd 钉住 inode，size 以 fstat 为准，流按头声明的 size
+        // 精确截断（end = size-1）：迭代期间 chatStore 对活跃频道
+        // 的追加写、或压缩重写的 rename 换文件，都不再撕裂归档
+        // （否则 tar 头声明的字节数与实际载荷错位 → 整个备份损坏）
+        const fd = fs.openSync(file.path, 'r');
+        try {
+            const size = fs.fstatSync(fd).size;
+            yield fileHeader(file.name, size, mtime);
+            if (size > 0) {
+                const stream = fs.createReadStream(null, {
+                    fd,
+                    start: 0,
+                    end: size - 1,
+                    highWaterMark: 64 * 1024,
+                    // autoClose 默认连显式 fd 一起自动释放（Node 24
+                    // 实测），生命周期统一交给下面的 finally
+                    autoClose: false,
+                });
+                for await (const chunk of stream) yield chunk;
+            }
+            const pad = (BLOCK - (size % BLOCK)) % BLOCK;
+            if (pad) yield Buffer.alloc(pad);
+        } finally {
+            try {
+                fs.closeSync(fd);
+            } catch {
+                /* 流异常路径可能已释放 */
             }
         }
-        const pad = (BLOCK - (size % BLOCK)) % BLOCK;
-        if (pad) yield Buffer.alloc(pad);
     }
     yield Buffer.alloc(BLOCK * 2); // 归档结束标记
 }
@@ -168,4 +173,4 @@ function sumRange(block, start, length) {
     return sum;
 }
 
-module.exports = { tarFiles, createTarIterator, readTar };
+module.exports = { fileHeader, createTarIterator, readTar };

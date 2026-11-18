@@ -155,7 +155,7 @@ function createRooms({ channelStore, chatStore, audit, log }) {
         // Object.hasOwn 把继承键（'constructor' 等）挡在查找之外
         const room = room_id && Object.hasOwn(channels, room_id) ? channels[room_id] : {};
         for (const [peer_id, sock] of Object.entries(room)) {
-            if (peer_id != socket_id) {
+            if (peer_id !== socket_id) {
                 sock.emit(msg, config);
             }
         }
@@ -171,7 +171,7 @@ function createRooms({ channelStore, chatStore, audit, log }) {
     }
 
     /** 向指定 peer 异步发送数据 */
-    async function sendToPeer(peer_id, sockets, msg, config = {}) {
+    async function sendToPeer(peer_id, msg, config = {}) {
         if (peer_id && Object.hasOwn(sockets, peer_id)) {
             sockets[peer_id].emit(msg, config);
         }
@@ -306,8 +306,6 @@ function createRooms({ channelStore, chatStore, audit, log }) {
         roomMetaKeys,
         ghosts,
         ghostKey,
-        GHOST_GRACE_MS,
-        GHOST_GRACE_LATE_MS,
         getPeerCount,
         getRoomPeers,
         getRoomMembers,
@@ -321,7 +319,6 @@ function createRooms({ channelStore, chatStore, audit, log }) {
         broadcastToRoom,
         sendToPeer,
         detachAsGhost,
-        expireGhost,
         releaseRoomEntry,
         broadcastRemovePeer,
         reapSession,
@@ -329,4 +326,4 @@ function createRooms({ channelStore, chatStore, audit, log }) {
     };
 }
 
-module.exports = { createRooms, GHOST_GRACE_MS, GHOST_GRACE_LATE_MS };
+module.exports = { createRooms };

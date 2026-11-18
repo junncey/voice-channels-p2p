@@ -13,6 +13,7 @@ chatEdit / chatDelete / chatReact），以及只有它们需要的
 
 const checkXSS = require('./xss.js');
 const limits = require('./limits');
+const { isImageDataUrl } = require('./payload');
 
 /**
  * 滑动窗口限流守卫：窗口内按 key 记录时间戳，key 一旦超出预算即返回 true。
@@ -69,25 +70,6 @@ function createChatGateway({ rooms, chatStore, channelStore, audit, log }) {
         }
     }, 60 * 1000).unref?.();
 
-    function sanitizeChatImage(url) {
-        return typeof url === 'string' &&
-            url.length > 0 &&
-            url.length <= limits.IMAGE_MAX_CHARS &&
-            limits.IMAGE_DATA_URL_RE.test(url)
-            ? url
-            : '';
-    }
-
-    /** 聊天事件上可选的回复引用载荷：严格形状，极小上限。 */
-    function sanitizeChatReply(reply) {
-        if (!reply || typeof reply !== 'object') return null;
-        const name = typeof reply.name === 'string' ? reply.name.slice(0, limits.PEER_NAME_MAX) : '';
-        const text = typeof reply.text === 'string' ? reply.text.slice(0, limits.REPLY_TEXT_MAX) : '';
-        const ts = Number(reply.ts);
-        if (!name || !text || !Number.isFinite(ts) || ts <= 0) return null;
-        return { name, text, ts };
-    }
-
     /** 把完成（或 TTL 到期）的批次存为一条历史行。 */
     function finalizeChatBatch(socketId, pending) {
         const stored = chatStore.append(
@@ -143,13 +125,13 @@ function createChatGateway({ rooms, chatStore, channelStore, audit, log }) {
 
             // 待决批次的图片部分
             if (typeof cfg.img === 'string') {
-                const batch = typeof cfg.batch === 'string' && cfg.batch.length <= 64 ? cfg.batch : '';
+                const batch =
+                    typeof cfg.batch === 'string' && cfg.batch.length <= limits.IMG_BATCH_ID_MAX ? cfg.batch : '';
                 const pending = batch ? chatBatches.get(socket.id)?.get(batch) : null;
                 if (!pending || pending.room_id !== room_id) return;
                 // 只推送到声明数量为止，重复/多余事件无法让该行膨胀
                 if (pending.images.length < pending.expected) {
-                    const image = sanitizeChatImage(cfg.img);
-                    if (image) pending.images.push(image);
+                    if (isImageDataUrl(cfg.img)) pending.images.push(cfg.img);
                 }
                 if (pending.images.length >= pending.expected) {
                     chatBatches.get(socket.id).delete(batch);
@@ -163,19 +145,19 @@ function createChatGateway({ rooms, chatStore, channelStore, audit, log }) {
             // 载荷绝不能从它经过；与 peerAvatar 相同的拆分）
             const sanitized = checkXSS(typeof cfg.msg === 'string' ? cfg.msg : '');
             const text = typeof sanitized === 'string' ? sanitized.slice(0, limits.CHAT_TEXT_MAX) : '';
-            const imageCount = Number.isInteger(cfg.imgs) && cfg.imgs > 0 && cfg.imgs <= 9 ? cfg.imgs : 0;
+            const imageCount =
+                Number.isInteger(cfg.imgs) && cfg.imgs > 0 && cfg.imgs <= limits.MAX_IMAGES_PER_MESSAGE ? cfg.imgs : 0;
             if (!text && !imageCount) return;
 
             const peer_name = peers[room_id]?.[senderUuid]?.peer_name; // 已 JOIN 的名字，服务端状态
             if (!peer_name) return;
 
-            // 可选的回复引用随行（接收方渲染为引用块，
-            // 并随该行一起持久化）
-            const reply = sanitizeChatReply(cfg.reply);
+            // 可选的回复引用随行（接收方渲染为引用块，并随该行一起
+            // 持久化——形状校验在 chatStore.append 内统一执行）
             if (!imageCount) {
                 const stored = chatStore.append(
                     room_id,
-                    { name: peer_name, text, imgs: [], ...(reply ? { reply } : {}) },
+                    { name: peer_name, text, imgs: [], ...(cfg.reply ? { reply: cfg.reply } : {}) },
                     { persistent: !channelStore.isTemp(room_id) }
                 );
                 // 发送者已用本地时间戳渲染了自己的行；回传权威 ts，
@@ -184,7 +166,7 @@ function createChatGateway({ rooms, chatStore, channelStore, audit, log }) {
                 return;
             }
 
-            const batch = typeof cfg.batch === 'string' && cfg.batch.length <= 64 ? cfg.batch : '';
+            const batch = typeof cfg.batch === 'string' && cfg.batch.length <= limits.IMG_BATCH_ID_MAX ? cfg.batch : '';
             if (!batch) return; // 图片批次必须携带客户端生成的 id
             chatBatchSweep();
             let batches = chatBatches.get(socket.id);
@@ -200,7 +182,7 @@ function createChatGateway({ rooms, chatStore, channelStore, audit, log }) {
                 text,
                 expected: imageCount,
                 images: [],
-                reply,
+                reply: cfg.reply ?? null, // append 落盘时统一归一化
                 ts: Date.now(),
             });
         });

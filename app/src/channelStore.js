@@ -18,6 +18,7 @@ const crypto = require('crypto');
 
 const Logs = require('./logs');
 const limits = require('./limits');
+const { writeFileAtomic } = require('./fsUtil');
 
 const log = new Logs('channelStore');
 
@@ -418,20 +419,8 @@ class ChannelStore {
             log.warn('Channel registry backup failed', { file: this.filePath, error: err.message });
         }
         const data = JSON.stringify({ version: 1, settings: this.settings, channels: this.channels }, null, 4);
-        const tmp = `${this.filePath}.tmp`;
         // mode 0o600：注册表存有密码哈希（仅 POSIX；Windows 上无效）
-        fs.writeFileSync(tmp, data, { encoding: 'utf8', mode: 0o600 });
-        try {
-            fs.renameSync(tmp, this.filePath);
-        } catch (err) {
-            // Docker 常把 channels.json 以*单文件*形式 bind-mount。rename() 无法
-            // 替换挂载点（EBUSY / EXDEV），因此回退为把载荷复制过去——
-            // 覆盖挂载文件的内容是允许的，只有换掉它的
-            // inode 不行。
-            if (!['EBUSY', 'EXDEV', 'EPERM'].includes(err.code)) throw err;
-            fs.copyFileSync(tmp, this.filePath);
-            fs.unlinkSync(tmp);
-        }
+        writeFileAtomic(this.filePath, data, { mode: 0o600 });
     }
 
     isValidId(id) {
@@ -810,9 +799,6 @@ module.exports.hashPassword = hashPassword;
 module.exports.verifyPassword = verifyPassword;
 module.exports.verifyPasswordCompat = verifyPasswordCompat;
 module.exports.constantTimeEquals = constantTimeEquals;
-module.exports.validateDefinition = validateDefinition;
-module.exports.CHANNEL_ID_PATTERN = CHANNEL_ID_PATTERN;
-module.exports.MAX_PARTICIPANTS = MAX_PARTICIPANTS;
 module.exports.MAX_TEMP_ROOMS = MAX_TEMP_ROOMS;
 module.exports.MAX_TEMPS_PER_IP = MAX_TEMPS_PER_IP;
 module.exports.TEMP_CREATE_MAX_PER_WINDOW = TEMP_CREATE_MAX_PER_WINDOW;

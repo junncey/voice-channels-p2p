@@ -1,18 +1,16 @@
 /*
-管理后台 + host 的 REST 面，及其背后的备份/恢复机制。
+管理后台 + host 的 REST 面，及其背后的恢复机制。
 
 所有 /api/admin/* 与 /api/host/*（含 host 登录与聊天导出）都在这里：
 在 CHANNEL_ADMIN_PASSWORD 与 CHANNEL_ADMIN_JWT_SECRET 两者都配置之前，
 后台完全禁用——每条路由一律 404。
-这里还负责定时滚动备份（与管理端下载相同的归档格式）。
-JWT 签发/校验与登录限流器由 server.js（装配点）注入；
-这里的一切都是从 server.js 原样迁出的。
+定时滚动备份在 scheduledBackup.js（其载荷收集也供这里的下载端点
+复用）。JWT 签发/校验与登录限流器由 server.js（装配点）注入。
 */
 
 'use strict';
 
 const fs = require('fs');
-const path = require('path');
 const zlib = require('zlib');
 const express = require('express');
 const { pipeline, Readable } = require('stream');
@@ -20,15 +18,8 @@ const { pipeline, Readable } = require('stream');
 const checkXSS = require('./xss.js');
 const { createTarIterator } = require('./backup');
 const { applyBackupArchive, RestoreError } = require('./restore');
-const { sanitizeExceptSecrets, sanitizeChannelPayload } = require('./payload');
-
-// 定时滚动备份（未设置 CHANNEL_BACKUP_INTERVAL_HOURS 即关闭）：
-// 向 CHANNEL_BACKUP_DIR 写入 tar.gz，只保留最新的
-// CHANNEL_BACKUP_KEEP 份归档。直接读 env，让既有的 config.js
-// （创建于这些选项出现之前）无需改动即可继续工作。
-const BACKUP_INTERVAL_HOURS = Number(process.env.CHANNEL_BACKUP_INTERVAL_HOURS) || 0;
-const BACKUP_KEEP = Math.max(1, Number(process.env.CHANNEL_BACKUP_KEEP) || 7);
-const BACKUP_DIR = process.env.CHANNEL_BACKUP_DIR || path.join(__dirname, 'backups');
+const { sanitizeExceptSecrets, sanitizeChannelPayload, hostTokenValidFor } = require('./payload');
+const { BACKUP_INTERVAL_HOURS, BACKUP_KEEP } = require('./scheduledBackup');
 
 function registerAdminApi(
     app,
@@ -46,6 +37,7 @@ function registerAdminApi(
         verifyConsoleToken,
         safeEqualStrings,
         getIP,
+        scheduledBackup,
     }
 ) {
     const {
@@ -79,7 +71,7 @@ function registerAdminApi(
 
         const host = await channelStore.verifyHost(channelId, username, password);
         if (!host) {
-            log.warn('Host login failed', { channelId, username: host || username, ip: getIP(req) });
+            log.warn('Host login failed', { channelId, username, ip: getIP(req) });
             return res.status(401).json({ error: 'unauthorized' });
         }
 
@@ -234,28 +226,9 @@ function registerAdminApi(
      * 端到端流式（tar 迭代器 -> gzip 变换 -> 响应），
      * 因此无论历史体量多大，整个归档都不会整体驻留内存。
      */
-    /**
-     * admin 下载与定时备份共用的备份载荷：
-     * channels.json + 每个持久化的聊天历史文件作为归档条目，
-     * 预检可读性，让失败以干净的错误呈现，
-     * 而不是在下载头已发出之后中途掐断流。
-     */
-    function collectBackupEntries() {
-        const entries = [];
-        if (fs.existsSync(channelStore.filePath)) {
-            entries.push({ name: path.basename(channelStore.filePath), path: channelStore.filePath });
-        }
-        for (const id of chatStore.listFiles()) {
-            const file = chatStore.existingFileFor(id);
-            if (fs.existsSync(file)) entries.push({ name: `chat_history/${id}${path.extname(file)}`, path: file });
-        }
-        for (const entry of entries) fs.accessSync(entry.path, fs.constants.R_OK);
-        return entries;
-    }
-
     app.get('/api/admin/backup', requireAdmin, (req, res) => {
         try {
-            const entries = collectBackupEntries();
+            const entries = scheduledBackup.collectEntries();
             const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
             res.set({
                 'Content-Type': 'application/gzip',
@@ -374,14 +347,9 @@ function registerAdminApi(
         const header = req.headers.authorization || '';
         const token = header.startsWith('Bearer ') ? header.slice(7) : null;
         const payload = verifyConsoleToken(token);
-        const fallbackOk =
-            payload?.via === 'default-moderator' &&
-            Boolean(channelsCfg.defaultModerator) &&
-            channelStore.isHostless(channelId);
-        if (!payload || payload.role !== 'host' || payload.channelId !== channelId || !payload.username) {
-            return res.status(401).json({ error: 'unauthorized' });
-        }
-        if (!channelStore.isHost(channelId, payload.username) && !fallbackOk) {
+        // 与 join 路径共用的复查（payload.hostTokenValidFor）：
+        // 该频道必须仍配置着此主持人，或对无主频道的回退仍有效
+        if (!hostTokenValidFor(payload, channelId, { channelsCfg, channelStore })) {
             return res.status(401).json({ error: 'unauthorized' });
         }
 
@@ -413,66 +381,6 @@ function registerAdminApi(
         const p = (n) => String(n).padStart(2, '0');
         return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
     }
-
-    return { startScheduledBackup };
-
-    // -------------------------------------------------------------------------
-    // 定时滚动备份——与管理端下载相同的归档，按间隔写入
-    // BACKUP_DIR 并修剪到最新的 BACKUP_KEEP 份。
-    // -------------------------------------------------------------------------
-
-    function startScheduledBackup() {
-        const intervalMs = BACKUP_INTERVAL_HOURS * 60 * 60 * 1000;
-        const run = () => {
-            writeScheduledBackup()
-                .then((file) => log.info('Scheduled backup written', { file }))
-                .catch((err) => log.error('Scheduled backup failed', { error: err.message }));
-        };
-        // 立即先备一份（全新部署也有一份），之后按间隔执行
-        run();
-        const timer = setInterval(run, intervalMs);
-        timer.unref?.();
-    }
-
-    /** 把备份归档写进 BACKUP_DIR；以文件路径 resolve。 */
-    function writeScheduledBackup() {
-        return new Promise((resolve, reject) => {
-            let entries;
-            try {
-                entries = collectBackupEntries();
-                fs.mkdirSync(BACKUP_DIR, { recursive: true });
-            } catch (err) {
-                return reject(err);
-            }
-            const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-            const outFile = path.join(BACKUP_DIR, `voice-channels-backup-${stamp}.tar.gz`);
-            const out = fs.createWriteStream(outFile);
-            pipeline(Readable.from(createTarIterator(entries)), zlib.createGzip(), out, (err) => {
-                if (err) {
-                    fs.unlink(outFile, () => {});
-                    return reject(err);
-                }
-                pruneScheduledBackups();
-                audit.record('scheduledBackup', { file: path.basename(outFile), entries: entries.length });
-                resolve(outFile);
-            });
-        });
-    }
-
-    /** 只保留 BACKUP_DIR 里最新的 BACKUP_KEEP 份归档。 */
-    function pruneScheduledBackups() {
-        try {
-            const files = fs
-                .readdirSync(BACKUP_DIR)
-                .filter((name) => name.startsWith('voice-channels-backup-') && name.endsWith('.tar.gz'))
-                .sort(); // 时间戳按字典序排序 = 按时间序排序
-            for (const name of files.slice(0, Math.max(0, files.length - BACKUP_KEEP))) {
-                fs.unlinkSync(path.join(BACKUP_DIR, name));
-            }
-        } catch (err) {
-            log.warn('Scheduled backup prune failed', { error: err.message });
-        }
-    }
 }
 
-module.exports = { registerAdminApi, BACKUP_INTERVAL_HOURS, BACKUP_KEEP };
+module.exports = { registerAdminApi };
