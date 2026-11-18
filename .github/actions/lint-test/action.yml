@@ -1,0 +1,32 @@
+# Node 侧门禁（lint + mocha）：ci.yml 与 docker-build-push.yml 的
+# 发布门禁 job 共用——此前五步在两边逐字重复，改一处漏一处。
+name: 'Lint & Test'
+description: 'npm run lint（eslint + prettier + 文件行数预算）与 mocha 全量测试'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24.x' # LTS — matches the Dockerfile runtime
+        cache: npm
+
+    - name: Install dependencies
+      run: npm ci
+      shell: bash
+
+    - name: Create config from template
+      run: cp app/src/config.template.js app/src/config.js
+      shell: bash
+
+    - name: Lint (eslint + prettier + file-size budget)
+      run: npm run lint
+      shell: bash
+
+    - name: Run unit tests
+      run: npm test
+      shell: bash

@@ -3,9 +3,9 @@
  * 不会闪一下深色。偏好取值：'dark'（默认）、
  * 'light'、'auto'（= 跟随操作系统，实时）。 */
 (function () {
-    var pref = 'dark';
+    let pref = 'dark';
     try {
-        var stored = localStorage.getItem('vc_theme');
+        const stored = localStorage.getItem('vc_theme');
         if (stored === 'light' || stored === 'dark' || stored === 'auto') pref = stored;
     } catch (e) {
         /* 隐私模式等——保持默认 */
@@ -24,8 +24,8 @@
     }
     apply();
     try {
-        var mq = window.matchMedia('(prefers-color-scheme: light)');
-        var onChange = function () {
+        const mq = window.matchMedia('(prefers-color-scheme: light)');
+        const onChange = function () {
             if (pref === 'auto') apply();
         };
         if (mq.addEventListener) mq.addEventListener('change', onChange);

@@ -22,8 +22,8 @@ require('dotenv').config();
 
 // 工具：把 env 字符串解析为布尔值
 function getEnvBoolean(key, force_true_if_undefined = false) {
-    if (key == undefined && force_true_if_undefined) return true;
-    return key == 'true' ? true : false;
+    if (key === undefined && force_true_if_undefined) return true;
+    return key === 'true';
 }
 
 // 工具：安全解析 JSON env 变量，失败时回退
