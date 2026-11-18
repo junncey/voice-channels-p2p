@@ -490,6 +490,7 @@ Object.assign(x, {
     reacquireMicOrToast: voice.reacquireMicOrToast,
     recoverMicDevice: voice.recoverMicDevice,
     applySpeaker: voice.applySpeaker,
+    reapplyPeerVolume: voice.reapplyPeerVolume,
     reapplyAllVolumes: voice.reapplyAllVolumes,
     applySink: settingsUi.applySink,
     refreshDeviceSelects: settingsUi.refreshDeviceSelects,
