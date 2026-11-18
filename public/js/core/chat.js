@@ -10,37 +10,17 @@
  * DOM 跟随存储，而不信任本地回显。
  */
 
-import { el, formatTime, formatDate, avatarColor } from './utils.js';
-import { DATA_URL_RE, MAX_TRANSFER_CHARS } from './images.js';
-import { isEmojiOnly, openEmojiPicker } from './emoji.js';
+import { el, formatTime, formatDate } from './utils.js';
+import { DATA_URL_RE } from './images.js';
+import { buildAvatarNode } from './avatar.js';
+import { openEmojiPicker } from './emoji.js';
+import { validReply, validImages, validReactions, createTextRenderers, createLightbox } from './chatShared.js';
+
+// 兼容既有导入方（channel.js）：纯工具改由 chatShared 提供
+export { escapeRegExp, validReply } from './chatShared.js';
 
 /** 与上一条消息的间隔超过此值时显示时间分隔。 */
 const TIME_GAP_MS = 5 * 60 * 1000;
-
-// 镜像服务端持久化图片上限——渲染时拒绝更大的
-const MAX_IMAGE_CHARS = MAX_TRANSFER_CHARS;
-
-/** 转义成员名以用于 @提及 RegExp。 */
-export function escapeRegExp(text) {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * 消息载荷中的回复引用，渲染/存储前先形状校验并截断
- * ——与频道页的历史与实时路径共用。
- */
-export function validReply(reply) {
-    if (
-        !reply ||
-        typeof reply !== 'object' ||
-        typeof reply.name !== 'string' ||
-        typeof reply.text !== 'string' ||
-        !Number.isFinite(reply.ts)
-    ) {
-        return null;
-    }
-    return { name: reply.name.slice(0, 24), text: reply.text.slice(0, 80), ts: reply.ts };
-}
 
 /**
  * @param {HTMLElement} container 可滚动的消息列表
@@ -212,6 +192,7 @@ export function initChat(
         deleted = false,
         edited = false,
         reactions = null,
+        bindAck = true,
     }) {
         if (!text && !deleted) return;
         const stick = nearBottom();
@@ -232,9 +213,9 @@ export function initChat(
             reactions,
         });
         append(row, stick);
-        // 服务器分配权威 ts；chatAck 把它绑回刚渲染的行
-        // （编辑/撤回/回应按 ts+name 查行）
-        if (self && !deleted) rememberPending(row);
+        // 服务器分配权威 ts；chatAck 把它绑回刚渲染的行——历史
+        // 渲染以 bindAck:false 绕过（其 ts 已是权威值）
+        if (self && !deleted && bindAck) rememberPending(row);
     }
 
     /** 本地渲染的本端行入队，直到服务器的 chatAck 落地。 */
@@ -338,6 +319,8 @@ export function initChat(
                     deleted: !!msg.deleted,
                     edited: !!msg.edited,
                     reactions: validReactions(msg.reactions),
+                    // 历史行的 ts 已是服务器权威值，不得进 ack 队列
+                    bindAck: false,
                 });
             }
             shown++;
@@ -345,64 +328,8 @@ export function initChat(
         if (shown && dividerText) add({ text: dividerText, system: true });
     }
 
-    /** 带 @提及高亮的纯文本气泡（含已编辑标记）。 */
-    function textBubble(text, edited = false) {
-        const bubble = el('div', { class: 'msg-bubble' }, textNode(text, edited));
-        // 已编辑标记在 .msg-text 内，配上超大字形会撑爆，
-        // 所以编辑过的消息保持普通气泡
-        if (!edited && isEmojiOnly(text)) bubble.classList.add('emoji-only');
-        return bubble;
-    }
-
-    function textNode(text, edited) {
-        const node = el('div', { class: 'msg-text' }, ...mentionSegments(text));
-        if (edited) node.append(el('span', { class: 'msg-edited', text: editedText }));
-        return node;
-    }
-
-    /**
-     * 把文本拆成节点，高亮在线成员的 `@name`（自己的名字
-     * 用更强的样式）。只有纯文本节点——
-     * 绝不内插任何 HTML。
-     */
-    function mentionSegments(text) {
-        const names = [...new Set(mentionNames().filter(Boolean))];
-        const me = selfName();
-        if (!names.length || !text.includes('@')) return [text];
-        const pattern = new RegExp(`(@(?:${names.map(escapeRegExp).join('|')}))(?![\\p{L}\\p{N}_])`, 'gu');
-        const out = [];
-        let last = 0;
-        for (const match of text.matchAll(pattern)) {
-            const at = match.index;
-            if (at > last) out.push(text.slice(last, at));
-            const name = match[1].slice(1);
-            out.push(el('span', { class: 'mention' + (name === me ? ' self' : ''), text: match[1] }));
-            last = at + match[1].length;
-        }
-        if (last < text.length) out.push(text.slice(last));
-        return out.length ? out : [text];
-    }
-
-    /** 持久化的图片 URL，触碰 DOM 前重新校验。 */
-    function validImages(imgs) {
-        return (Array.isArray(imgs) ? imgs : [])
-            .filter(
-                (src) =>
-                    typeof src === 'string' && src.length > 0 && src.length <= MAX_IMAGE_CHARS && DATA_URL_RE.test(src)
-            )
-            .slice(0, 9);
-    }
-
-    /** 消息载荷中的回应表，渲染前先形状校验。 */
-    function validReactions(reactions) {
-        if (!reactions || typeof reactions !== 'object' || Array.isArray(reactions)) return null;
-        const out = {};
-        for (const [emoji, names] of Object.entries(reactions)) {
-            if (typeof emoji !== 'string' || emoji.length > 16) continue;
-            if (Array.isArray(names)) out[emoji] = names.filter((n) => typeof n === 'string').slice(0, 50);
-        }
-        return Object.keys(out).length ? out : null;
-    }
+    /** 文本节点/气泡（含 @提及高亮）——渲染器在 chatShared */
+    const { textBubble, textNode } = createTextRenderers({ getNames: mentionNames, getMe: selfName, editedText });
 
     function timeChipNode(time) {
         return el('div', { class: 'chat-time', text: timeChipText(time) });
@@ -854,17 +781,7 @@ export function initChat(
     }
 
     function avatarNode(name) {
-        const url = avatarFor ? avatarFor(name) : '';
-        if (url && DATA_URL_RE.test(url)) {
-            const img = el('img', { class: 'msg-avatar img', alt: '' });
-            img.src = url; // 创建后设置；src 是校验过的 data URL
-            return img;
-        }
-        return el(
-            'div',
-            { class: 'msg-avatar', style: { background: avatarColor(name) } },
-            (name || '?').trim().charAt(0).toUpperCase() || '?'
-        );
+        return buildAvatarNode(name, avatarFor ? avatarFor(name) : '', 'msg-avatar');
     }
 
     /**
@@ -944,35 +861,11 @@ export function initChat(
         updateJumpPill(); // 无需滚动事件即可显隐胶囊
     }
 
-    // ----- 灯箱（点击图片全尺寸查看） -----
+    // ----- 灯箱（点击图片全尺寸查看，实现在 chatShared） -----
 
-    let lightbox = null;
-
+    const lightbox = createLightbox(downloadText);
     function openLightbox(src, alt) {
-        closeLightbox();
-        const img = el('img', { alt });
-        img.src = src;
-        const download = el('a', { class: 'btn ghost sm', download: alt || 'image', href: src, text: downloadText });
-        download.setAttribute('download', alt || 'image');
-        lightbox = el(
-            'div',
-            { class: 'lightbox', onclick: () => closeLightbox() },
-            el('div', { class: 'lightbox-bar', onclick: (e) => e.stopPropagation() }, download),
-            img
-        );
-        document.body.append(lightbox);
-        document.addEventListener('keydown', lightboxEsc);
-    }
-
-    function lightboxEsc(event) {
-        if (event.key === 'Escape') closeLightbox();
-    }
-
-    function closeLightbox() {
-        if (!lightbox) return;
-        document.removeEventListener('keydown', lightboxEsc);
-        lightbox.remove();
-        lightbox = null;
+        lightbox.open(src, alt);
     }
 
     showEmpty();

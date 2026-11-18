@@ -66,7 +66,7 @@ export const EMOJIS = [
 
 let emojiPickerNode = null;
 
-export function closeEmojiPicker() {
+function closeEmojiPicker() {
     if (!emojiPickerNode) return;
     emojiPickerNode.remove();
     document.removeEventListener('click', emojiPickerOutside, true);

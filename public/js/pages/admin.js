@@ -197,7 +197,7 @@ function renderTable() {
     const out = [];
     const pushWithMembers = (channel, isTemp) => {
         out.push(channelRow(channel, isTemp));
-        if (expandedRooms.has(channel.id)) out.push(membersRow(channel, isTemp));
+        if (expandedRooms.has(channel.id)) out.push(membersRow(channel));
     };
     // 先渲染注册频道，再渲染活跃临时房间（仅可删除）
     channels.forEach((channel) => pushWithMembers(channel, false));

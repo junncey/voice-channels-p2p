@@ -13,13 +13,28 @@
  */
 
 const CHUNK_CHARS = 12 * 1024; // 每帧 base64 字符数——跨浏览器安全
-const MAX_FILE_BYTES = 8 * 1024 * 1024; // 用户选择/粘贴的原始文件
+export const MAX_FILE_BYTES = 8 * 1024 * 1024; // 用户选择/粘贴的原始文件（图片/头像/音效共用）
 export const MAX_TRANSFER_CHARS = 1600 * 1024; // 接收端上限（解码后约 1.15 MB）
 const MAX_INCOMING_TRANSFERS = 8; // 并发重组数——img-start 洪水防护
 const SAFE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 /** 共享 data URL 白名单（服务端 limits.IMAGE_DATA_URL_RE 的镜像）。 */
 export const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+
+/**
+ * 把用户选择的文件读入 data URL——三处 FileReader promise
+ * 封装（图片消息/头像裁剪/自定义音效）的共享实现。
+ * @returns {Promise<string>}
+ * @throws {Error} 'read-failed'
+ */
+export function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('read-failed'));
+        reader.readAsDataURL(file);
+    });
+}
 
 /**
  * 把选择/粘贴的图片文件读入可发送的 data URL。
@@ -30,12 +45,7 @@ export async function fileToImageMessage(file) {
     if (!file || !file.type || !file.type.startsWith('image/')) throw new Error('not-image');
     if (file.size > MAX_FILE_BYTES) throw new Error('too-large');
 
-    const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('read-failed'));
-        reader.readAsDataURL(file);
-    });
+    const dataUrl = await fileToDataUrl(file);
     if (!DATA_URL_RE.test(dataUrl)) throw new Error('not-image');
 
     // GIF 原样保留（canvas 会杀掉动画），小原图同样原样保留

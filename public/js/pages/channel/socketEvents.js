@@ -206,7 +206,11 @@ export function createSocketEvents({
         s.socket.timeout(8000).emit('chatPage', { room_id: channelId, before: historyCursor ?? 0 }, (err, res) => {
             historyLoading = false;
             s.chat.setHistoryFooter(null);
-            if (err) return;
+            if (err) {
+                // 超时/服务器拒绝——页脚已清、滚动可重试，但别完全无声
+                console.warn('[chat] history page fetch failed', err);
+                return;
+            }
             const messages = Array.isArray(res?.messages) ? res.messages : [];
             historyHasMore = res?.hasMore === true;
             if (messages.length) {

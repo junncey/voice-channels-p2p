@@ -43,6 +43,11 @@ export function formatDate(date = new Date()) {
     return `${mm}-${dd} ${formatTime(d)}`;
 }
 
+/** @提及的词边界断言（后面不紧跟字母/数字/下划线）——高亮
+ *  （chat.js）与桌面通知判定（notify.js）共用：改一处漏一处
+ *  会造成两者的提及判定不一致。 */
+export const MENTION_BOUNDARY = '(?![\\p{L}\\p{N}_])';
+
 /** 由昵称确定性推导头像颜色。 */
 export function avatarColor(name = '') {
     let hash = 0;

@@ -17,6 +17,7 @@ export function createComposer({
     openEmojiPicker,
     fileToImageMessage,
     sendImageData,
+    MAX_FILE_BYTES,
     toast,
     t,
     $,

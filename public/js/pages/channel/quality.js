@@ -25,6 +25,45 @@ recovery.js 拆出，与 channel/relay.js 同族；所需状态经注入
 交给它处理。
 */
 
+/**
+ * 同一窗口内的 NetEQ 掩蔽率（%）：两次轮询的累计计数器差分。
+ * 任一计数器未上报（null）或窗口无增量 → null——
+ * 所有消费方都视为「无结论」，绝不当作 0。
+ */
+function windowConcealPct(prev, cur) {
+    if (
+        prev.concealedSamples === null ||
+        cur.concealedSamples === null ||
+        prev.totalSamplesReceived === null ||
+        cur.totalSamplesReceived === null
+    ) {
+        return null;
+    }
+    const dTotal = cur.totalSamplesReceived - prev.totalSamplesReceived;
+    if (dTotal <= 0) return null;
+    return Math.round(((cur.concealedSamples - prev.concealedSamples) / dTotal) * 1000) / 10;
+}
+
+/**
+ * 同一窗口内实际达成的播放缓冲延迟（ms）—— 闭环抖动加深：
+ * 浏览器真正生效的目标会在这里显现（delay 是累计秒数，
+ * count 是累计帧数；窗口比值即平均深度）。未上报或无增量
+ * → null。
+ */
+function windowJbDelayMs(prev, cur) {
+    if (
+        prev.jitterBufferDelay === null ||
+        cur.jitterBufferDelay === null ||
+        prev.jitterBufferEmittedCount === null ||
+        cur.jitterBufferEmittedCount === null
+    ) {
+        return null;
+    }
+    const dCount = cur.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
+    if (dCount <= 0) return null;
+    return Math.round(((cur.jitterBufferDelay - prev.jitterBufferDelay) / dCount) * 1000);
+}
+
 export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, t }) {
     function pathBadgeNode(peerId) {
         const node = el('span', { class: 'badge path-badge' });
@@ -196,36 +235,11 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
                     rec.loss = Math.round(loss * 10) / 10;
                     rec.kbps =
                         dSec > 0 ? Math.round(((inbound.bytesReceived - prev.bytesReceived) * 8) / dSec / 1000) : null;
-                    // 同一窗口内的 NetEQ 掩蔽率；任一计数器
-                    // 未上报 → null，所有消费方都视为「无结论」
-                    rec.conceal =
-                        prev.concealedSamples !== null &&
-                        inbound.concealedSamples !== null &&
-                        prev.totalSamplesReceived !== null &&
-                        inbound.totalSamplesReceived !== null &&
-                        inbound.totalSamplesReceived - prev.totalSamplesReceived > 0
-                            ? Math.round(
-                                  ((inbound.concealedSamples - prev.concealedSamples) /
-                                      (inbound.totalSamplesReceived - prev.totalSamplesReceived)) *
-                                      1000
-                              ) / 10
-                            : null;
-                    // 同一窗口内实际达成的播放缓冲延迟 —— 闭环
-                    // 抖动加深：浏览器真正生效的目标会在这里显现
-                    // （delay 是累计秒数，count 是累计帧数；两者的
-                    // 窗口比值即平均深度 ms）
-                    rec.jbDelay =
-                        prev.jitterBufferDelay !== null &&
-                        inbound.jitterBufferDelay !== null &&
-                        prev.jitterBufferEmittedCount !== null &&
-                        inbound.jitterBufferEmittedCount !== null &&
-                        inbound.jitterBufferEmittedCount - prev.jitterBufferEmittedCount > 0
-                            ? Math.round(
-                                  ((inbound.jitterBufferDelay - prev.jitterBufferDelay) /
-                                      (inbound.jitterBufferEmittedCount - prev.jitterBufferEmittedCount)) *
-                                      1000
-                              )
-                            : null;
+                    // 同一窗口内的 NetEQ 掩蔽率；任一计数器未上报
+                    // → null（「无结论」），见 windowConcealPct
+                    rec.conceal = windowConcealPct(prev, inbound);
+                    // 同一窗口内实际达成的播放缓冲延迟（见 windowJbDelayMs）
+                    rec.jbDelay = windowJbDelayMs(prev, inbound);
                     if (loss >= LOSS_BAD_PCT) {
                         rec.bad += 1;
                         rec.good = 0;

@@ -72,18 +72,25 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
     }
 
     /** 把有效状态推到本地轨道 / 对端 / UI。 */
+    /** 向房间广播自己的 audio/deafen/share 状态（peerStatus 三处共用形状）。
+     *  返回是否真的发出（未加入/无连接时为 false，调用方的去重基线不动）。 */
+    function broadcastSelfStatus(element, status) {
+        if (!s.socket || !s.joined) return false;
+        s.socket.emit('peerStatus', {
+            room_id: channelId,
+            peer_name: s.selfName,
+            peer_id: s.selfUuid,
+            element,
+            status,
+        });
+        return true;
+    }
+
     function applyMicState() {
         const live = onAir();
         applyTrackGate(live);
-        if (s.socket && s.joined && live !== lastOnAir) {
+        if (live !== lastOnAir && broadcastSelfStatus('audio', live)) {
             lastOnAir = live;
-            s.socket.emit('peerStatus', {
-                room_id: channelId,
-                peer_name: s.selfName,
-                peer_id: s.selfUuid,
-                element: 'audio',
-                status: live,
-            });
         }
         const self = members.get(s.selfUuid);
         if (self) self.peer_audio_status = live;
@@ -112,15 +119,8 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         const icon = $('#memberList .member[data-id="' + (s.selfUuid || '') + '"] .member-deafen');
         if (icon) icon.classList.toggle('on', s.deafened);
         reapplyAllVolumes(); // 0×任何数，两条播放路径同时静音
-        if (s.socket && s.joined && s.deafened !== lastDeafenSent) {
+        if (s.deafened !== lastDeafenSent && broadcastSelfStatus('deafen', s.deafened)) {
             lastDeafenSent = s.deafened;
-            s.socket.emit('peerStatus', {
-                room_id: channelId,
-                peer_name: s.selfName,
-                peer_id: s.selfUuid,
-                element: 'deafen',
-                status: s.deafened,
-            });
         }
     }
 
@@ -137,15 +137,7 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             btn.classList.toggle('on', on);
             btn.title = t(on ? 'channel.shareStop' : 'channel.shareSound');
         }
-        if (s.socket && s.joined) {
-            s.socket.emit('peerStatus', {
-                room_id: channelId,
-                peer_name: s.selfName,
-                peer_id: s.selfUuid,
-                element: 'share',
-                status: on,
-            });
-        }
+        broadcastSelfStatus('share', on);
     }
 
     function bindPttKeys() {
@@ -264,7 +256,9 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
             let apps = null;
             if (base) {
                 try {
-                    apps = (await (await fetch(`${base}/api/processes`)).json()).apps;
+                    const res = await fetch(`${base}/api/processes`);
+                    // 非 200 的 JSON 体不能当应用列表解析
+                    if (res.ok) apps = (await res.json()).apps;
                 } catch {
                     /* 小工具刚好退出：走未检测提示 */
                 }

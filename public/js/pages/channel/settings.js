@@ -7,6 +7,7 @@
 `mem`（members.js）。
 */
 import { isModifierCode, keyLabel, normalizePttKey } from '/js/core/utils.js';
+import { fileToDataUrl, MAX_FILE_BYTES } from '/js/core/images.js';
 
 export function createSettings({
     s,
@@ -499,13 +500,8 @@ export function createSettings({
         if (!file || !file.type.startsWith('image/') || file.type === 'image/gif') {
             throw new Error('not-image');
         }
-        if (file.size > 8 * 1024 * 1024) throw new Error('too-large');
-        const dataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(String(reader.result || ''));
-            reader.onerror = () => reject(new Error('read-failed'));
-            reader.readAsDataURL(file);
-        });
+        if (file.size > MAX_FILE_BYTES) throw new Error('too-large');
+        const dataUrl = await fileToDataUrl(file);
         const img = await new Promise((resolve, reject) => {
             const image = new Image();
             image.onload = () => resolve(image);

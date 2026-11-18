@@ -5,6 +5,8 @@
 共享页面状态经 `s` 存取器对象到达（归 channel.js 所有）。
 */
 
+import { MENTION_BOUNDARY } from '/js/core/utils.js';
+
 export function createNotify({ s, x, channelId, escapeRegExp, toast, t }) {
     let baseTitle = '';
     let unreadCount = 0;
@@ -16,7 +18,8 @@ export function createNotify({ s, x, channelId, escapeRegExp, toast, t }) {
     /** 文本中包含对本机用户名的 @提及 时为 true */
     function mentionsMe(text) {
         if (!s.selfName || !text.includes('@')) return false;
-        const re = new RegExp(`@${escapeRegExp(s.selfName)}(?![\\p{L}\\p{N}_])`, 'u');
+        // 词边界与聊天高亮共用（utils.MENTION_BOUNDARY）
+        const re = new RegExp(`@${escapeRegExp(s.selfName)}${MENTION_BOUNDARY}`, 'u');
         return re.test(text);
     }
 

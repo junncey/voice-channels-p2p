@@ -26,7 +26,13 @@ import { Mesh } from '/js/core/webrtc.js';
 import { AudioHub, getTestBeepUrl } from '/js/core/audio.js';
 import { initChat, escapeRegExp, validReply } from '/js/core/chat.js';
 import { openEmojiPicker } from '/js/core/emoji.js';
-import { fileToImageMessage, sendImageData, createImageReceiver, DATA_URL_RE } from '/js/core/images.js';
+import {
+    fileToImageMessage,
+    sendImageData,
+    createImageReceiver,
+    DATA_URL_RE,
+    MAX_FILE_BYTES,
+} from '/js/core/images.js';
 import { createDropdown } from '/js/core/dropdown.js';
 import { initI18n, t, getLang, setLang } from '/js/core/i18n.js';
 import { initSoundSettings, playSound } from '/js/core/sound.js';
@@ -45,7 +51,8 @@ import { createNotify } from '/js/pages/channel/notify.js';
 import { createOfflineBanner } from '/js/pages/channel/offline.js';
 import { createHostAuth, loadHostToken, loadChannelPw } from '/js/pages/channel/hostAuth.js';
 import { createSocketEvents } from '/js/pages/channel/socketEvents.js';
-import { $, el, avatarColor, randomNick, copyText, toast } from '/js/core/utils.js';
+import { createUi } from '/js/pages/channel/ui.js';
+import { $, el, randomNick, toast } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
@@ -159,7 +166,7 @@ function opusFmtp() {
     return { maxaveragebitrate, usedtx: 1, useinbandfec: 1, stereo: null, 'sprop-stereo': null };
 }
 
-let settings = loadAudioSettings();
+const settings = loadAudioSettings(); // 内容变更走属性赋值，从不整体重绑
 let channelMeta = null;
 let socket = null;
 let mesh = null;
@@ -378,11 +385,9 @@ const mem = createMembers({
     rec,
     members,
     avatars,
-    audioEls,
     channelId,
     peerVolumes,
     shareSound,
-    avatarColor,
     AVATAR_MAX_CHARS,
     AVATARS_MAX,
     DATA_URL_RE,
@@ -400,6 +405,7 @@ const composer = createComposer({
     openEmojiPicker,
     fileToImageMessage,
     sendImageData,
+    MAX_FILE_BYTES,
     toast,
     t,
     $,
@@ -503,6 +509,9 @@ Object.assign(x, {
     notifySupported: notify.notifySupported,
 });
 
+// UI 事件接线（按钮/表单/窗口监听的一次性绑定）在 ./channel/ui.js
+const ui = createUi({ s, x, channelId });
+
 // ---------------------------------------------------------------------------
 // 启动
 // ---------------------------------------------------------------------------
@@ -599,102 +608,7 @@ async function boot() {
 }
 
 function bindUi() {
-    $('#backBtn').addEventListener('click', leave);
-    $('#joinBtn').addEventListener('click', () => join({ textOnly: false }));
-    $('#textOnlyBtn').addEventListener('click', () => join({ textOnly: true }));
-
-    $('#hostLoginBtn').addEventListener('click', hostAuth.openHostModal);
-    $('#hostLoginEntryBtn').addEventListener('click', hostAuth.openHostModal);
-    $('#hostCancelBtn').addEventListener('click', hostAuth.closeHostModal);
-    $('#hostLoginForm').addEventListener('submit', hostAuth.onHostLoginSubmit);
-
-    $('#renameCancelBtn').addEventListener('click', mem.closeRenameModal);
-    $('#renameForm').addEventListener('submit', mem.onRenameSubmit);
-    $('#renameModal').addEventListener('click', (event) => {
-        if (event.target === $('#renameModal')) mem.closeRenameModal();
-    });
-
-    $('#copyLinkBtn').addEventListener('click', async () => {
-        const ok = await copyText(`${location.origin}/c/${channelId}`);
-        if (ok) toast(t('channel.copied'), 'ok');
-    });
-
-    $('#exportChatBtn').addEventListener('click', async () => {
-        if (!isPresenter || !hostToken) return;
-        try {
-            await api.hostExport(channelId, hostToken);
-            toast(t('channel.exportDone'), 'ok');
-        } catch (err) {
-            toast(err?.status === 404 ? t('channel.errors.channelNotFound') : t('common.error'), 'warn');
-        }
-    });
-
-    $('#leaveBtn').addEventListener('click', leave);
-    $('#outageActionBtn').addEventListener('click', () => {
-        if ($('#outageBanner').dataset.mode === 'failed') {
-            intentionalUnload = true;
-            location.reload();
-        } else rec.attemptSignalingReconnect({ manual: true });
-    });
-    $('#micBtn').addEventListener('click', voice.onMicBtnClick);
-    $('#deafenBtn').addEventListener('click', voice.toggleDeafen);
-    voice.bindShareSoundButton();
-    voice.bindPttHoldButton();
-    $('#chatForm').addEventListener('submit', composer.onChatSubmit);
-    composer.bindChatInput();
-    composer.bindChatSearch();
-    settingsUi.bindAppearanceControls();
-
-    composer.bindImageUi();
-    settingsUi.bindSettingsUi();
-
-    $('#lockBtn').addEventListener('click', () => {
-        if (!socket || !joined || !isPresenter) return;
-        const action = joinLockOn ? 'joinLockOff' : 'joinLockOn';
-        // 房间广播不回发给自己，所以新状态要在本地立即反映
-        joinLockOn = action === 'joinLockOn';
-        updateHeaderActions();
-        chat.add({ text: t(`channel.${action}`, { name: selfName }), system: true });
-        socket.emit('roomAction', {
-            room_id: channelId,
-            peer_name: selfName,
-            peer_uuid: selfUuid,
-            action,
-        });
-    });
-
-    // 版本横幅重载前已有自己的确认 —— 就当用户已同意，
-    // 免得浏览器再问第二次（见 version.js 的 reloadNow）
-    window.addEventListener('vc:unload-intent', () => {
-        intentionalUnload = true;
-    });
-    // 会话中途被挂起的 AudioContext 在任意后续手势上恢复
-    // （iOS 来电打断、系统音频会话丢失）—— 归 voice.js 管
-    voice.bindResumeOnGesture();
-    // 连着频道时的原生「离开页面？」确认 ——
-    // 文案由浏览器自行本地化渲染，returnValue 是 Chrome/Edge 的
-    // 老式开关。这里不做任何清理：该对话框可取消，且取消后
-    // 会话必须照常工作，所以拆除等到 pagehide 才做
-    // （pagehide 只在真正卸载时触发，包括完全跳过 beforeunload 的
-    // iOS 侧滑关闭）。
-    window.addEventListener('beforeunload', (e) => {
-        if (intentionalUnload || !joined) return;
-        e.preventDefault();
-        e.returnValue = '';
-    });
-    window.addEventListener('pagehide', () => {
-        socket?.disconnect();
-        teardownMedia();
-    });
-    // 从 bfcache 返回：pagehide 已断开 socket 并停了麦克风，但
-    // 页面看起来仍在频道里 —— 一个无声又听不见的空频道。重载重进，
-    // 而不是让用户对着空气说话。
-    window.addEventListener('pageshow', (e) => {
-        if (!e.persisted) return;
-        intentionalUnload = true;
-        location.reload();
-    });
-    // （visibilitychange 上的 wake lock 重武装归 channel/wakeLock.js 管）
+    ui.bind();
 }
 
 // ---------------------------------------------------------------------------

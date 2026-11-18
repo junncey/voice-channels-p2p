@@ -33,7 +33,9 @@ export async function initI18n() {
     try {
         const res = await fetch(`/lang/${lang}.json`, { cache: 'no-cache' });
         if (res.ok) dict = await res.json();
+        else console.warn('[i18n] dictionary load failed:', res.status);
     } catch {
+        console.warn('[i18n] dictionary load failed; falling back to keys');
         dict = {};
     }
     applyStaticTranslations();

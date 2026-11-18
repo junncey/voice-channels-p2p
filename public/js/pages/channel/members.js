@@ -5,10 +5,12 @@
 以名字为键的自定义头像缓存，渲染成员卡片（徽章、按用户
 音量滑杆、主持人管理操作），并让花名册与服务器的 peers
 map 保持同步。恢复类徽章从恢复引擎的 map 读取；离场对端
-的音频收尾走共享的 audioEls。
+的音频收尾走 voice 的共享实现（经晚绑定 x 面）。
 共享页面状态经 `s` 存取器对象到达，跨模块调用走晚绑定的
 `x` 调用面（两者都归 channel.js 所有）。
 */
+
+import { buildAvatarNode } from '/js/core/avatar.js';
 
 export function createMembers({
     s,
@@ -16,11 +18,9 @@ export function createMembers({
     rec,
     members,
     avatars,
-    audioEls,
     channelId,
     peerVolumes,
     shareSound,
-    avatarColor,
     AVATAR_MAX_CHARS,
     AVATARS_MAX,
     DATA_URL_RE,
@@ -108,12 +108,8 @@ export function createMembers({
         s.mesh?.removePeer(peerId);
         s.hub?.unwatch(peerId);
         s.hub?.stopPeer(peerId);
-        const audio = audioEls.get(peerId);
-        if (audio) {
-            audio.srcObject = null;
-            audio.remove();
-            audioEls.delete(peerId);
-        }
+        // 共享 voice 的收尾（含 pendingPlays 清理——手抄副本曾漏掉这步）
+        x.voice.removeAudioEl(peerId);
         if (!silent) renderMembers();
     }
 
@@ -134,16 +130,7 @@ export function createMembers({
     }
 
     function memberAvatarNode(info) {
-        if (info.avatar) {
-            const img = el('img', { class: 'member-avatar img', alt: '' });
-            img.src = info.avatar; // 已校验的 data URL
-            return img;
-        }
-        return el(
-            'div',
-            { class: 'member-avatar', style: { background: avatarColor(info.peer_name) } },
-            (info.peer_name || '?').trim().charAt(0).toUpperCase() || '?'
-        );
+        return buildAvatarNode(info.peer_name, info.avatar, 'member-avatar');
     }
 
     function micIconNode(on) {

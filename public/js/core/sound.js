@@ -13,6 +13,7 @@
 import { createDropdown } from '/js/core/dropdown.js';
 import { t } from '/js/core/i18n.js';
 import { $, el } from '/js/core/utils.js';
+import { fileToDataUrl } from './images.js';
 
 const SETTINGS_KEY = 'vc_sound_settings';
 const CUSTOM_MAX_BYTES = 512 * 1024; // 上传音效文件的大小上限
@@ -22,7 +23,7 @@ const CUSTOM_MAX_CHARS = 700 * 1024; // 其 base64 data URL 长度上限
 const AUDIO_DATA_URL_RE = /^data:audio\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/;
 
 /** 内置音效库——/sounds 下的文件名（来自上游 MiroTalk）。 */
-export const SOUND_LIBRARY = [
+const SOUND_LIBRARY = [
     'addPeer',
     'removePeer',
     'newMessage',
@@ -39,7 +40,7 @@ export const SOUND_LIBRARY = [
 ];
 
 /** 可发声的应用事件及其默认库音效。 */
-export const SOUND_EVENTS = [
+const SOUND_EVENTS = [
     { key: 'peerJoin', sound: 'addPeer', label: 'sound.eventPeerJoin' },
     { key: 'peerLeave', sound: 'removePeer', label: 'sound.eventPeerLeave' },
     { key: 'message', sound: 'newMessage', label: 'sound.eventMessage' },
@@ -51,7 +52,7 @@ const UPLOAD_OPTION = '__upload__';
 const PLAY_SVG =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>';
 
-let settings = loadSettings();
+const settings = loadSettings(); // 内容变更走属性赋值，从不整体重绑
 let sinkRouter = null; // (audioEl) => void，把播放路由到选中的扬声器
 let uploadTarget = null; // 等待自定义音效文件选择器的事件键
 let fileInputEl = null; // 用于自定义音效上传的隐藏 <input type="file">
@@ -239,12 +240,7 @@ function renderEventRows() {
 async function importCustomSound(eventKey, file) {
     if (!file.type.startsWith('audio/')) return 'sound.unsupported';
     if (file.size > CUSTOM_MAX_BYTES) return 'sound.tooLarge';
-    const dataUrl = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => resolve('');
-        reader.readAsDataURL(file);
-    });
+    const dataUrl = await fileToDataUrl(file).catch(() => ''); // 读失败走不支持提示，与既有语义一致
     if (!dataUrl || !AUDIO_DATA_URL_RE.test(dataUrl) || dataUrl.length > CUSTOM_MAX_CHARS) return 'sound.unsupported';
 
     const previous = { ...settings.events[eventKey] };

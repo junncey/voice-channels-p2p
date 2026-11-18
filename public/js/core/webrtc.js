@@ -102,6 +102,147 @@ export function redFirstCodecs(codecs) {
     return [...red, ...codecs.filter((codec) => codec?.mimeType?.toLowerCase() !== 'audio/red')];
 }
 
+/**
+ * 纯解析一次 getStats() 的报告集合（为测试导出）：收集候选报告、
+ * 选定候选对，并摘出入向/出向音频计数器。各字段语义与 connPath
+ * 方法注释一致。
+ * @param {RTCStatsReport|{forEach: Function}} stats
+ * @returns {{candidates: Map, pair: object|null, fallback: object|null,
+ *     inbound: object|null, outboundLoss: number|null, outboundTs: number|null,
+ *     outboundJitter: number|null, outbound: object|null}}
+ */
+export function parseConnStats(stats) {
+    const candidates = new Map();
+    let pair = null; // 显式 selected 标记（标准/Firefox）…
+    let fallback = null; // …Chromium：最新的 succeeded + nominated 对
+    let inbound = null; // 入向音频 RTP（每连接一条音频轨道）
+    let outboundLoss = null; // peer 报告的我们流丢失百分比（0..1 → %）
+    let outboundTs = null; // 该接收方报告的时间戳（去重标识）
+    let outboundJitter = null; // peer 眼中我们流的抖动（ms）
+    let outbound = null; // 我们出向音频 RTP 计数（由调用方差分）
+    stats.forEach((report) => {
+        if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+            candidates.set(report.id, report);
+            return;
+        }
+        if (report.type === 'inbound-rtp' && !inbound) {
+            // 本应用的链路都是纯音频：第一个 inbound-rtp 就是音频流，
+            // 即使浏览器省略 kind（旧版 Firefox 以 mediaType
+            // 报告）——没有这个回退，整个入向质量监测
+            // 会无声地失明
+            const kind = report.kind || report.mediaType;
+            if (!kind || kind === 'audio') {
+                inbound = {
+                    packetsLost: report.packetsLost ?? 0,
+                    packetsReceived: report.packetsReceived ?? 0,
+                    jitter: typeof report.jitter === 'number' ? report.jitter : null,
+                    bytesReceived: report.bytesReceived ?? 0,
+                    timestamp: report.timestamp ?? Date.now(),
+                    // 累计 NetEQ 计数——恢复引擎的 jitter 提升所响应的
+                    // 隐藏率真值；浏览器不报告这些字段时为 null
+                    concealedSamples: typeof report.concealedSamples === 'number' ? report.concealedSamples : null,
+                    totalSamplesReceived:
+                        typeof report.totalSamplesReceived === 'number' ? report.totalSamplesReceived : null,
+                    // 累计播放缓冲计数——差分出实际达到的延迟，
+                    // 用于闭合 jitter 提升回路（提升的目标真的生效了吗？）
+                    jitterBufferDelay: typeof report.jitterBufferDelay === 'number' ? report.jitterBufferDelay : null,
+                    jitterBufferEmittedCount:
+                        typeof report.jitterBufferEmittedCount === 'number' ? report.jitterBufferEmittedCount : null,
+                };
+            }
+            return;
+        }
+        if (report.type === 'remote-inbound-rtp') {
+            // 关于我们（单条）出向音频轨道的 RTCP 接收方报告；
+            // 部分浏览器省略该字段——null 意为「无结论」，
+            // 调用方必须视作既不好也不坏
+            if (typeof report.fractionLost === 'number') {
+                outboundLoss = Math.round(report.fractionLost * 1000) / 10;
+                // 报告标识：RR 会在多次路径轮询间重复（音频的报告
+                // 间隔可能超过 5s 节拍）——一份陈旧读数
+                // 绝不能重复喂给调用方的丢包连击统计
+                outboundTs = typeof report.timestamp === 'number' ? report.timestamp : null;
+            }
+            // peer 眼中我们流的抖动——jitter 提升所响应的入向信号
+            // 的出向孪生
+            if (typeof report.jitter === 'number') outboundJitter = Math.round(report.jitter * 1000);
+            return;
+        }
+        if (report.type === 'outbound-rtp') {
+            // 我们编码器的实际输出（与入向相同的纯音频首报告回退）：
+            // 调用方差分 bytesSent 得到真实发送码率，
+            // targetBitrate 说明自适应地板（setParameters）
+            // 是否真的生效——这是丢包自适应从未有过的
+            // 那一份回读
+            const kind = report.kind || report.mediaType;
+            if (!kind || kind === 'audio') {
+                outbound = {
+                    bytesSent: report.bytesSent ?? 0,
+                    timestamp: report.timestamp ?? Date.now(),
+                    targetBitrate: typeof report.targetBitrate === 'number' ? report.targetBitrate : null,
+                };
+            }
+            return;
+        }
+        if (report.type !== 'candidate-pair') return;
+        if (report.selected) {
+            pair = report;
+            return;
+        }
+        if (
+            report.state === 'succeeded' &&
+            report.nominated &&
+            (!fallback || (report.lastPacketReceivedTimestamp || 0) > (fallback.lastPacketReceivedTimestamp || 0))
+        ) {
+            fallback = report;
+        }
+    });
+    return { candidates, pair, fallback, inbound, outboundLoss, outboundTs, outboundJitter, outbound };
+}
+
+/**
+ * 把解析结果组装为 connPath 的返回值（纯函数，为测试导出）：
+ * 候选对两端类型判定 p2p/relay；缺任一候选报告则路径未证实——
+ * 绝不宣称 'p2p'。
+ */
+export function assembleConnPath(state, parsed) {
+    const { candidates, inbound, outboundLoss, outboundTs, outboundJitter, outbound } = parsed;
+    const pair = parsed.pair || parsed.fallback;
+    if (!pair) {
+        return {
+            state,
+            type: 'unknown',
+            local: null,
+            remote: null,
+            rtt: null,
+            inbound,
+            outboundLoss,
+            outboundTs,
+            outboundJitter,
+            outbound,
+        };
+    }
+    const local = candidates.get(pair.localCandidateId)?.candidateType ?? null;
+    const remote = candidates.get(pair.remoteCandidateId)?.candidateType ?? null;
+    const rtt = typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null;
+    if (!local || !remote) {
+        return {
+            state,
+            type: 'unknown',
+            local,
+            remote,
+            rtt,
+            inbound,
+            outboundLoss,
+            outboundTs,
+            outboundJitter,
+            outbound,
+        };
+    }
+    const type = local === 'relay' || remote === 'relay' ? 'relay' : 'p2p';
+    return { state, type, local, remote, rtt, inbound, outboundLoss, outboundTs, outboundJitter, outbound };
+}
+
 /** iceServers 载荷的身份标识：URLs + 凭据用户名。REST 模式的
  *  用户名是 unix 过期时间戳，新铸造的一组必然不同。 */
 function iceServersStamp(iceServers) {
@@ -140,10 +281,6 @@ export class Mesh {
                 if (entry.pc.connectionState === 'connected') this._addLocalTracks(entry);
             }
         }
-    }
-
-    getLocalStream() {
-        return this.localStream;
     }
 
     /**
@@ -473,14 +610,14 @@ export class Mesh {
     }
 
     /**
-     * 从 getStats() 检查一条连接的存活 ICE 路径：选中的候选对
+     * 检查一条连接的存活 ICE 路径：选中的候选对
      * 两端都是直连（host/srflx/prflx——打洞成功）时为 'p2p'，
      * 媒体经 TURN 服务器流动（任一端在中继候选上）时为 'relay'。
      * 入向音频 RTP 报告一并带回（累计计数——调用方在两次轮询间
      * 差分得到丢包率与码率），另外还有对端接收方报告
      * 归于我们流的出向丢包（fractionLost，以百分比计）——
-     * 这是任何发送侧自适应
-     * 都必须响应的信号。
+     * 这是任何发送侧自适应都必须响应的信号。报告的解析与结果
+     * 组装在模块级的 parseConnStats / assembleConnPath（纯函数，可单测）。
      * @param {string} peerId
      * @returns {Promise<?object>} { state, type, local, remote, rtt, inbound, outboundLoss, outboundTs, outboundJitter, outbound } — peer 未知时为 null
      */
@@ -503,142 +640,7 @@ export class Mesh {
                 outbound: null,
             };
         }
-        const stats = await pc.getStats();
-        const candidates = new Map();
-        let pair = null; // 显式 selected 标记（标准/Firefox）…
-        let fallback = null; // …Chromium：最新的 succeeded + nominated 对
-        let inbound = null; // 入向音频 RTP（每连接一条音频轨道）
-        let outboundLoss = null; // peer 报告的我们流丢失百分比（0..1 → %）
-        let outboundTs = null; // 该接收方报告的时间戳（去重标识）
-        let outboundJitter = null; // peer 眼中我们流的抖动（ms）
-        let outbound = null; // 我们出向音频 RTP 计数（由调用方差分）
-        stats.forEach((report) => {
-            if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
-                candidates.set(report.id, report);
-                return;
-            }
-            if (report.type === 'inbound-rtp' && !inbound) {
-                // 本应用的链路都是纯音频：第一个 inbound-rtp 就是音频流，
-                // 即使浏览器省略 `kind`（旧版 Firefox 以 `mediaType`
-                // 报告）——没有这个回退，整个入向质量监测
-                // 会无声地失明
-                const kind = report.kind || report.mediaType;
-                if (!kind || kind === 'audio') {
-                    inbound = {
-                        packetsLost: report.packetsLost ?? 0,
-                        packetsReceived: report.packetsReceived ?? 0,
-                        jitter: typeof report.jitter === 'number' ? report.jitter : null,
-                        bytesReceived: report.bytesReceived ?? 0,
-                        timestamp: report.timestamp ?? Date.now(),
-                        // 累计 NetEQ 计数——恢复引擎的 jitter 提升所响应的
-                        // 隐藏率真值；
-                        // 浏览器不报告这些字段时为 null
-                        concealedSamples: typeof report.concealedSamples === 'number' ? report.concealedSamples : null,
-                        totalSamplesReceived:
-                            typeof report.totalSamplesReceived === 'number' ? report.totalSamplesReceived : null,
-                        // 累计播放缓冲计数——差分出实际达到的延迟，
-                        // 用于闭合 jitter 提升回路
-                        // （提升的目标真的生效了吗？）
-                        jitterBufferDelay:
-                            typeof report.jitterBufferDelay === 'number' ? report.jitterBufferDelay : null,
-                        jitterBufferEmittedCount:
-                            typeof report.jitterBufferEmittedCount === 'number'
-                                ? report.jitterBufferEmittedCount
-                                : null,
-                    };
-                }
-                return;
-            }
-            if (report.type === 'remote-inbound-rtp') {
-                // 关于我们（单条）出向音频轨道的 RTCP 接收方报告；
-                // 部分浏览器省略该字段——null 意为「无结论」，
-                // 调用方必须视作既不好也不坏
-                if (typeof report.fractionLost === 'number') {
-                    outboundLoss = Math.round(report.fractionLost * 1000) / 10;
-                    // 报告标识：RR 会在多次路径轮询间重复（音频的报告
-                    // 间隔可能超过 5s 节拍）——一份陈旧读数
-                    // 绝不能重复喂给调用方的丢包连击统计
-                    outboundTs = typeof report.timestamp === 'number' ? report.timestamp : null;
-                }
-                // peer 眼中我们流的抖动——jitter 提升所响应的入向信号
-                // 的出向孪生
-                if (typeof report.jitter === 'number') outboundJitter = Math.round(report.jitter * 1000);
-                return;
-            }
-            if (report.type === 'outbound-rtp') {
-                // 我们编码器的实际输出（与入向相同的纯音频首报告回退）：
-                // 调用方差分 bytesSent 得到真实发送码率，
-                // targetBitrate 说明自适应地板（setParameters）
-                // 是否真的生效——这是丢包自适应从未有过的
-                // 那一份回读
-                const kind = report.kind || report.mediaType;
-                if (!kind || kind === 'audio') {
-                    outbound = {
-                        bytesSent: report.bytesSent ?? 0,
-                        timestamp: report.timestamp ?? Date.now(),
-                        targetBitrate: typeof report.targetBitrate === 'number' ? report.targetBitrate : null,
-                    };
-                }
-                return;
-            }
-            if (report.type !== 'candidate-pair') return;
-            if (report.selected) {
-                pair = report;
-                return;
-            }
-            if (
-                report.state === 'succeeded' &&
-                report.nominated &&
-                (!fallback || (report.lastPacketReceivedTimestamp || 0) > (fallback.lastPacketReceivedTimestamp || 0))
-            ) {
-                fallback = report;
-            }
-        });
-        const inboundOut = inbound ?? null;
-        if (!pair) pair = fallback;
-        if (!pair)
-            return {
-                state,
-                type: 'unknown',
-                local: null,
-                remote: null,
-                rtt: null,
-                inbound: inboundOut,
-                outboundLoss,
-                outboundTs,
-                outboundJitter,
-                outbound,
-            };
-        const local = candidates.get(pair.localCandidateId)?.candidateType ?? null;
-        const remote = candidates.get(pair.remoteCandidateId)?.candidateType ?? null;
-        const rtt = typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null;
-        // 缺任一候选报告则路径未证实——绝不宣称 'p2p'
-        if (!local || !remote)
-            return {
-                state,
-                type: 'unknown',
-                local,
-                remote,
-                rtt,
-                inbound: inboundOut,
-                outboundLoss,
-                outboundTs,
-                outboundJitter,
-                outbound,
-            };
-        const type = local === 'relay' || remote === 'relay' ? 'relay' : 'p2p';
-        return {
-            state,
-            type,
-            local,
-            remote,
-            rtt,
-            inbound: inboundOut,
-            outboundLoss,
-            outboundTs,
-            outboundJitter,
-            outbound,
-        };
+        return assembleConnPath(state, parseConnStats(await pc.getStats()));
     }
 
     removePeer(peerId) {
@@ -900,7 +902,22 @@ export class Mesh {
             const queued = entry.queue.splice(0);
             entry.queueBytes = 0;
             for (const item of queued) {
-                if (dc.readyState === 'open') dc.send(item);
+                if (dc.readyState !== 'open') break;
+                try {
+                    dc.send(item);
+                } catch {
+                    // SCTP 缓冲撑爆时 send 同步抛——曾从这里炸穿
+                    // 事件处理器。弃掉余帧并关流：下方 onclose 的
+                    // 信道重建路径会换一条恢复，聊天文字有服务器
+                    // 副本兜底（与 sendChat 的失败语义一致）
+                    console.warn('[mesh] dc queue flush failed, closing channel');
+                    try {
+                        dc.close();
+                    } catch {
+                        /* 本已关闭 */
+                    }
+                    break;
+                }
             }
         };
         dc.onmessage = (event) => {
