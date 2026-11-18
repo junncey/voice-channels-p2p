@@ -320,6 +320,32 @@ describe('test-server (signaling integration)', function () {
             a.emit('peerStatus', { room_id: room, peer_name: 'alice', peer_id: ua, element: 'bogus', status: true });
             (await emitted(c, 'peerStatus', 250)).should.be.false();
         });
+
+        it('should ignore peerName with non-string or blank names', async () => {
+            const room = freshRoom('pname');
+            const ua = crypto.randomUUID();
+            const a = track(connect());
+            a.emit('join', joinPayload(room, ua, 'alice'));
+            await once(a, 'serverInfo');
+            const b = track(connect());
+            b.emit('join', joinPayload(room, crypto.randomUUID(), 'bob'));
+            await once(b, 'serverInfo');
+            await wait(50);
+
+            // 非字符串/空白名不得写进房间状态并随成员广播扩散
+            const seen = [];
+            b.on('peerName', (cfg) => seen.push(cfg));
+            a.emit('peerName', { room_id: room, peer_name_new: 12345 });
+            a.emit('peerName', { room_id: room, peer_name_new: '   ' });
+            a.emit('peerName', { room_id: room, peer_name_new: null });
+            await wait(150);
+            seen.length.should.equal(0);
+
+            // 合法改名（含 trim）照常广播
+            a.emit('peerName', { room_id: room, peer_name_new: '  alice2  ' });
+            const got = await once(b, 'peerName');
+            got.peer_name.should.equal('alice2');
+        });
     });
 
     describe('2. chat history persistence', () => {
