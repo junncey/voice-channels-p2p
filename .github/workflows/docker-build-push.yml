@@ -60,6 +60,11 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      # 🔴 本地复合 action 必须先 checkout（否则 runner 在准备阶段
+      # 找不到 .github/actions/lint-test/action.yml）
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Lint & Test
         uses: ./.github/actions/lint-test
 

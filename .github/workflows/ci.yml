@@ -12,6 +12,11 @@ jobs:
   test:
     runs-on: ubuntu-22.04 # LTS
     steps:
+      # 🔴 本地复合 action 必须在 checkout 之后才能被解析（runner 在
+      # "Prepare all required actions" 阶段就要读到 action.yml）
+      - name: Checkout
+        uses: actions/checkout@v4
+
       # lint + 测试的完整门禁（与 Docker 发布门禁共用）
       - name: Lint & Test
         uses: ./.github/actions/lint-test

@@ -6,9 +6,8 @@ description: 'npm run lint（eslint + prettier + 文件行数预算）与 mocha 
 runs:
   using: 'composite'
   steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
+    # ⚠️ 不要在这里放 actions/checkout —— 本地 action 在 checkout 之前
+    # 无法被解析。调用方 job 必须先自己 checkout。
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
