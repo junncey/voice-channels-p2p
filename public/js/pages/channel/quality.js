@@ -526,7 +526,15 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
         updateBadge: updatePeerPathBadge,
         pathBadgeNode,
         forget,
-        reset: () => lossStreaks.clear(),
+        // 全量重置也要清各记录里的延迟重试定时器——残留的
+        // pokeTimer 在 6s 后触发时守卫未必拦得住（拆除与重进房
+        // 之间 peerId 可能复用），会对新链路多打一次 restart
+        reset: () => {
+            for (const rec of lossStreaks.values()) {
+                if (rec.pokeTimer) clearTimeout(rec.pokeTimer);
+            }
+            lossStreaks.clear();
+        },
         lossStreaks,
     };
 }

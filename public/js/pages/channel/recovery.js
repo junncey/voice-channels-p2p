@@ -152,6 +152,17 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
             cancelPeerRecovery(peerId);
             return;
         }
+        // 已升级到信令重连的链路：escalate 时 B1 可能发不出去
+        //（socket 已死/未 join——网络分区、服务器重启），而梯子
+        // 一旦 escalated 就再无自驱动。低频重试直到 B1 真正落地
+        //（落地即拆全部对端、rec 随 forgetPeer 取消）或链路被
+        // 对端治愈（'connected' → 取消）；否则 socket 恢复后
+        // 双方的梯子都死着，媒体静默死亡且无任何提示。
+        if (rec.escalated) {
+            attemptSignalingReconnect();
+            if (peerRecovery.get(peerId) === rec) scheduleRecoveryTick(peerId, RECOVERY_SCAN_MS);
+            return;
+        }
         // 抖动链路用压缩窗口：只做一轮立即轮次抓简单的路由变更，
         // 然后升级 —— 历史表明 restart 只能在下次闪断前
         // 换来几秒钟
@@ -444,11 +455,15 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
         }, RECOVERY_B1_RESET_MS);
     }
 
-    /** 一次成功的（重）join 落地：任何未决的自愈重连就此了结。 */
+    /** 一次成功的（重）join 落地：任何未决的自愈重连就此了结；
+     *  重连（resume）复用的既有链路若仍断着，此刻信令已恢复、
+     *  B1 也发得出了——立刻重扫，别让 escalated 后死掉的梯子
+     *  把链路永远晾在断线状态（见 recoveryTick 的 escalated 分支）。 */
     function markSessionRestored() {
         b1InFlight = false;
         selfReconnecting = false;
         clearTimeout(b1Timer);
+        rescanLinks();
     }
 
     function cancelPeerRecovery(peerId) {
@@ -490,6 +505,15 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
     function onNetworkBack() {
         if (!s.joined || !s.mesh) return;
         if (s.socket && !s.socket.connected) s.socket.connect();
+        rescanLinks();
+    }
+
+    /** 一次性复查所有链路：错过的状态事件补报（后台标签页
+     *  被节流），已在阶梯中的链路立刻走下一跳——包括 escalated
+     *  而没能发出 B1 的（socket 恢复由调用方保证，见
+     *  markSessionRestored）。 */
+    function rescanLinks() {
+        if (!s.joined || !s.mesh) return;
         for (const [peerId, entry] of s.mesh.entries) {
             notePeerState(peerId, entry.pc.connectionState);
             if (peerRecovery.has(peerId)) scheduleRecoveryTick(peerId, 0);

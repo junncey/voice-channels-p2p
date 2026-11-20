@@ -455,4 +455,68 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             pc.calls.remote.should.eql(['offer']);
         });
     });
+
+    describe('removePeer detaches stale-PC events (rebuild ladder survival)', () => {
+        /** 接线形态照搬 addPeer：处理器存在时读当前 connectionState。 */
+        function wiredPc(mesh, peerId) {
+            const pc = {
+                connectionState: 'failed',
+                close() {
+                    this.connectionState = 'closed';
+                },
+                onicecandidate: null,
+                ontrack: null,
+                onconnectionstatechange: null,
+                onnegotiationneeded: null,
+                ondatachannel: null,
+            };
+            pc.onconnectionstatechange = () => {
+                if (mesh.handlers.onPeerState) mesh.handlers.onPeerState(peerId, pc.connectionState);
+            };
+            return pc;
+        }
+
+        it('must not report the late closed event after a deliberate teardown', () => {
+            const mesh = bareMesh();
+            const states = [];
+            mesh.handlers.onPeerState = (id, state) => states.push([id, state]);
+            const pc = wiredPc(mesh, 'p1');
+            mesh.entries.set('p1', {
+                pc,
+                dc: null,
+                pendingIce: [],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: false,
+                offering: false,
+            });
+            mesh.removePeer('p1');
+            mesh.entries.has('p1').should.equal(false);
+            // close() 之后浏览器异步派发 connectionstatechange('closed')——
+            // 修复前处理器仍在，rebuildPeer 的恢复梯子会被这次迟到上报
+            // 整个取消（escalatePeerRecovery 刚配好的轮次随 cancel 消失），
+            // 新 PC 再失败时只能重建全新梯子 → 无限重建循环
+            pc.onconnectionstatechange?.();
+            (pc.onconnectionstatechange === null).should.equal(true);
+            states.should.eql([]);
+        });
+
+        it('must detach the data-channel handlers as well (dying-link renegotiation fires once)', () => {
+            const mesh = bareMesh();
+            const dc = { onopen: () => {}, onmessage: () => {}, onclose: () => {} };
+            mesh.entries.set('p1', {
+                pc: { close() {} },
+                dc,
+                pendingIce: [],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: false,
+                offering: false,
+            });
+            mesh.removePeer('p1');
+            (dc.onopen === null).should.equal(true);
+            (dc.onmessage === null).should.equal(true);
+            (dc.onclose === null).should.equal(true);
+        });
+    });
 });

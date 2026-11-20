@@ -699,8 +699,26 @@ export class Mesh {
         if (!entry) return;
         clearTimeout(entry.dcTimer);
         clearTimeout(entry.renegotiateTimer);
+        // 拆除是刻意的：close() 之后浏览器仍会异步派发一次
+        // connectionstatechange('closed')——旧 PC 的迟到事件只会
+        // 误导上层。最惨的正是 rebuildPeer：紧跟其后的恢复梯子
+        // 被 'closed' 整个取消，新 PC 协商失败时只能重建一个
+        // 全新梯子（rebuilt 标志随之丢失）→ 无限重建循环，
+        // 永远到不了信令重连。真正的成员离场由页面的
+        // dropPeer → forgetPeer 完成对应清理，不依赖这些事件。
+        const { pc, dc } = entry;
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.onnegotiationneeded = null;
+        pc.ondatachannel = null;
+        if (dc) {
+            dc.onopen = null;
+            dc.onmessage = null;
+            dc.onclose = null;
+        }
         try {
-            entry.pc.close();
+            pc.close();
         } catch {
             /* 本已关闭 */
         }

@@ -101,3 +101,95 @@ describe('test-recovery (B1 budget refill must survive repeated connected report
         recovery.debugState().b1Attempts.should.equal(0);
     });
 });
+
+describe('test-recovery (escalated ladder must retry B1 once conditions allow)', () => {
+    // 升级到 B1 时 socket 可能已死（网络分区、服务器重启）：旧实现
+    // 在 escalated 后没有任何自驱动——同状态的状态事件与 10s 扫描都
+    // 早退，socket 恢复、resume join 落地后也没有任何一方再发起
+    // restart/B1，媒体静默死亡且无横幅。回归：escalated 梯子在
+    // serverInfo（markSessionRestored 的链路重扫）后必须重新尝试 B1。
+
+    const PEER = 'peer-bbbb';
+    let recovery;
+    let s;
+    let socketCalls;
+    let meshClears;
+
+    before(async () => {
+        global.window = { addEventListener() {} };
+        global.document = { addEventListener() {} };
+        socketCalls = [];
+        meshClears = [];
+        s = {
+            selfUuid: 'self-zzzz',
+            joined: true,
+            socket: null, // 场景从「escalate 时 socket 已死」开始
+            mesh: {
+                entries: new Map([[PEER, { pc: { connectionState: 'failed' } }]]),
+                clear: () => meshClears.push(Date.now()),
+                restartIce: () => Promise.resolve(true),
+                unstickStaleOffer: () => Promise.resolve(false),
+                rebuildPeer: () => true,
+            },
+            chat: { add() {} },
+        };
+        const mod = await importBrowserModule('public/js/pages/channel/recovery.js');
+        recovery = mod.createRecovery({
+            s,
+            x: { dropPeer: (id) => recovery.forgetPeer(id) },
+            members: new Map([[PEER, { peer_name: 'B' }]]),
+            channelId: 'testroom2',
+            $: () => stubNode(),
+            el: () => stubNode(),
+            t: (key) => key,
+        });
+    });
+
+    beforeEach(() => {
+        recovery.clearPeerRecovery();
+        recovery.resetForTeardown();
+    });
+
+    after(() => {
+        recovery.clearPeerRecovery();
+        recovery.resetForTeardown();
+    });
+
+    /** 直接放入一个已升级（轮次耗尽、已重建过）的恢复记录。 */
+    function escalateLadder() {
+        recovery.peerRecovery.set(PEER, {
+            timer: null,
+            attempts: 3,
+            lastState: 'failed',
+            brokenAt: Date.now(),
+            escalated: true,
+            flappy: false,
+            rebuilt: true,
+        });
+    }
+
+    it('keeps the escalated rec armed (no budget burned) while the socket is gone', async () => {
+        escalateLadder();
+        recovery.markSessionRestored(); // rescan 只能重排 tick——B1 发不出
+        await sleep(60); // tick(0)：escalated → attempt 早退 → 重排 10s
+        recovery.debugState().b1Attempts.should.equal(0); // 预算没被烧
+        recovery.peerRecovery.has(PEER).should.equal(true); // 梯子没有死掉
+        meshClears.should.have.length(0); // mesh 也未被拆除
+    });
+
+    it('fires B1 from the re-armed tick once the socket is back (serverInfo rescan)', async () => {
+        escalateLadder();
+        s.socket = {
+            connected: true,
+            disconnect: () => socketCalls.push('disconnect'),
+            connect: () => socketCalls.push('connect'),
+            timeout: () => ({ emit() {} }),
+        };
+        recovery.markSessionRestored(); // 服务器回来 + resume join 的 serverInfo
+        await sleep(60);
+        recovery.debugState().b1Attempts.should.equal(1);
+        socketCalls.should.eql(['disconnect', 'connect']);
+        meshClears.should.have.length(1); // B1 = 全量重建
+        recovery.peerRecovery.has(PEER).should.equal(false); // 落地即随 forget 取消
+    });
+});
