@@ -41,10 +41,25 @@ function tarFiles(files) {
 }
 
 /**
+ * 注册浏览器 import 解析 hook（进程内一次）：前端模块彼此以根绝对
+ * 路径（'/js/...'）import，Node 侧由 browser-import-hook.mjs 映射到
+ * public/ 下——否则带此类 import 的模块（如 recovery.js 一族的页面
+ * 模块）无法在测试中加载。
+ */
+function ensureBrowserImportHook() {
+    if (ensureBrowserImportHook.done) return;
+    ensureBrowserImportHook.done = true;
+    const { register } = require('node:module');
+    const { pathToFileURL } = require('node:url');
+    register('./browser-import-hook.mjs', pathToFileURL(__filename));
+}
+
+/**
  * 动态 import 浏览器 ES 模块（public/js/**）供 Node 侧测试。
  * @param {string} relPath 相对仓库根的模块路径，如 'public/js/core/utils.js'
  */
 async function importBrowserModule(relPath) {
+    ensureBrowserImportHook();
     const { pathToFileURL } = await import('node:url');
     return import(pathToFileURL(path.join(__dirname, '..', relPath)).href);
 }

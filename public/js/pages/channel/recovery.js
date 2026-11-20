@@ -52,13 +52,15 @@ DataChannel 存活。
 两者都归 channel.js 所有。
 */
 
-export function createRecovery({ s, x, members, channelId, $, el, t }) {
+export function createRecovery({ s, x, members, channelId, $, el, t, timings = {} }) {
     const RECOVERY_GRACE_MS = 5000;
     const RECOVERY_ROUND_DELAYS = [3000, 6000, 12000];
     const RECOVERY_TOTAL_MS = 20000; // 信令重连前的按对端窗口（第3轮 +12s = 21s）
     const RECOVERY_MAX_B1 = 2; // 询问用户之前的自动信令重连次数
     const RECOVERY_SCAN_MS = 10000;
-    const RECOVERY_B1_RESET_MS = 60000; // 稳定这么久 → B1 预算回满
+    // 稳定这么久 → B1 预算回满（可经 timings.b1ResetMs 注入，测试用——
+    // 与服务端 GHOST_GRACE_MS 的注入先例同款）
+    const RECOVERY_B1_RESET_MS = timings.b1ResetMs ?? 60000;
     // 抖动捷径：窗口内自愈这么多次的链路不再信任 restart 轮次
     // （每轮 = 一次可闻的咔哒声），只做一轮立即轮次
     // 就升级到重建阶
@@ -114,6 +116,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
 
         if (!rec) {
             clearTimeout(b1ResetTimer); // 不稳定：别回填 B1 预算
+            b1ResetTimer = null; // 解除武装——恢复后从那一刻起算完整稳定期
             const flappy = flapCount(peerId) >= FLAP_HEAL_THRESHOLD;
             peerRecovery.set(peerId, {
                 timer: null,
@@ -162,6 +165,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             // resume 还在路上 B1 就先核爆了。快照由每轮的
             // presence 探测刷新；宽限一过（resume 已 connected
             // 或 removePeer 已到）照常升级
+            probePeerPresence(peerId); // 让路醒来也探测：对端已 resume 时快照被 'live' 分支作废，免得傻等旧终点后才升级
             const graceLeft = (ghostGraceUntil.get(peerId) || 0) - Date.now();
             if (graceLeft > 0) {
                 scheduleRecoveryTick(peerId, Math.min(graceLeft + 500, RECOVERY_SCAN_MS));
@@ -268,6 +272,11 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         if (!rec.rebuilt && onlyBrokenLink(peerId)) {
             rec.rebuilt = true;
             rec.brokenAt = Date.now(); // 给重建的链路一个新的沉淀窗口
+            // 全新 PC = 全新 ICE+DTLS，等价初次加入——配齐整副
+            // restart 梯子。不重置的话，rebuild 的 offer 再被吞
+            // （对端恰好入 ghost）时一轮解卡机会都没有，
+            // 只能干等窗口耗尽落 B1
+            rec.attempts = 0;
             // 与 restart 轮次不同，这里不设 uuid 仲裁：rebuildPeer
             // 对对端零要求（全新 PC 的 offer 走正常应答路径），
             // 而能走到这一阶的高 uuid 方已在 restart 层等完了
@@ -423,8 +432,16 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     }
 
     function armB1Reset() {
-        clearTimeout(b1ResetTimer);
-        b1ResetTimer = setTimeout(() => (b1Attempts = 0), RECOVERY_B1_RESET_MS);
+        // 🔴 幂等武装：10s 恢复扫描会对每个健康对端重报 'connected'
+        // （此时无恢复记录，早退挡不住），无条件重设会让 60s 定时器
+        // 永不到期——b1Attempts 永不回零，一次故障耗尽预算后
+        // 稳定运行再久也只肯给用户「手动重载」。已武装则不重设：
+        // 60s 自最后一次不稳定（rec 创建时取消武装）起算
+        if (b1ResetTimer) return;
+        b1ResetTimer = setTimeout(() => {
+            b1Attempts = 0;
+            b1ResetTimer = null;
+        }, RECOVERY_B1_RESET_MS);
     }
 
     /** 一次成功的（重）join 落地：任何未决的自愈重连就此了结。 */
@@ -647,6 +664,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         selfReconnecting = false;
         clearTimeout(b1Timer);
         clearTimeout(b1ResetTimer);
+        b1ResetTimer = null;
     }
 
     return {

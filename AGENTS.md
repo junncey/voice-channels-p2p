@@ -5,7 +5,7 @@
 ## 常用命令
 
 - 启动：`npm start`（prestart 自动从 config.template.js 创建 app/src/config.js）
-- 测试：`npx mocha tests/ --exit`（当前 298 passing；含 test-server.js 信令集成测试——起真实 :3100 实例、自动备份/还原 channels.json 与 chat_history（`process.on('exit')` 兜底崩溃还原）、审计重定向到临时文件；改动 channelStore/chatStore/server.js 信令/校验逻辑必须回归）。公共工具（tempDir/tarFiles fixture/importBrowserModule）在 `tests/helpers.js`——helpers 不得 require `config.js`
+- 测试：`npx mocha tests/ --exit`（当前 313 passing；含 test-server.js 信令集成测试——起真实 :3100 实例、自动备份/还原 channels.json 与 chat_history（`process.on('exit')` 兜底崩溃还原）、审计重定向到临时文件；改动 channelStore/chatStore/server.js 信令/校验逻辑必须回归）。公共工具（tempDir/tarFiles fixture/importBrowserModule）在 `tests/helpers.js`——helpers 不得 require `config.js`；importBrowserModule 经 `browser-import-hook.mjs`（module.register）把前端根绝对路径 import（`/js/**`）映射到 public/ 下，带此类 import 的页面族模块（如 recovery.js）才能在 Node 侧加载
 - 检查：`npm run lint` = `eslint . && prettier --check . && node scripts/check-file-size.js`（只查不改，CI 同款）；格式化：`npm run format`（prettier --write）。ESLint flat config 在 `eslint.config.js`（CJS 服务端 + ESM 前端 + sw.js 三个分组；recommended + `no-unused-vars`/`max-lines`/`eqeqeq(smart)`/`prefer-const`/`no-var`/`no-implicit-globals`）
 - 测试实例约定：`PORT=3100 CHANNEL_ADMIN_PASSWORD=pw CHANNEL_ADMIN_JWT_SECRET=sec node app/src/server.js`
   **绝不杀 3000 端口进程——那是用户自己的实例。** 测试后删除 `app/src/channels.json` 与临时日志。

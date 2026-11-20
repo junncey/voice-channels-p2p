@@ -591,8 +591,14 @@ export class Mesh {
         if (!entry) return false;
         const pc = entry.pc;
         // 协商中途（反向 offer 在途）：先让它收敛，
-        // 调用方的节拍会在下一个 tick 重试
-        if (pc.connectionState === 'closed' || pc.signalingState !== 'stable') return false;
+        // 调用方的节拍会在下一个 tick 重试。
+        // entry.offering：initiateOffer（negotiationneeded）在
+        // createOffer 的 await 间隙里 signalingState 仍是 stable——
+        // 不检查它会在间隙里双发 offer（两次 setLocalDescription
+        // + 两次 relaySDP，跨引擎行为未定）。被拒的事件无害：
+        // 在途的 offer 的 createOffer 会带上 addTrack 的
+        // 最新 transceiver 状态
+        if (pc.connectionState === 'closed' || entry.offering || pc.signalingState !== 'stable') return false;
         entry.offering = true;
         try {
             this._preferCodecs(pc);
