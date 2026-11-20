@@ -387,4 +387,72 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             entry.pendingIce.should.be.empty();
         });
     });
+
+    describe('glare arbitration (before setRemoteDescription)', () => {
+        /** Chromium 式 pc：have-local-offer 下 setRemoteDescription(offer)
+         *  直接成功（隐式回滚本地待定 offer），绝不抛错——glare 裁决
+         *  若放在 catch 里，在这台 pc 上永远不会执行（双方各自隐式
+         *  回滚并应答对方，两个 answer 都落在已回滚的 offer 上）。 */
+        function glarePc(signalingState) {
+            const calls = { remote: [], local: [] };
+            return {
+                calls,
+                signalingState,
+                connectionState: 'disconnected',
+                async setRemoteDescription(desc) {
+                    calls.remote.push(desc.type);
+                    this.signalingState = 'stable';
+                },
+                async setLocalDescription(desc) {
+                    calls.local.push(desc.type);
+                    if (desc.type === 'rollback') this.signalingState = 'stable';
+                },
+                async createAnswer() {
+                    return { type: 'answer', sdp: 'v=0\r\n' };
+                },
+                getSenders: () => [],
+                getReceivers: () => [],
+                getTransceivers: () => [],
+            };
+        }
+
+        function glareMesh(selfId) {
+            const mesh = new Mesh({ signaling: { emit() {} }, handlers: {}, getSelfId: () => selfId });
+            const pc = glarePc('have-local-offer'); // 我方的 re-offer 正在途
+            mesh.entries.set('peer', { pc, pendingIce: [], tracksAdded: true, offering: false });
+            return { mesh, pc };
+        }
+
+        const collidingOffer = { peer_id: 'peer', session_description: { type: 'offer', sdp: 'v=0\r\n' } };
+
+        it('should let the impolite side (lower uuid) ignore the colliding offer', async () => {
+            const { mesh, pc } = glareMesh('aaa'); // aaa < peer
+            await mesh.handleSessionDescription(collidingOffer);
+            pc.calls.remote.should.eql([]); // 自己的 offer 原样保留
+            pc.calls.local.should.eql([]); // 不回滚、不应答
+        });
+
+        it('should make the polite side (higher uuid) roll back explicitly, then answer', async () => {
+            const { mesh, pc } = glareMesh('zzz'); // zzz > peer
+            await mesh.handleSessionDescription(collidingOffer);
+            pc.calls.local.should.eql(['rollback', 'answer']); // 先解自己的卡，再应答
+            pc.calls.remote.should.eql(['offer']);
+        });
+
+        it('should stay polite without a role (no getSelfId)', async () => {
+            const mesh = new Mesh({ signaling: { emit() {} }, handlers: {} });
+            const pc = glarePc('have-local-offer');
+            mesh.entries.set('peer', { pc, pendingIce: [], tracksAdded: true, offering: false });
+            await mesh.handleSessionDescription(collidingOffer);
+            pc.calls.local.should.eql(['rollback', 'answer']);
+        });
+
+        it('should answer normally when stable (no glare)', async () => {
+            const { mesh, pc } = glareMesh('aaa');
+            pc.signalingState = 'stable';
+            await mesh.handleSessionDescription(collidingOffer);
+            pc.calls.local.should.eql(['answer']); // 无需回滚
+            pc.calls.remote.should.eql(['offer']);
+        });
+    });
 });

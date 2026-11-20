@@ -407,33 +407,38 @@ export class Mesh {
         const entry = this.entries.get(peer_id);
         if (!entry || !session_description) return;
         const pc = entry.pc;
+        // Glare：双方可能同时重新 offer（例如同时在恢复死链路）。
+        // perfect-negotiation 角色让它保持确定——
+        // 较小的 session uuid（恢复梯子已信任由其发起的一方）
+        // 是 impolite：它忽略相撞的 offer，
+        // 等待自己那份 offer 的应答。较大的 uuid
+        // 回滚并应答。没有角色时双方都会回滚，每个应答都落在
+        // 已回滚的 offer 上，两场协商一起死
+        // （旧的永远 polite 行为）。没有 getSelfId 时，
+        // 保留 polite 回滚作为安全默认。
+        // 🔴 裁决必须在 setRemoteDescription 之前同步做出：支持
+        // 隐式回滚的浏览器（Chrome 80+ / Firefox / Safari）在
+        // have-local-offer 下直接接受对端 offer 并静默回滚本地
+        // 待定 offer——不抛错。裁决若放在 catch 里永远不会执行
+        // （旧实现正是如此）：双方各自隐式回滚并应答对方，
+        // 两个 answer 都落在对方已回滚的 offer 上，两端从此
+        // 各执一份互不匹配的 SDP，链路要死到下一轮 restart。
+        if (session_description.type === 'offer' && pc.signalingState === 'have-local-offer') {
+            const selfId = this.getSelfId?.();
+            if (selfId && selfId < peer_id) {
+                console.log('[mesh] glare: impolite, keeping our offer', peer_id);
+                return;
+            }
+            try {
+                await pc.setLocalDescription({ type: 'rollback' });
+            } catch (err) {
+                console.error('[mesh] glare rollback failed', peer_id, err);
+                return;
+            }
+        }
         try {
             await this._applySessionDescription(peer_id, entry, session_description);
         } catch (err) {
-            // Glare：双方可能同时重新 offer（例如同时在恢复死链路）。
-            // perfect-negotiation 角色让它保持确定——
-            // 较小的 session uuid（恢复梯子已信任由其发起的一方）
-            // 是 impolite：它忽略相撞的 offer，
-            // 等待自己那份 offer 的应答。较大的 uuid
-            // 回滚并应答。没有角色时双方都会回滚，每个应答都落在
-            // 已回滚的 offer 上，两场协商一起死
-            // （旧的永远 polite 行为）。没有 getSelfId 时，
-            // 保留 polite 回滚作为安全默认。
-            if (session_description.type === 'offer' && pc.signalingState === 'have-local-offer') {
-                const selfId = this.getSelfId?.();
-                if (selfId && selfId < peer_id) {
-                    console.log('[mesh] glare: impolite, keeping our offer', peer_id);
-                    return;
-                }
-                try {
-                    await pc.setLocalDescription({ type: 'rollback' });
-                    await this._applySessionDescription(peer_id, entry, session_description);
-                    return;
-                } catch (retryErr) {
-                    console.error('[mesh] glare rollback failed', peer_id, retryErr);
-                    return;
-                }
-            }
             console.error('[mesh] session description failed', peer_id, err);
         }
     }
