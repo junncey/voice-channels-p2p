@@ -156,18 +156,23 @@ function createJoinFlow({
     }
 
     /**
-     * 第 3 段——会话恢复：携带同一 peer_uuid 的重连是本页面的会话在重连
-     * （每次 join() 都铸造新 uuid）。当上个 socket 的条目仍在幽灵宽限
-     * 窗口内时，把它重绑（REBIND）到新 socket 并保留会话——其他成员
-     * 从未见过 removePeer，他们的 peer 连接保持在线，经 ICE restart
-     * 治愈而非完整重协商。改名、或旧 socket 仍然活着，都不算恢复：
-     * 逐出旧会话并重建。（绝不会匹配第二个标签页——它有自己的 uuid。）
-     * 返回 { is_rejoin, resumed, keepJoinedAt }。
+     * 第 3 段——会话恢复（决策-only）：携带同一 peer_uuid 的重连是本页面
+     * 的会话在重连（每次 join() 都铸造新 uuid）。当上个 socket 的条目仍在
+     * 幽灵宽限窗口内时，判定为恢复（RESUME）——但真正的状态接管
+     * （清幽灵过期定时器 + 重绑 socket）推迟到全部门禁通过之后
+     * （见 seatResume）：roomLocked 门禁没有 is_rejoin 豁免，被锁房间
+     * 拒绝的 resume 若已提前改写条目，会留下一个 ghost 标记已摘、过期
+     * 定时器已毁的僵尸会话——presence 永远不报 'gone'、relaySDP 永远
+     * 「可投递」，全房间对它空转重协商，临时房间还永不自毁。改名、
+     * 或旧 socket 仍然活着，都不算恢复：逐出旧会话并重建
+     * （绝不会匹配第二个标签页——它有自己的 uuid。）
+     * 返回 { is_rejoin, resumed, keepJoinedAt, resumeEntry }。
      */
     async function resumeOrReap(channel, peer_uuid, peer_name, socket) {
         let is_rejoin = false;
         let resumed = false;
         let keepJoinedAt = Date.now();
+        let resumeEntry = null;
         const existingEntry = Object.hasOwn(peers, channel) ? peers[channel][peer_uuid] : null;
         if (existingEntry && !roomMetaKeys.has(peer_uuid)) {
             const nameMatches = existingEntry.peer_name === peer_name;
@@ -175,21 +180,27 @@ function createJoinFlow({
                 is_rejoin = true;
                 resumed = true;
                 keepJoinedAt = existingEntry.joined_at;
-                clearTimeout(ghosts.get(ghostKey(channel, peer_uuid)));
-                ghosts.delete(ghostKey(channel, peer_uuid));
-                delete channels[channel]?.[existingEntry.socket_id];
-                if (sockets[existingEntry.socket_id]) delete sockets[existingEntry.socket_id].channels[channel]; // 死 socket 的簿记清理
-                existingEntry.ghost = false;
-                delete existingEntry.ghost_until; // 宽限随 resume 结束（presence 探测不再报告它）
-                existingEntry.socket_id = socket.id;
-                log.debug('[' + socket.id + '] session resumed in grace window', { channel });
+                resumeEntry = existingEntry; // 接管推迟到 seatResume（门禁全过之后）
             } else {
                 is_rejoin = nameMatches; // 同一会话带着活 socket 回归：容量/锁定检查的绕过与恢复保持一致
                 await reapSession(channel, peer_uuid, existingEntry);
                 log.debug('[' + socket.id + '] reaped stale session on rejoin', { channel, resumed: false });
             }
         }
-        return { is_rejoin, resumed, keepJoinedAt };
+        return { is_rejoin, resumed, keepJoinedAt, resumeEntry };
+    }
+
+    /**
+     * resume 的状态接管——只在全部门禁通过后、条目落座前调用：
+     * 清掉幽灵过期定时器、断开死 socket 的投递映射。条目本身由紧随
+     * 其后的 peers 写入整体重建（ghost 标记 / socket_id 随之更新）。
+     */
+    function seatResume(channel, peer_uuid, entry, socket) {
+        clearTimeout(ghosts.get(ghostKey(channel, peer_uuid)));
+        ghosts.delete(ghostKey(channel, peer_uuid));
+        delete channels[channel]?.[entry.socket_id];
+        if (sockets[entry.socket_id]) delete sockets[entry.socket_id].channels[channel]; // 死 socket 的簿记清理
+        log.debug('[' + socket.id + '] session resumed in grace window', { channel });
     }
 
     /**
@@ -351,8 +362,13 @@ function createJoinFlow({
                 return rejectJoin(socket, peer_ip, 'channelPasswordRequired');
             }
 
-            // —— 第 3 段：幽灵恢复 / 收割 ——
-            const { is_rejoin, resumed, keepJoinedAt } = await resumeOrReap(channel, peer_uuid, peer_name, socket);
+            // —— 第 3 段：幽灵恢复 / 收割（决策-only，见 resumeOrReap）——
+            const { is_rejoin, resumed, keepJoinedAt, resumeEntry } = await resumeOrReap(
+                channel,
+                peer_uuid,
+                peer_name,
+                socket
+            );
 
             // —— 第 4 段：容量/锁门禁 ——
             // 容量硬检查（host 总是可以加入以管理自己的频道）
@@ -408,6 +424,10 @@ function createJoinFlow({
             }
 
             const isPresenter = isPresenterNow;
+
+            // resume 在此真正落座：门禁已全部通过，才接管幽灵条目
+            //（此前任何拒绝——如房间锁——都不改写幽灵状态，照常过期）
+            if (resumeEntry) seatResume(channel, peer_uuid, resumeEntry, socket);
 
             peers[channel][peer_uuid] = {
                 peer_name: peer_name,

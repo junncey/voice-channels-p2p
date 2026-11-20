@@ -541,9 +541,17 @@ export class Mesh {
             () => {
                 entry.renegotiateTimer = null;
                 if (!this.entries.has(peerId)) return; // 等待期间 peer 已离开
-                this._sendOffer(peerId, {}).then((sent) => {
-                    if (!sent) this._scheduleRenegotiateRetry(peerId, attempt + 1);
-                });
+                // 卡死的陈旧 offer（对端 ghost 吞掉了 answer，PC 停在
+                // have-local-offer）先回滚——否则 _sendOffer 会被
+                // stable 检查一路拒到梯子放弃，模式切换就困在旧参数里
+                // 直到某个不相干的 SDP 事件。年龄门槛（OFFER_STUCK_MS）
+                // 保住在途的 answer 不被误回滚
+                this.unstickStaleOffer(peerId)
+                    .then(() => this._sendOffer(peerId, {}))
+                    .then((sent) => {
+                        if (!sent) this._scheduleRenegotiateRetry(peerId, attempt + 1);
+                    })
+                    .catch(() => {});
             },
             RENEGOTIATE_RETRY_DELAYS[attempt - 1]
         );

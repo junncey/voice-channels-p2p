@@ -64,7 +64,7 @@ function windowJbDelayMs(prev, cur) {
     return Math.round(((cur.jitterBufferDelay - prev.jitterBufferDelay) / dCount) * 1000);
 }
 
-export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, t }) {
+export function createLinkQuality({ s, members, peerRecovery, connPaths, ghostGraceUntil, $, el, t }) {
     function pathBadgeNode(peerId) {
         const node = el('span', { class: 'badge path-badge' });
         fillPathBadge(node, peerId);
@@ -364,9 +364,27 @@ export function createLinkQuality({ s, members, peerRecovery, connPaths, $, el, 
      *  若接收方恰好是较高 uuid，等低 uuid 就等于永远等下去。
      *  检测方直接行动；对端撞车的 offer 走标准完美协商的
      *  glare 路径解决，
-     *  而 iceRestart offer 反正会在两端都重启检查。 */
+     *  而 iceRestart offer 反正会在两端都重启检查。
+     *  对端 ghost 宽限内（恢复引擎 presence 探测的快照）让路：
+     *  此刻的 offer 只会被服务器吞掉，PC 反而被卡进
+     *  have-local-offer、冷却照烧——顺延到宽限之后由 pokeTimer
+     *  重入（与 relay 升级引擎同一语义，见 relay.js）。 */
     function pokeIce(peerId, rec, warnMsg, { detectorOnly = false } = {}) {
         if (!s.selfUuid || (!detectorOnly && s.selfUuid >= peerId)) return;
+        const graceLeft = (ghostGraceUntil?.get(peerId) || 0) - Date.now();
+        if (graceLeft > 0) {
+            if (rec.pokeTimer) return; // 已有一次待发的 poke 在等宽限
+            rec.pokeTimer = setTimeout(
+                () => {
+                    rec.pokeTimer = null;
+                    // 等待期间链路已交给恢复阶梯 / 对端已离开：无需再 poke
+                    if (!s.joined || !s.mesh?.entries.has(peerId) || peerRecovery.has(peerId)) return;
+                    pokeIce(peerId, rec, warnMsg, { detectorOnly });
+                },
+                Math.min(graceLeft + 500, POKE_RETRY_MS)
+            );
+            return;
+        }
         console.warn(warnMsg, peerId);
         Promise.resolve(s.mesh?.restartIce(peerId).catch(() => false)).then((sent) => {
             if (sent || rec.pokeTimer) return;

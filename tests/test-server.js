@@ -478,6 +478,58 @@ describe('test-server (signaling integration)', function () {
             info.peers_count.should.equal(2);
         });
 
+        it('a REJECTED resume (room lock) must not strand a zombie session', async () => {
+            // resume 的状态接管必须发生在全部门禁之后：roomLocked 没有
+            // is_rejoin 豁免——修复前 resume 在门禁前就摘掉 ghost 标记、
+            // 销毁过期定时器，被锁房间拒绝后遗留一个无人收割的会话：
+            // presence 永远不报 'gone'、removePeer 永不广播，
+            // 全房间对它空转重协商
+            const room = freshRoom('zres');
+            const ub = crypto.randomUUID();
+            // 房间锁需要主持人动作：频道自带 host 凭证，host 经 JWT 入座
+            const created = await adminApi('POST', '/api/admin/channels', {
+                id: room,
+                name: 'Zombie Resume',
+                hosts: [{ username: 'mod', password: 'mod-pw' }],
+            });
+            created.status.should.equal(201);
+            const login = await fetch(URL + '/api/host/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ channelId: room, username: 'mod', password: 'mod-pw' }),
+            });
+            const { token } = await login.json();
+            const host = track(connect());
+            host.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'mod'), peer_token: token });
+            await once(host, 'serverInfo');
+            const b = track(connect());
+            b.emit('join', joinPayload(room, ub, 'bob'));
+            await once(b, 'serverInfo');
+            await wait(100);
+
+            host.emit('roomAction', { room_id: room, action: 'lock', password: 'room-lock-pw' });
+            await wait(100);
+
+            // bob 传输骤死成幽灵；同 uuid 重连撞上房间锁 → resume 被拒
+            abruptClose(b);
+            await wait(150);
+            const b2 = track(connect());
+            b2.emit('join', joinPayload(room, ub, 'bob'));
+            await once(b2, 'roomIsLocked');
+            b2.disconnect();
+
+            // 幽灵必须照常过期：剩余成员收到 removePeer、presence 报 'gone'
+            const gone = await once(host, 'removePeer', GHOST_MS + 3000);
+            gone.peer_id.should.equal(ub);
+            const probe = (socket, peer_id) =>
+                new Promise((resolve, reject) =>
+                    socket
+                        .timeout(4000)
+                        .emit('peerPresence', { peer_id }, (err, res) => (err ? reject(err) : resolve(res)))
+                );
+            (await probe(host, ub)).present.should.equal('gone');
+        });
+
         it('should remove the session once the grace expires', async () => {
             const room = freshRoom('expire');
             const ua = crypto.randomUUID();

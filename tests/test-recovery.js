@@ -215,3 +215,149 @@ describe('test-recovery (escalated ladder must retry B1 once conditions allow)',
         recovery.peerRecovery.has(PEER).should.equal(false); // 落地即随 forget 取消
     });
 });
+
+describe('test-recovery (outage banner survives healthy re-reports while any link is pending)', () => {
+    // 任何 'connected' 上报都无条件收起断线横幅的话：健康链路每 10s
+    // 扫描的重报会把 B1 进行中的「恢复中」横幅、乃至预算耗尽后的
+    // 「请重载」终态横幅悄悄藏掉——挂账链路还断着，用户却被告知
+    // 一切正常（与 B1 预算回填的全表稳定语义同族，见上一个套件）。
+
+    const BROKEN = 'peer-broken';
+    const HEALTHY = 'peer-healthy';
+    let recovery;
+
+    before(async () => {
+        global.window = { addEventListener() {} };
+        global.document = { addEventListener() {} };
+        const hidden = new Set(['hidden']);
+        const banner = {
+            classList: {
+                add: (cls) => hidden.add(cls),
+                remove: (cls) => hidden.delete(cls),
+                toggle() {},
+            },
+            dataset: {},
+            textContent: '',
+            title: '',
+            append() {},
+            removeAttribute() {},
+        };
+        const meshEntries = new Map([
+            [BROKEN, { pc: { connectionState: 'disconnected' } }],
+            [HEALTHY, { pc: { connectionState: 'connected' } }],
+        ]);
+        const s = {
+            selfUuid: 'self-zzzz',
+            joined: true,
+            socket: { connected: true, disconnect() {}, connect() {}, timeout: () => ({ emit() {} }) },
+            mesh: {
+                entries: meshEntries,
+                clear() {},
+                restartIce: () => Promise.resolve(true),
+                unstickStaleOffer: () => Promise.resolve(false),
+                rebuildPeer: () => true,
+            },
+            chat: { add() {} },
+        };
+        const mod = await importBrowserModule('public/js/pages/channel/recovery.js');
+        recovery = mod.createRecovery({
+            s,
+            x: { dropPeer() {} },
+            members: new Map(),
+            channelId: 'testroom3',
+            $: (sel) => (sel === '#outageBanner' ? banner : stubNode()),
+            el: () => stubNode(),
+            t: (key) => key,
+            timings: { b1ResetMs: 60 * 1000 },
+        });
+        recovery.bannerHidden = () => hidden.has('hidden');
+    });
+
+    after(() => {
+        recovery.clearPeerRecovery();
+        recovery.resetForTeardown();
+    });
+
+    it('keeps the terminal banner visible while a broken link is still on the ladder', () => {
+        recovery.notePeerState(BROKEN, 'disconnected'); // 坏链路挂账
+        recovery.showOutageBanner('failed'); // B1 预算耗尽的「请重载」终态
+        recovery.bannerHidden().should.equal(false);
+        // 10s 健康扫描对无恙链路的重报（无恢复记录，早退挡不住）
+        recovery.notePeerState(HEALTHY, 'connected');
+        recovery.bannerHidden().should.equal(false); // 挂账未清：横幅不收
+        // 最后一条挂账链路治愈，全表稳定——现在才收
+        recovery.notePeerState(BROKEN, 'connected');
+        recovery.bannerHidden().should.equal(true);
+    });
+});
+
+describe('test-recovery (flappy fast lane escalates at its 6s window, not +12s later)', function () {
+    // 抖动捷径（FLAP_HEAL_THRESHOLD 次自愈后）：一轮立即 restart +
+    // 一次沉淀节拍，然后升级到重建阶。「轮次用完但窗口未结束」分支
+    // 曾用固定 12s 节拍——把 6s 快车道推迟到 ~15s 才升级；修复后
+    // 该节拍对准窗口准点（min(12s, 窗口剩余)），重建在 ~6.1s 落地。
+
+    this.timeout(15000);
+    const PEER = 'zzzz9999-peer'; // self < peer：本侧是低 uuid，轮次先手
+    let recovery;
+    let rebuilds;
+
+    before(async () => {
+        global.window = { addEventListener() {} };
+        global.document = { addEventListener() {} };
+        rebuilds = [];
+        const meshEntries = new Map();
+        const s = {
+            selfUuid: 'aaaa1111-self',
+            joined: true,
+            socket: { connected: true, disconnect() {}, connect() {}, timeout: () => ({ emit() {} }) },
+            mesh: {
+                entries: meshEntries,
+                clear() {},
+                restartIce: () => Promise.resolve(true),
+                unstickStaleOffer: () => Promise.resolve(false),
+                rebuildPeer: () => {
+                    rebuilds.push(Date.now());
+                    return true;
+                },
+            },
+            chat: { add() {} },
+        };
+        const mod = await importBrowserModule('public/js/pages/channel/recovery.js');
+        recovery = mod.createRecovery({
+            s,
+            x: { dropPeer: (id) => recovery.forgetPeer(id) },
+            members: new Map(),
+            channelId: 'testroom4',
+            $: () => stubNode(),
+            el: () => stubNode(),
+            t: (key) => key,
+            timings: { b1ResetMs: 60 * 1000 },
+        });
+
+        // 5 分钟窗口内自愈 4 次 → 下一次断线走 flappy 快车道
+        meshEntries.set(PEER, { pc: { connectionState: 'disconnected' } });
+        for (let i = 0; i < 4; i += 1) {
+            recovery.notePeerState(PEER, 'disconnected');
+            meshEntries.set(PEER, { pc: { connectionState: 'connected' } });
+            recovery.notePeerState(PEER, 'connected');
+            meshEntries.set(PEER, { pc: { connectionState: 'disconnected' } });
+        }
+        // 真实的一次断线（failed → 立即轮 1）
+        meshEntries.set(PEER, { pc: { connectionState: 'failed' } });
+        recovery.notePeerState(PEER, 'failed');
+    });
+
+    after(() => {
+        recovery.clearPeerRecovery();
+        recovery.resetForTeardown();
+    });
+
+    it('escalates to the rebuild stage within the compressed window', async () => {
+        // 轮 1（t≈0，restart 立即成功）→ +3s 沉淀复查（轮次用完）→
+        // 夹紧后的节拍再 ~3.1s → 窗口到点升级。重建在 ~6.2s 落地；
+        // 修复前的固定 12s 节拍要等到 ~15s
+        await sleep(8600);
+        rebuilds.should.have.length(1);
+    });
+});

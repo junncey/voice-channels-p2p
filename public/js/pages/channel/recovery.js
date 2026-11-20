@@ -55,7 +55,7 @@ DataChannel 存活。
 export function createRecovery({ s, x, members, channelId, $, el, t, timings = {} }) {
     const RECOVERY_GRACE_MS = 5000;
     const RECOVERY_ROUND_DELAYS = [3000, 6000, 12000];
-    const RECOVERY_TOTAL_MS = 20000; // 信令重连前的按对端窗口（第3轮 +12s = 21s）
+    const RECOVERY_TOTAL_MS = 20000; // 信令重连前的按对端窗口（轮次用完后的复查对准窗口终点）
     const RECOVERY_MAX_B1 = 2; // 询问用户之前的自动信令重连次数
     const RECOVERY_SCAN_MS = 10000;
     // 稳定这么久 → B1 预算回满（可经 timings.b1ResetMs 注入，测试用——
@@ -93,7 +93,6 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
 
         if (state === 'connected' || state === 'closed') {
             if (state === 'connected') {
-                hideOutageBanner();
                 // 一次已自愈的断线（10s 扫描重报健康对端时没有恢复记录
                 // —— rec 还在即意味着真实的一次周期）
                 if (rec) countFlapHeal(peerId);
@@ -105,13 +104,18 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
             // 12s 宽限定时器有机会触发前杀掉它（1.1.5 正是带着这个
             // bug 发布的 —— 升级从未运行）。真正的断线改为经由
             // peerRecovery 清预算；见 noteRelayUpgrade。
-            // 预算回填的前提是「真正的稳定」：全部链路都不在恢复阶梯上
-            //（先取消本对端的记录，再看余账）。无条件武装时，健康链路
-            // 每 10s 扫描的重报会在坏链路挂账期间（rec 建立时解除武装
-            // 后 ≤10s 内）重新武装，60s 后预算回零——escalated 链路的
-            // 重试随即第三次核爆整个房间，永动 B1 循环每 ~80-90s
-            // 把全房间的媒体打断一次，还顺手藏掉「请重载」终态横幅
-            if (state === 'connected' && peerRecovery.size === 0) armB1Reset();
+            // 横幅收起与预算回填同一语义：都要求「真正的稳定」——
+            // 全部链路都不在恢复阶梯上（先取消本对端的记录，再看
+            // 余账）。无条件收起时，健康链路每 10s 扫描的重报会把
+            // B1 进行中的「恢复中」横幅、乃至预算耗尽后的「请重载」
+            // 终态横幅悄悄藏掉；无条件武装时，同一批重报会在坏链路
+            // 挂账期间（rec 建立时解除武装后 ≤10s 内）重新武装，
+            // 60s 后预算回零——escalated 链路的重试随即第三次核爆
+            // 整个房间，永动 B1 循环每 ~80-90s 打断全房间媒体一次
+            if (state === 'connected' && peerRecovery.size === 0) {
+                hideOutageBanner();
+                armB1Reset();
+            }
             return;
         }
         if (state !== 'disconnected' && state !== 'failed') return; // new/checking/connecting
@@ -254,8 +258,17 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
                 }
                 return;
             }
-            // 轮次用完但窗口未结束：继续观察链路
-            scheduleRecoveryTick(peerId, RECOVERY_ROUND_DELAYS[RECOVERY_ROUND_DELAYS.length - 1]);
+            // 轮次用完但窗口未结束：继续观察链路——节拍对准窗口准点。
+            // 固定 12s 会把 flappy 的 6s 快车道推迟到 ~15s 才升级
+            //（捷径「一轮 + 一次沉淀节拍」的契约被静默击穿），
+            // 常规链路也因此在第 3 轮后白等 6s
+            scheduleRecoveryTick(
+                peerId,
+                Math.min(
+                    RECOVERY_ROUND_DELAYS[RECOVERY_ROUND_DELAYS.length - 1],
+                    windowMs - (Date.now() - rec.brokenAt) + 100
+                )
+            );
             return;
         }
         // 过渡态（new/checking/connecting）：一次 restart 正在评估 ——
@@ -595,9 +608,11 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
     // （peerRecovery）、ghost 宽限快照（ghostGraceUntil）与
     // 本监视器的 connPaths 快照，均为注入
     const relayUpgrade = createRelayUpgrade({ s, peerRecovery, connPaths, ghostGraceUntil });
-    // 链路质量引擎（见 channel/quality.js）—— 同样的注入，
-    // 由下方 checkPeerPath 喂养；其 lossStreaks 支撑不稳定徽章与 #debug
-    const quality = createLinkQuality({ s, members, peerRecovery, connPaths, $, el, t });
+    // 链路质量引擎（见 channel/quality.js）—— 同样的注入
+    // （外加 ghost 宽限快照：其质量重启的 poke 与 relay 升级一样
+    // 在宽限内让路），由下方 checkPeerPath 喂养；其 lossStreaks
+    // 支撑不稳定徽章与 #debug
+    const quality = createLinkQuality({ s, members, peerRecovery, connPaths, ghostGraceUntil, $, el, t });
 
     function startPathMonitor() {
         if (pathPollTimer) return;

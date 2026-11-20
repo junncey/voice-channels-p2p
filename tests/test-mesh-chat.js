@@ -349,6 +349,58 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
         });
     });
 
+    describe('renegotiate retry ladder must unstick a swallowed offer', function () {
+        this.timeout(10000); // 第一跳重试延迟 2.5s（RENEGOTIATE_RETRY_DELAYS）
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        /** 一条卡在 have-local-offer 的链路：陈旧 offer 的 answer 已被
+         *  对端 ghost 吞掉——直接 renegotiate 会被 stable 检查拒绝，
+         *  唯一的出路是重试梯子先回滚陈旧 offer 再发新的。 */
+        function stuckOfferMesh() {
+            const mesh = bareMesh();
+            const emitted = [];
+            mesh.signaling.emit = (evt, payload) => emitted.push(payload);
+            const pc = {
+                signalingState: 'have-local-offer',
+                getTransceivers: () => [],
+                getSenders: () => [],
+                getReceivers: () => [],
+                createOffer: async () => ({ type: 'offer', sdp: 'v=0 fresh-offer' }),
+                setLocalDescription: async (desc) => {
+                    if (desc.type === 'rollback') pc.signalingState = 'stable';
+                },
+            };
+            mesh.entries.set('p1', {
+                pc,
+                pendingIce: [],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: true,
+                offering: false,
+                offerSentAt: Date.now() - 9000, // 陈旧：answer 早已不会来
+            });
+            return { mesh, emitted, pc };
+        }
+
+        it('rolls the stale offer back and sends a fresh one on the retry tick', async () => {
+            const { mesh, emitted, pc } = stuckOfferMesh();
+            (await mesh.renegotiate('p1')).should.be.false(); // stable 检查拒绝
+            emitted.should.be.empty(); // 没有立刻发出去
+            await sleep(2900); // 第一跳重试：解卡 + 重发
+            pc.signalingState.should.equal('stable');
+            emitted.filter((p) => p?.peer_id === 'p1').should.have.length(1); // 新 offer 已上路
+        });
+
+        it('keeps a FRESH stuck offer intact on the first hop (answer may be in flight)', async () => {
+            const { mesh, emitted } = stuckOfferMesh();
+            mesh.entries.get('p1').offerSentAt = Date.now() - 200; // 刚发出的 offer
+            await mesh.renegotiate('p1');
+            await sleep(2900); // 第一跳：年龄门槛挡住回滚——梯子继续等第二跳
+            emitted.should.be.empty();
+            mesh.removePeer('p1'); // 拆掉待发的后续重试，测试收尾即止
+        });
+    });
+
     describe('pending ICE hardening', () => {
         it('should cap the pre-remote-description candidate buffer', async () => {
             const mesh = bareMesh();
