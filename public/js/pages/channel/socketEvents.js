@@ -411,7 +411,12 @@ export function createSocketEvents({
                 }
                 s.chat.renamePeer(old, peer_name);
                 member.peer_name = peer_name;
-                if (peerVolumes[peer_name] !== undefined) member.volume = peerVolumes[peer_name];
+                if (peerVolumes[peer_name] !== undefined) {
+                    member.volume = peerVolumes[peer_name];
+                    // 滑杆随重渲染换到了新值——音频图的增益也要跟上，
+                    // 否则 UI 与实际播放会分叉，直到下一次全局 reapply
+                    x.reapplyPeerVolume(peer_id);
+                }
             } else if (member) {
                 member.peer_name = peer_name;
             }

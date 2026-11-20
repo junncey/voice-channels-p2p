@@ -74,6 +74,21 @@ describe('test-frontend-utils (core/utils.js)', () => {
         utils.keyLabel('Space').should.be.a.String();
         utils.normalizePttKey('Space').should.equal('Space');
     });
+
+    it('sanitizePeerVolumes keeps finite in-range values and clamps outliers', () => {
+        utils
+            .sanitizePeerVolumes({ alice: 0.5, bob: '1.5', carol: 7, dave: -2, erin: 0, 'frank x': 3 })
+            .should.eql({ alice: 0.5, bob: 1.5, carol: 3, dave: 0, erin: 0, 'frank x': 3 });
+    });
+
+    it('sanitizePeerVolumes drops non-object payloads and non-finite/absent/unity entries', () => {
+        utils.sanitizePeerVolumes('{"alice":0.5}').should.eql({});
+        utils.sanitizePeerVolumes(null).should.eql({});
+        utils.sanitizePeerVolumes([0.5]).should.eql({});
+        utils
+            .sanitizePeerVolumes({ alice: 'abc', bob: null, carol: {}, dave: NaN, unity: 1, '': 0.5, lone: undefined })
+            .should.eql({});
+    });
 });
 
 describe('test-frontend-utils (hostAuth storage reads)', () => {

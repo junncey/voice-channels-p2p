@@ -52,7 +52,7 @@ import { createOfflineBanner } from '/js/pages/channel/offline.js';
 import { createHostAuth, loadHostToken, loadChannelPw } from '/js/pages/channel/hostAuth.js';
 import { createSocketEvents } from '/js/pages/channel/socketEvents.js';
 import { createUi } from '/js/pages/channel/ui.js';
-import { $, el, randomNick, toast } from '/js/core/utils.js';
+import { $, el, randomNick, sanitizePeerVolumes, toast } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
@@ -122,10 +122,11 @@ function loadAudioSettings() {
 }
 
 // 按用户记忆的音量，以显示名为键，重连、刷新页面后依然生效，
-// 且同一人换到其他频道也能跟随
+// 且同一人换到其他频道也能跟随。存储值经 sanitizePeerVolumes
+// 清洗——坏值会让增益算出 NaN 或离谱放大
 function loadPeerVolumes() {
     try {
-        return JSON.parse(localStorage.getItem(PEER_VOLUMES_KEY)) || {};
+        return sanitizePeerVolumes(JSON.parse(localStorage.getItem(PEER_VOLUMES_KEY)));
     } catch {
         return {};
     }

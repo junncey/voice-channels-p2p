@@ -124,3 +124,29 @@ export function normalizePttKey(value) {
         ? value
         : 'KeyV';
 }
+
+// ----- 按用户音量记忆（vc_peer_volumes）的清洗 -----
+
+// 滑杆值域 0..300%（members.js 的 memberVolumeNode）
+const PEER_VOLUME_MAX = 3;
+
+/**
+ * 清洗持久化的按用户音量记录：只接受可 coerce 到 0..3 的有限数
+ * （越界夹取），null/undefined/NaN/对象一律丢弃回默认——坏值会让
+ * 增益算出 NaN（setTargetAtTime 抛 TypeError）或离谱放大。夹取后
+ * 等于 1 的条目与默认等价，不保留（与 savePeerVolume 的不变量一致）。
+ * @param {unknown} stored localStorage 解析出的任意值
+ * @returns {Record<string, number>} 干净的 名字 → 音量 映射
+ */
+export function sanitizePeerVolumes(stored) {
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+    const out = {};
+    for (const [name, volume] of Object.entries(stored)) {
+        if (!name || volume === null || volume === undefined) continue;
+        const value = Number(volume);
+        if (!Number.isFinite(value)) continue;
+        const clamped = Math.min(PEER_VOLUME_MAX, Math.max(0, value));
+        if (clamped !== 1) out[name] = clamped;
+    }
+    return out;
+}
