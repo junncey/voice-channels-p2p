@@ -180,6 +180,7 @@ function createJoinFlow({
                 delete channels[channel]?.[existingEntry.socket_id];
                 if (sockets[existingEntry.socket_id]) delete sockets[existingEntry.socket_id].channels[channel]; // 死 socket 的簿记清理
                 existingEntry.ghost = false;
+                delete existingEntry.ghost_until; // 宽限随 resume 结束（presence 探测不再报告它）
                 existingEntry.socket_id = socket.id;
                 log.debug('[' + socket.id + '] session resumed in grace window', { channel });
             } else {

@@ -142,12 +142,17 @@ function createRooms({ channelStore, chatStore, audit, log }) {
 
     /** 客户端恢复探测的存在性判定：'live' = 可投递的会话，'ghost' =
      *  挂起在恢复宽限内（值得治愈），'gone' = 会话根本不存在
-     *  （探测者错过了它的 removePeer）。 */
+     *  （探测者错过了它的 removePeer）。'ghost' 附带 resume 宽限
+     *  的剩余毫秒（graceLeftMs）——恢复引擎据此在窗口内保持
+     *  等待而非升级到全量重建。 */
     function sessionPresence(channel, peerUuid) {
-        if (!isPeerInRoom(channel, peerUuid)) return 'gone';
+        if (!isPeerInRoom(channel, peerUuid)) return { present: 'gone', graceLeftMs: 0 };
         const entry = peers[channel][peerUuid];
-        if (entry.ghost || !liveSessionSocket(channel, peerUuid)) return 'ghost';
-        return 'live';
+        if (entry.ghost || !liveSessionSocket(channel, peerUuid)) {
+            const graceLeftMs = entry.ghost_until ? Math.max(0, entry.ghost_until - Date.now()) : 0;
+            return { present: 'ghost', graceLeftMs };
+        }
+        return { present: 'live', graceLeftMs: 0 };
     }
 
     /** 向同房间的所有 peer 异步发送数据（不含自己） */
@@ -193,6 +198,11 @@ function createRooms({ channelStore, chatStore, audit, log }) {
         entry.ghost = true;
         delete channels[channel]?.[socket.id];
         const delay = reason === 'ping timeout' ? GHOST_GRACE_LATE_MS : GHOST_GRACE_MS;
+        // 宽限终点随条目存活：presence 探测据此告知客户端
+        // 「resume 还有多久可能落地」，恢复引擎好把全量重建
+        // （B1）推迟到窗口之后——resume 的原地恢复比 B1 便宜
+        // 一个数量级，而 B1 是主动断开，反而毁掉 resume 通道
+        entry.ghost_until = Date.now() + delay;
         const key = ghostKey(channel, session.uuid);
         clearTimeout(ghosts.get(key));
         ghosts.set(

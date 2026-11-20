@@ -31,10 +31,13 @@ coturn 重启会销毁全部 TURN 分配，而信令仍然在线，于是链路
   disconnected → 5s 宽限（ICE 常能自愈；过早行动反而坏事）
   failed       → 立即行动
   → 至多 3 轮 ICE-restart（3/6/12s 退避，session id 低的一方
-    发起，双方绝不同时 re-offer）→ 当 mesh 其余部分健康时，
-    仅给该链路一个全新 PeerConnection（全新 ICE+DTLS，远端经
-    正常路径应答）→ 信令重连（重建所有链路）→ 静默重连 2 次
-    后：显示「重载」提示。
+    先手；等待方超过 9s 仍未见对端 re-offer 即破例自行发起——
+    单侧 consent 失效时低 uuid 方对断链无感，干等只会空转）
+  → 当 mesh 其余部分健康时，仅给该链路一个全新 PeerConnection
+    （全新 ICE+DTLS，远端经正常路径应答）→ 信令重连（重建所有
+    链路）→ 静默重连 2 次后：显示「重载」提示。
+  对端探测为 ghost（宽限内可能 resume）时，升级动作让路到
+    宽限之后——resume 的原地恢复比 B1 核爆便宜一个数量级。
 一次 10s 扫描复查所有 connectionState，以防 webview 吞掉
 connectionstatechange 事件。
 
@@ -61,6 +64,16 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     const FLAP_WINDOW_MS = 5 * 60 * 1000;
     const FLAP_HEAL_THRESHOLD = 4;
     const FLAP_ESCALATE_MS = 6000; // 抖动窗口：一轮 + 一次沉淀节拍，然后升级
+    // 非对称断链（单侧 consent 失效：只有一方看得到链路断了，
+    // 对端的 PC 仍 connected、毫不知情）的破例窗口：高 uuid
+    // 等待方让出这么久仍未见对端 re-offer，即自行 restart——
+    // 低 uuid 方对断链无感时永远不会发起，无限等待只会把链路
+    // 逼进 B1 全 mesh 重建。约等于让出两个先手轮次（3s + 6s）
+    const BREAK_TIE_MS = 9000;
+    // rejoin（resume）解卡的最小 offer 年龄：对端极短闪断时
+    // answer 可能仍在路上，刚发出的 offer 不急于判死
+    //（见 retryStuckOffer）
+    const REJOIN_RETRY_MIN_AGE_MS = 2000;
 
     const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated, flappy }
     const flapHeals = new Map(); // peerId -> FLAP_WINDOW_MS 内的 [healedAt, ...]
@@ -140,6 +153,19 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         // 换来几秒钟
         const windowMs = rec.flappy ? FLAP_ESCALATE_MS : RECOVERY_TOTAL_MS;
         if (Date.now() - rec.brokenAt >= windowMs) {
+            // 对端探测为 ghost 且宽限未过：resume（原地恢复，复用
+            // 既有 PC 与 DataChannel）仍可能落地，而 B1 是主动断开
+            // ——对端 ghost 会话被真正移除，resume 通道一并被毁，
+            // 全 mesh 还要重协商。ping-timeout 型断链的宽限（30s）
+            // 本就长于恢复窗口（20s），没有这道闸，移动端唤醒的
+            // resume 还在路上 B1 就先核爆了。快照由每轮的
+            // presence 探测刷新；宽限一过（resume 已 connected
+            // 或 removePeer 已到）照常升级
+            const graceLeft = (ghostGraceUntil.get(peerId) || 0) - Date.now();
+            if (graceLeft > 0) {
+                scheduleRecoveryTick(peerId, Math.min(graceLeft + 500, RECOVERY_SCAN_MS));
+                return;
+            }
             escalatePeerRecovery(peerId);
             return;
         }
@@ -148,9 +174,19 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             if (rec.attempts < roundLimit) {
                 rec.attempts += 1;
                 probePeerPresence(peerId); // 每轮都问：'gone' 能让死会话早一轮落定
-                // glare 仲裁：双方都断时，只有 session id 较低的一方
-                // re-offer；另一方只应答
-                if (s.selfUuid < peerId) {
+                // glare 仲裁：双方都断时，先让 session id 较低的一方
+                // re-offer。但等待不是无限的单——单侧 consent 失效
+                // （对端看链路仍 connected、根本不在恢复中）时低 uuid
+                // 方永远不会发起：超过 BREAK_TIE_MS 仍未见对端
+                // re-offer 就破例自行 restart。iceRestart 在两端都
+                // 重跑检查，对端以 stable 状态正常应答；
+                // 真的相撞也由完美协商的 glare 路径兜底
+                const lowUuidSide = s.selfUuid < peerId;
+                const breakTie = !lowUuidSide && Date.now() - rec.brokenAt >= BREAK_TIE_MS;
+                if (breakTie) {
+                    console.warn('[mesh] recovery: peer not re-offering, breaking tie with our own restart', peerId);
+                }
+                if (lowUuidSide || breakTie) {
                     s.mesh.restartIce(peerId).then(
                         async (sent) => {
                             if (sent || peerRecovery.get(peerId) !== rec) return;
@@ -210,15 +246,15 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         if (!rec.rebuilt && onlyBrokenLink(peerId)) {
             rec.rebuilt = true;
             rec.brokenAt = Date.now(); // 给重建的链路一个新的沉淀窗口
-            // 与 restart 轮次相同的仲裁：session id 较低的一方重建
-            if (s.selfUuid < peerId) {
-                if (s.mesh?.rebuildPeer(peerId)) {
-                    console.warn('[mesh] recovery: rebuilding the peer connection', peerId);
-                    scheduleRecoveryTick(peerId, 3000);
-                    return;
-                }
-            } else {
-                console.log('[mesh] recovery: waiting for peer to rebuild its link', peerId);
+            // 与 restart 轮次不同，这里不设 uuid 仲裁：rebuildPeer
+            // 对对端零要求（全新 PC 的 offer 走正常应答路径），
+            // 而能走到这一阶的高 uuid 方已在 restart 层等完了
+            // 先手窗口与破例轮次——对端仍无动作（单侧 consent
+            // 失效时它根本不在恢复中，此前这里要白等 20s 才落到
+            // B1）。双方同时耗尽轮次而同时重建的相撞由完美协商
+            // 兜底，代价只是一方白建一个 PC
+            if (s.mesh?.rebuildPeer(peerId)) {
+                console.warn('[mesh] recovery: rebuilding the peer connection', peerId);
                 scheduleRecoveryTick(peerId, 3000);
                 return;
             }
@@ -251,6 +287,10 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // 抖动链路也无法连珠炮式追问
     const PRESENCE_COOLDOWN_MS = 2000;
     const presenceProbed = new Map(); // peerId -> 上次探测的时间戳
+    // peerId -> 最近一次探测得知的 ghost 宽限终点（epoch ms）。
+    // escalate 在它之前让路（见 recoveryTick）：宽限内 resume
+    // 仍可能落地，而 ghost 期间任何重协商都投不进去
+    const ghostGraceUntil = new Map();
 
     function probePeerPresence(peerId) {
         if (!s.socket?.connected || !s.joined) return;
@@ -258,12 +298,55 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         if (Date.now() - last < PRESENCE_COOLDOWN_MS) return;
         presenceProbed.set(peerId, Date.now());
         s.socket.timeout(5000).emit('peerPresence', { room_id: channelId, peer_id: peerId }, (err, res) => {
-            if (err || res?.present !== 'gone') return; // live/ghost/无应答：阶梯继续尝试
-            const name = members.get(peerId)?.peer_name || '';
-            x.dropPeer(peerId);
-            if (s.joined && name) s.chat?.add({ text: t('chat.left', { name }), system: true });
-            console.warn('[mesh] recovery: session gone server-side, member dropped', peerId);
+            if (err || !res || typeof res.present !== 'string') return;
+            if (res.present === 'gone') {
+                ghostGraceUntil.delete(peerId);
+                const name = members.get(peerId)?.peer_name || '';
+                x.dropPeer(peerId);
+                if (s.joined && name) s.chat?.add({ text: t('chat.left', { name }), system: true });
+                console.warn('[mesh] recovery: session gone server-side, member dropped', peerId);
+                return;
+            }
+            // 'ghost'：服务器把 resume 窗口的剩余时间随身携带——
+            // 记下来让 escalate 让路。旧服务器不带 graceLeftMs
+            //（undefined）则维持原行为：不推迟，窗口一到即升级
+            const left = Number(res.graceLeftMs);
+            if (res.present === 'ghost' && Number.isFinite(left) && left > 0) {
+                ghostGraceUntil.set(peerId, Date.now() + left);
+            } else if (res.present === 'live') {
+                ghostGraceUntil.delete(peerId);
+            }
         });
+    }
+
+    /** relaySDP 不可投递的服务器回执（见 signaling.js）：目标此刻
+     *  吞不进信令——立刻 presence 分流，'gone' 提前落定（免等
+     *  阶梯的下一轮探测时机），'ghost' 记下宽限好让 escalate
+     *  让路（见 ghostGraceUntil）。刻意不在这里重发 offer：
+     *  ghost 期间重发只会再次被吞，恢复时机由 resume 的
+     *  addPeer(rejoin)（见 retryStuckOffer）或宽限后的下一轮
+     *  recoveryTick 决定。探测自带冷却，与阶梯的常规轮询
+     *  之间至多多问一次。 */
+    function onRelayUndelivered(peerId) {
+        if (!peerId || !s.joined || !s.mesh?.entries.has(peerId)) return;
+        probePeerPresence(peerId);
+    }
+
+    /** rejoin（resume）时机的解卡：addPeer(rejoin) 证明对端 socket
+     *  已活、此刻的信令必能投递——曾被它 ghost 窗口吞掉 answer 的
+     *  offer 不必再等 OFFER_STUCK_MS 判死，立即回滚重发。只碰
+     *  卡在 have-local-offer 的链路，其余状态原样返回
+     *  （'new' 的等待方由对端 resume 后的 offer 照常启动）。
+     *  最小年龄 2s 防极短闪断里在途 answer 与重发 offer 交错。 */
+    function retryStuckOffer(peerId) {
+        if (!s.mesh?.entries.has(peerId)) return;
+        s.mesh
+            .unstickStaleOffer(peerId, REJOIN_RETRY_MIN_AGE_MS)
+            .then((rolled) => {
+                if (rolled) return s.mesh.restartIce(peerId).catch(() => {});
+                return null;
+            })
+            .catch(() => {});
     }
 
     /** 本地移除全部远端对端与 mesh 条目（用于主动断连之前：
@@ -319,6 +402,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         if (!rec) return;
         clearTimeout(rec.timer);
         peerRecovery.delete(peerId);
+        ghostGraceUntil.delete(peerId); // 链路已恢复/移除：宽限快照随之作废
         updatePeerCardRecovery(peerId);
     }
 
@@ -497,6 +581,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         pathEarlyTimers.delete(peerId);
         connPaths.delete(peerId);
         presenceProbed.delete(peerId);
+        ghostGraceUntil.delete(peerId);
         flapHeals.delete(peerId);
     }
 
@@ -518,6 +603,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         connectingTimers.clear();
         stuckConnecting.clear();
         flapHeals.clear();
+        ghostGraceUntil.clear();
         hideOutageBanner();
         b1Attempts = 0;
         b1InFlight = false;
@@ -538,6 +624,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         resetLocalMesh,
         attemptSignalingReconnect,
         markSessionRestored,
+        onRelayUndelivered,
+        retryStuckOffer,
         get selfReconnecting() {
             return selfReconnecting;
         },

@@ -334,6 +334,11 @@ export function createSocketEvents({
                 const state = s.mesh.entries.get(cfg.peer_id)?.pc.connectionState;
                 if (state && state !== 'connected' && state !== 'closed') rec.notePeerState(cfg.peer_id, state);
             }
+            // rejoin=true 且链路已知（两侧对称）：对端刚从断线中回来，
+            // 此刻信令必能投递——曾被它 ghost 窗口吞掉 answer 的
+            // offer 立刻解卡重发（免 OFFER_STUCK_MS 盲等）。老成员
+            // 一侧与 resume 一侧都可能卡着这样的 offer，两边都体检
+            if (known && cfg.rejoin === true) rec.retryStuckOffer(cfg.peer_id);
             mem.updateOnlineCount();
         });
 
@@ -349,6 +354,14 @@ export function createSocketEvents({
 
         socket.on('iceCandidate', (cfg) => s.mesh.handleIceCandidate(cfg));
         socket.on('sessionDescription', (cfg) => s.mesh.handleSessionDescription(cfg));
+
+        // 我们中转出去的 SDP 没有投递落脚处（服务器对 ghost 吞信令
+        // 的回执，见 signaling.js）——立刻探测对端：'gone' 当场拆卡，
+        // 'ghost' 记下 resume 宽限好让恢复阶梯的升级动作让路，
+        // 都不必等到阶梯的下一轮
+        socket.on('relayUndelivered', (cfg) => {
+            if (cfg?.peer_id) rec.onRelayUndelivered(cfg.peer_id);
+        });
 
         // 消息生命周期 —— 服务器把持久化结果广播给所有人
         // （含发送者），DOM 跟随存储走

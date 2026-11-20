@@ -483,17 +483,20 @@ export class Mesh {
      * 对端 ghost 窗口内，服务器会静默丢弃发往它的 relaySDP，
      * answer 永不到来，PC 永久卡在 have-local-offer——之后所有
      * restartIce/renegotiate 都被 stable 检查拒绝，恢复轮次
-     * 全部空转。只在 offer 发出已超过 OFFER_STUCK_MS 时回滚
-     * （见常量注释）。
+     * 全部空转。只在 offer 发出已超过 minAgeMs 时回滚（默认
+     * OFFER_STUCK_MS，见常量注释；对端 resume 事件已证明其
+     * ghost 吞掉过信令时，调用方可传入更短的年龄——见
+     * recovery.retryStuckOffer）。
      * @param {string} peerId
+     * @param {number} [minAgeMs] offer 判死的最低年龄（毫秒）
      * @returns {Promise<boolean>} 已回滚时为 true
      */
-    async unstickStaleOffer(peerId) {
+    async unstickStaleOffer(peerId, minAgeMs = OFFER_STUCK_MS) {
         const entry = this.entries.get(peerId);
         if (!entry) return false;
         const pc = entry.pc;
         if (pc.signalingState !== 'have-local-offer') return false;
-        if (!entry.offerSentAt || Date.now() - entry.offerSentAt < OFFER_STUCK_MS) return false;
+        if (!entry.offerSentAt || Date.now() - entry.offerSentAt < minAgeMs) return false;
         try {
             await pc.setLocalDescription({ type: 'rollback' });
             entry.offerSentAt = null;

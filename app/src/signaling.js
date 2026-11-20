@@ -151,7 +151,15 @@ function registerSignaling(
             const { peer_id, session_description } = config;
             const channel = sharedRoom(socket, peer_id);
             const target = channel && liveSessionSocket(channel, peer_id);
-            if (!target) return;
+            if (!target) {
+                // 回执而非静默丢弃：SDP 目标此刻不可投递（对端 ghost
+                // 吞信令，或已离开）。客户端据此立刻做 presence 分流，
+                // 把「offer 卡死」的判定从 8s 超时盲等降为 RTT 级。
+                // 刻意只在 SDP 层回执——ICE 候选量大（重连风暴下
+                // 每对端几十条），回执本身会成为放大器
+                socket.emit('relayUndelivered', { peer_id, kind: 'sdp' });
+                return;
+            }
             log.debug('[' + socket.id + '] relay SessionDescription to [' + peer_id + ']', {
                 type: session_description.type,
             });
@@ -181,12 +189,13 @@ function registerSignaling(
          * 幽灵宽限）否则会对着一个已不存在的 peer
          * 跑完整套 ICE-restart 阶梯。
          * 'gone' 让它立刻丢掉成员卡片；
-         * 'ghost' 让阶梯继续治愈——resume 仍可能落地。
+         * 'ghost'（附 resume 宽限剩余毫秒）让阶梯继续治愈并推迟
+         * 全量重建——resume 仍可能落地。
          */
         socket.on('peerPresence', async (config, ack) => {
             if (typeof ack !== 'function' || !Validate.isValidData(config)) return;
             const channel = sharedRoom(socket, config.peer_id);
-            ack({ present: channel ? sessionPresence(channel, config.peer_id) : 'gone' });
+            ack(channel ? sessionPresence(channel, config.peer_id) : { present: 'gone', graceLeftMs: 0 });
         });
 
         /**

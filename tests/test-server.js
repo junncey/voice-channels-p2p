@@ -285,8 +285,13 @@ describe('test-server (signaling integration)', function () {
             relayed.peer_id.should.equal(ua);
             relayed.session_description.sdp.should.equal('v=0 test');
 
-            // 未知目标被静默丢弃
+            // 未知目标 → 回执给发送方（客户端据此立刻做 presence
+            // 分流，把 offer 卡死判定从 8s 盲等降为 RTT 级），
+            // 且绝不中转给无关成员
+            const undelivered = once(a, 'relayUndelivered');
             a.emit('relaySDP', { peer_id: crypto.randomUUID(), session_description: { type: 'offer', sdp: 'x' } });
+            const receipt = await undelivered;
+            receipt.kind.should.equal('sdp');
             (await emitted(b, 'sessionDescription', 250)).should.be.false();
         });
 
@@ -511,10 +516,14 @@ describe('test-server (signaling integration)', function () {
 
             // 两个会话都存活且可达
             (await probe(b, ua)).present.should.equal('live');
-            // 宽限窗口内传输已死 → ghost（仍可能原地 resume）
+            // 宽限窗口内传输已死 → ghost（仍可能原地 resume），并随附
+            // resume 窗口的剩余毫秒——恢复引擎据此把全量重建让路到
+            // 宽限之后（ping-timeout 断链的宽限本就长于恢复窗口）
             abruptClose(a);
             await wait(150);
-            (await probe(b, ua)).present.should.equal('ghost');
+            const ghostRes = await probe(b, ua);
+            ghostRes.present.should.equal('ghost');
+            ghostRes.graceLeftMs.should.be.within(1, GHOST_MS);
             // 宽限已过，会话真没了
             await once(b, 'removePeer', GHOST_MS + 3000);
             (await probe(b, ua)).present.should.equal('gone');
