@@ -36,8 +36,9 @@ coturn 重启会销毁全部 TURN 分配，而信令仍然在线，于是链路
   → 当 mesh 其余部分健康时，仅给该链路一个全新 PeerConnection
     （全新 ICE+DTLS，远端经正常路径应答）→ 信令重连（重建所有
     链路）→ 静默重连 2 次后：显示「重载」提示。
-  对端探测为 ghost（宽限内可能 resume）时，升级动作让路到
-    宽限之后——resume 的原地恢复比 B1 核爆便宜一个数量级。
+  对端探测为 ghost（宽限内可能 resume）时，restart 轮次与
+    升级动作一并让路到宽限之后——ghost 期间任何重协商都投不
+    进去，resume 的原地恢复比 B1 核爆便宜一个数量级。
 一次 10s 扫描复查所有 connectionState，以防 webview 吞掉
 connectionstatechange 事件。
 
@@ -172,8 +173,19 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
         const roundLimit = rec.flappy ? 1 : RECOVERY_ROUND_DELAYS.length;
         if (state === 'disconnected' || state === 'failed') {
             if (rec.attempts < roundLimit) {
-                rec.attempts += 1;
                 probePeerPresence(peerId); // 每轮都问：'gone' 能让死会话早一轮落定
+                // 对端探测为 ghost（快照来自回执或上一轮探测）：
+                // 宽限内服务器会丢弃发往它的一切 SDP（与 escalate
+                // 层同一语义，见上方窗口分支）——此刻 restart 只是
+                // 把自己卡进 have-local-offer、再靠 8s unstick 爬
+                // 出来。不烧轮次，顺延到宽限之后；期间探测继续
+                // 刷新快照。轮 1 尚无快照时照发一次：被吞的回执
+                // （force 探测）恰好为轮 2 建起快照
+                const graceLeft = (ghostGraceUntil.get(peerId) || 0) - Date.now();
+                if (graceLeft > 0) {
+                    scheduleRecoveryTick(peerId, Math.min(graceLeft + 500, RECOVERY_SCAN_MS));
+                    return;
+                }
                 // glare 仲裁：双方都断时，先让 session id 较低的一方
                 // re-offer。但等待不是无限的单——单侧 consent 失效
                 // （对端看链路仍 connected、根本不在恢复中）时低 uuid
@@ -183,10 +195,14 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                 // 真的相撞也由完美协商的 glare 路径兜底
                 const lowUuidSide = s.selfUuid < peerId;
                 const breakTie = !lowUuidSide && Date.now() - rec.brokenAt >= BREAK_TIE_MS;
-                if (breakTie) {
-                    console.warn('[mesh] recovery: peer not re-offering, breaking tie with our own restart', peerId);
-                }
                 if (lowUuidSide || breakTie) {
+                    if (breakTie) {
+                        console.warn(
+                            '[mesh] recovery: peer not re-offering, breaking tie with our own restart',
+                            peerId
+                        );
+                    }
+                    rec.attempts += 1; // 只计真实发起的轮次——等待不烧预算
                     s.mesh.restartIce(peerId).then(
                         async (sent) => {
                             if (sent || peerRecovery.get(peerId) !== rec) return;
@@ -205,10 +221,16 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                         },
                         () => {}
                     );
+                    scheduleRecoveryTick(peerId, rec.flappy ? 3000 : RECOVERY_ROUND_DELAYS[rec.attempts - 1]);
                 } else {
                     console.log('[mesh] recovery: waiting for peer re-offer', peerId);
+                    // 等待不烧轮次：等待方的全部价值在 BREAK_TIE 之后。
+                    // 节拍对准破例准点——轮次边界（3s/6s）落在 9s 破例
+                    // 窗内时，破例本要等到 12s 的下一个边界，整个
+                    // 20s 窗口就只剩一次真实 restart 机会
+                    const tieIn = BREAK_TIE_MS - (Date.now() - rec.brokenAt);
+                    scheduleRecoveryTick(peerId, Math.max(tieIn + 100, 1000));
                 }
-                scheduleRecoveryTick(peerId, rec.flappy ? 3000 : RECOVERY_ROUND_DELAYS[rec.attempts - 1]);
                 return;
             }
             // 轮次用完但窗口未结束：继续观察链路
@@ -292,10 +314,15 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
     // 仍可能落地，而 ghost 期间任何重协商都投不进去
     const ghostGraceUntil = new Map();
 
-    function probePeerPresence(peerId) {
+    function probePeerPresence(peerId, { force = false, undelivered = false } = {}) {
         if (!s.socket?.connected || !s.joined) return;
         const last = presenceProbed.get(peerId) || 0;
-        if (Date.now() - last < PRESENCE_COOLDOWN_MS) return;
+        // 冷却只约束阶梯的常规轮询（探测是对 memoized 服务器的廉价
+        // ack，每个轮次可问一次）；force 留给 relayUndelivered 回执
+        // ——回执紧跟发出它的那个轮次的探测到达（RTT 级 < 2s），
+        // 不绕过冷却就会被整个吞掉，它携带的可是
+        // 「上一份 offer 已死」的新证据
+        if (!force && Date.now() - last < PRESENCE_COOLDOWN_MS) return;
         presenceProbed.set(peerId, Date.now());
         s.socket.timeout(5000).emit('peerPresence', { room_id: channelId, peer_id: peerId }, (err, res) => {
             if (err || !res || typeof res.present !== 'string') return;
@@ -315,21 +342,29 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
                 ghostGraceUntil.set(peerId, Date.now() + left);
             } else if (res.present === 'live') {
                 ghostGraceUntil.delete(peerId);
+                // 回执触发的探测返回 live：造成回执的那份 offer 从未
+                // 到达对端（服务器已判定不可投递，answer 不可能在途）
+                // ——卡在 have-local-offer 的它确定死了，立即解卡
+                // 重发（零年龄下限），免 OFFER_STUCK_MS 盲等。常规
+                // 探测的 live 不碰 offer：answer 可能真的在路上
+                if (undelivered) retryStuckOffer(peerId, 0);
             }
         });
     }
 
     /** relaySDP 不可投递的服务器回执（见 signaling.js）：目标此刻
-     *  吞不进信令——立刻 presence 分流，'gone' 提前落定（免等
-     *  阶梯的下一轮探测时机），'ghost' 记下宽限好让 escalate
-     *  让路（见 ghostGraceUntil）。刻意不在这里重发 offer：
-     *  ghost 期间重发只会再次被吞，恢复时机由 resume 的
+     *  吞不进信令——立刻 presence 分流（force 绕过轮询冷却：回执
+     *  是「上一份 offer 已死」的新证据，而非又一次例行提问），
+     *  'gone' 提前落定（免等阶梯的下一轮探测时机），'ghost' 记下
+     *  宽限好让 escalate 让路（见 ghostGraceUntil），'live' 说明
+     *  对端恰在服务器判定之后 resume——被吞的 offer 立即解卡重发
+     *  （见 probePeerPresence 的 live 分支）。刻意不在这里直接重发
+     *  offer：ghost 期间重发只会再次被吞，恢复时机由 resume 的
      *  addPeer(rejoin)（见 retryStuckOffer）或宽限后的下一轮
-     *  recoveryTick 决定。探测自带冷却，与阶梯的常规轮询
-     *  之间至多多问一次。 */
+     *  recoveryTick 决定。 */
     function onRelayUndelivered(peerId) {
         if (!peerId || !s.joined || !s.mesh?.entries.has(peerId)) return;
-        probePeerPresence(peerId);
+        probePeerPresence(peerId, { force: true, undelivered: true });
     }
 
     /** rejoin（resume）时机的解卡：addPeer(rejoin) 证明对端 socket
@@ -337,11 +372,13 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
      *  offer 不必再等 OFFER_STUCK_MS 判死，立即回滚重发。只碰
      *  卡在 have-local-offer 的链路，其余状态原样返回
      *  （'new' 的等待方由对端 resume 后的 offer 照常启动）。
-     *  最小年龄 2s 防极短闪断里在途 answer 与重发 offer 交错。 */
-    function retryStuckOffer(peerId) {
+     *  最小年龄 2s 防极短闪断里在途 answer 与重发 offer 交错；
+     *  调用方若已证明 answer 不可能在途（relayUndelivered 回执 +
+     *  presence 'live'），可传 0 豁免。 */
+    function retryStuckOffer(peerId, minAgeMs = REJOIN_RETRY_MIN_AGE_MS) {
         if (!s.mesh?.entries.has(peerId)) return;
         s.mesh
-            .unstickStaleOffer(peerId, REJOIN_RETRY_MIN_AGE_MS)
+            .unstickStaleOffer(peerId, minAgeMs)
             .then((rolled) => {
                 if (rolled) return s.mesh.restartIce(peerId).catch(() => {});
                 return null;

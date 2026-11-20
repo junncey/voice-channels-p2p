@@ -327,10 +327,13 @@ export function createSocketEvents({
                 if (name) s.chat.add({ text: t('chat.joined', { name }), system: true });
                 playSound('peerJoin');
             }
-            // 带既有（可能已损坏）链路的恢复会话：mesh 条目被复用，
-            // 没有 offer 发出 —— 现在就把恢复阶梯架上去，
-            // 而不是等下一轮 10s 扫描
-            if (known && cfg.should_create_offer === true) {
+            // 复用既有（可能已损坏）链路的 addPeer（resume 方的
+            // rejoin、老成员一侧的对端 rejoin、亦或对端 reap 后的
+            // 重新加入）：mesh 条目被复用，没有 offer 发出 ——
+            // 现在就把恢复阶梯架上去，而不是等下一轮 10s 扫描
+            // （webview 可能吞掉状态事件）。两侧对称：resume 方
+            // 与老成员都可能拿着一条断链路
+            if (known && (cfg.should_create_offer === true || cfg.rejoin === true)) {
                 const state = s.mesh.entries.get(cfg.peer_id)?.pc.connectionState;
                 if (state && state !== 'connected' && state !== 'closed') rec.notePeerState(cfg.peer_id, state);
             }
