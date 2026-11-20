@@ -18,22 +18,42 @@ const { createJoinFlow } = require('./joinFlow');
 // 客户端可以向房间内每个成员洪水转发并被原样放大。正常打洞
 // 每对端几十个候选、重连风暴也就几百条——窗口阈值放得足够
 // 宽，只拦脚本级洪泛；超限断开（仅该 socket，不碰房间其余
-// 成员，与踢人同一拆除路径）。
+// 成员，与踢人同一拆除路径）。预算随所在频道的容量缩放：
+// mesh 重连风暴的中转量随成员数线性放大，固定阈值对大频道
+// （maxParticipants 可到 16）一次全量重连 + 几轮恢复即触线，
+// flood 断开反而制造「ghost → 再恢复」的循环。
 const RELAY_WINDOW_MS = 10000;
-const RELAY_MAX_EVENTS = 2000;
+const RELAY_MAX_EVENTS = 2000; // 基本预算：默认 8 人频道校准的历史值
+// 每对端的系数：一次完整协商 ≈ 2 SDP + 10-15 ICE 候选，恢复
+// 梯子重跑 3 轮 + relay 升级重试 ≈ 85，翻倍留余量
+const RELAY_EVENTS_PER_PEER = 200;
+
+/** 该 socket 的中转预算：基本值与「所在最大频道的容量 × 每对端
+ *  事件量」取大（relay 只能发往共享房间的成员，成员上限就是
+ *  合法事件量的上限）。 */
+function relayBudget(socket, channelStore) {
+    let cap = 0;
+    for (const channel of Object.keys(socket.channels || {})) {
+        const def = channelStore.get(channel) || channelStore.getTemp(channel);
+        const n = def?.maxParticipants || 0;
+        if (n > cap) cap = n;
+    }
+    return Math.max(RELAY_MAX_EVENTS, cap * RELAY_EVENTS_PER_PEER);
+}
 
 /** 本条中转事件是否超出 socket 级预算；超限的那一条触发断开。 */
-function relayThrottled(socket, log) {
+function relayThrottled(socket, log, budget) {
     const now = Date.now();
     if (!socket.relayWindow || now - socket.relayWindow.start >= RELAY_WINDOW_MS) {
         socket.relayWindow = { start: now, count: 0 };
     }
     socket.relayWindow.count += 1;
-    if (socket.relayWindow.count <= RELAY_MAX_EVENTS) return false;
-    if (socket.relayWindow.count === RELAY_MAX_EVENTS + 1) {
+    if (socket.relayWindow.count <= budget) return false;
+    if (socket.relayWindow.count === budget + 1) {
         log.warn('[' + socket.id + '] signaling relay flood, disconnecting', {
             window_ms: RELAY_WINDOW_MS,
             events: socket.relayWindow.count,
+            budget,
         });
         socket.disconnect(true);
     }
@@ -130,7 +150,7 @@ function registerSignaling(
          * 向 peer 中转 ICE（peer_id = 目标会话 uuid）
          */
         socket.on('relayICE', async (config) => {
-            if (relayThrottled(socket, log)) return;
+            if (relayThrottled(socket, log, relayBudget(socket, channelStore))) return;
             if (!Validate.isValidData(config)) return;
             const { peer_id, ice_candidate } = config;
             const channel = sharedRoom(socket, peer_id);
@@ -146,7 +166,7 @@ function registerSignaling(
          * 向 peer 中转 SDP（peer_id = 目标会话 uuid）
          */
         socket.on('relaySDP', async (config) => {
-            if (relayThrottled(socket, log)) return;
+            if (relayThrottled(socket, log, relayBudget(socket, channelStore))) return;
             if (!Validate.isValidData(config)) return;
             const { peer_id, session_description } = config;
             const channel = sharedRoom(socket, peer_id);
