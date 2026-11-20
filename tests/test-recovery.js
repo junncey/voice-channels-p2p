@@ -100,6 +100,28 @@ describe('test-recovery (B1 budget refill must survive repeated connected report
         await sleep(400);
         recovery.debugState().b1Attempts.should.equal(0);
     });
+
+    it('must not refill the budget while any recovery record is pending (perpetual B1 loop guard)', async () => {
+        // 一条永久治不好的链路挂账期间，健康链路每 10s 扫描的
+        // 'connected' 重报不得重新武装预算回填——否则预算回零 +
+        // escalated 重试 = 每 ~80-90s 核爆整个房间的永动 B1 循环
+        recovery.markSessionRestored();
+        recovery.attemptSignalingReconnect({ manual: true });
+        recovery.debugState().b1Attempts.should.equal(1);
+        meshEntries.set(PEER, { pc: { connectionState: 'disconnected' } });
+        recovery.notePeerState(PEER, 'disconnected'); // 坏链路挂账
+        meshEntries.set('peer-healthy', { pc: { connectionState: 'connected' } });
+        for (let i = 0; i < 3; i += 1) {
+            await sleep(80);
+            recovery.notePeerState('peer-healthy', 'connected'); // 10s 扫描重报（压缩节拍）
+        }
+        await sleep(210); // 越过假设被武装的 300ms 回填终点
+        recovery.debugState().b1Attempts.should.equal(1); // 预算没有回零
+        // 挂账清空（坏链路治愈）后，下一次健康报告照常武装
+        recovery.notePeerState(PEER, 'connected');
+        await sleep(400);
+        recovery.debugState().b1Attempts.should.equal(0);
+    });
 });
 
 describe('test-recovery (escalated ladder must retry B1 once conditions allow)', () => {

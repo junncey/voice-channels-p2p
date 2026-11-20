@@ -94,7 +94,6 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
         if (state === 'connected' || state === 'closed') {
             if (state === 'connected') {
                 hideOutageBanner();
-                armB1Reset();
                 // 一次已自愈的断线（10s 扫描重报健康对端时没有恢复记录
                 // —— rec 还在即意味着真实的一次周期）
                 if (rec) countFlapHeal(peerId);
@@ -106,6 +105,13 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
             // 12s 宽限定时器有机会触发前杀掉它（1.1.5 正是带着这个
             // bug 发布的 —— 升级从未运行）。真正的断线改为经由
             // peerRecovery 清预算；见 noteRelayUpgrade。
+            // 预算回填的前提是「真正的稳定」：全部链路都不在恢复阶梯上
+            //（先取消本对端的记录，再看余账）。无条件武装时，健康链路
+            // 每 10s 扫描的重报会在坏链路挂账期间（rec 建立时解除武装
+            // 后 ≤10s 内）重新武装，60s 后预算回零——escalated 链路的
+            // 重试随即第三次核爆整个房间，永动 B1 循环每 ~80-90s
+            // 把全房间的媒体打断一次，还顺手藏掉「请重载」终态横幅
+            if (state === 'connected' && peerRecovery.size === 0) armB1Reset();
             return;
         }
         if (state !== 'disconnected' && state !== 'failed') return; // new/checking/connecting
