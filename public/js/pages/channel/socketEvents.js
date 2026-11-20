@@ -346,6 +346,13 @@ export function createSocketEvents({
         });
 
         socket.on('removePeer', ({ peer_id }) => {
+            // 服务器会把离开者本人的 uuid 也发给它自己的 socket（B1 的
+            // 主动断开、同 uuid 新连接抢占旧连接的 reap 路径都会走到
+            // broadcastRemovePeer 的这条专线）。自己的卡片归
+            // syncMembers/ensureSelfMember 管——在这里拆掉会让 B1 重连后
+            // 自己的卡片消失（serverInfo 的重连分支不重同步花名册），
+            // 还会对自己播「已离开」+ 音效
+            if (!peer_id || peer_id === s.selfUuid) return;
             const name = members.get(peer_id)?.peer_name || '';
             mem.dropPeer(peerIdSafe(peer_id));
             if (s.joined && name) {
