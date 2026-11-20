@@ -804,5 +804,32 @@ describe('test-server (signaling integration)', function () {
             const adminData = await (await adminApi('GET', '/api/admin/channels')).json();
             adminData.channels.find((ch) => ch.id === room).hosts.should.eql(['secret-host']);
         });
+
+        it('should disconnect a client flooding the signaling relay (and only that client)', async () => {
+            const room = freshRoom('flood');
+            const ua = crypto.randomUUID();
+            const ub = crypto.randomUUID();
+            const a = track(connect());
+            const b = track(connect());
+            a.emit('join', joinPayload(room, ua, 'alice'));
+            await once(a, 'serverInfo');
+            b.emit('join', joinPayload(room, ub, 'bob'));
+            await once(b, 'serverInfo');
+            await wait(100);
+
+            // 洪水方把 relayICE 打满 socket 级窗口预算（2000/10s）：
+            // 超限的那一条触发服务器断开，且只断它自己
+            const gone = once(a, 'disconnect');
+            const flood = { peer_id: ub, ice_candidate: { candidate: 'candidate:1' } };
+            for (let i = 0; i < 2100; i++) a.emit('relayICE', flood);
+            const reason = await gone;
+            reason.should.equal('io server disconnect');
+
+            // 无辜成员不受波及：ack 通道仍然工作
+            const ackOk = await new Promise((resolve) => {
+                b.timeout(3000).emit('refreshIceServers', null, (err) => resolve(!err));
+            });
+            ackOk.should.be.true();
+        });
     });
 });

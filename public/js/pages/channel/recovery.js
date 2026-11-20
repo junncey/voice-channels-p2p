@@ -148,10 +148,27 @@ export function createRecovery({ s, x, members, channelId, $, el, t }) {
             if (rec.attempts < roundLimit) {
                 rec.attempts += 1;
                 probePeerPresence(peerId); // 每轮都问：'gone' 能让死会话早一轮落定
-                // glare 仲裁：双方都断时，只有 session id 较低的
-                // 一方 re-offer；另一方只应答
+                // glare 仲裁：双方都断时，只有 session id 较低的一方
+                // re-offer；另一方只应答
                 if (s.selfUuid < peerId) {
-                    s.mesh.restartIce(peerId).catch(() => {});
+                    s.mesh.restartIce(peerId).then(
+                        async (sent) => {
+                            if (sent || peerRecovery.get(peerId) !== rec) return;
+                            // offer 卡死（对端 ghost 吞掉了我们上一份
+                            // offer 的 answer，PC 停在 have-local-offer）：
+                            // 回滚陈旧 offer 解卡并立刻重发——这一轮才算数
+                            if (await s.mesh.unstickStaleOffer(peerId)) {
+                                if (await s.mesh.restartIce(peerId)) return;
+                            }
+                            // 协商仍在收敛（反向 offer 在途等）：不烧这一轮，
+                            // 短延迟再试——与 relay/quality 引擎的 !sent
+                            // 语义对齐（此前这里白烧预算，链路被过早
+                            // 逼进重建/B1 阶）
+                            rec.attempts -= 1;
+                            scheduleRecoveryTick(peerId, 2000);
+                        },
+                        () => {}
+                    );
                 } else {
                     console.log('[mesh] recovery: waiting for peer re-offer', peerId);
                 }

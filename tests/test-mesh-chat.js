@@ -302,4 +302,89 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
             should(receiver.playoutDelayHint).be.null();
         });
     });
+
+    describe('stale offer unstick (ghost-swallowed answers)', () => {
+        /** 一条停在 have-local-offer 的链路（对端 ghost 窗口吞掉了
+         *  我们 offer 的 answer）——rollback 调用被记录。 */
+        function stuckMesh({ signalingState = 'have-local-offer', offerSentAt = Date.now() - 9000 } = {}) {
+            const mesh = bareMesh();
+            const calls = { rollback: 0 };
+            const pc = {
+                signalingState,
+                setLocalDescription: async (desc) => {
+                    if (desc.type === 'rollback') calls.rollback += 1;
+                },
+            };
+            mesh.entries.set('p1', {
+                pc,
+                pendingIce: [],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: true,
+                offering: false,
+                offerSentAt,
+            });
+            return { mesh, entry: mesh.entries.get('p1'), calls };
+        }
+
+        it('should roll back an unanswered offer once it is stale', async () => {
+            const { mesh, entry, calls } = stuckMesh();
+            (await mesh.unstickStaleOffer('p1')).should.be.true();
+            calls.rollback.should.equal(1);
+            should(entry.offerSentAt).be.null();
+        });
+
+        it('should leave a FRESH offer alone (the answer may still be in flight)', async () => {
+            const { mesh, calls } = stuckMesh({ offerSentAt: Date.now() - 1000 });
+            (await mesh.unstickStaleOffer('p1')).should.be.false();
+            calls.rollback.should.equal(0);
+        });
+
+        it('should do nothing on a stable link or without a recorded offer', async () => {
+            const stable = stuckMesh({ signalingState: 'stable' });
+            (await stable.mesh.unstickStaleOffer('p1')).should.be.false();
+            const unrecorded = stuckMesh({ offerSentAt: null });
+            (await unrecorded.mesh.unstickStaleOffer('p1')).should.be.false();
+            (stable.calls.rollback + unrecorded.calls.rollback).should.equal(0);
+        });
+    });
+
+    describe('pending ICE hardening', () => {
+        it('should cap the pre-remote-description candidate buffer', async () => {
+            const mesh = bareMesh();
+            const entry = {
+                pc: { remoteDescription: null },
+                pendingIce: [],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: false,
+                offering: false,
+            };
+            mesh.entries.set('p1', entry);
+            const cand = { candidate: 'candidate:1' };
+            for (let i = 0; i < 300; i++) await mesh.handleIceCandidate({ peer_id: 'p1', ice_candidate: cand });
+            entry.pendingIce.should.have.length(256); // 异常洪泛封顶，不再增长
+        });
+
+        it('should flush buffered candidates once the remote description lands', async () => {
+            const mesh = bareMesh();
+            const added = [];
+            const entry = {
+                pc: {
+                    remoteDescription: null,
+                    setRemoteDescription: async () => {},
+                    addIceCandidate: async (c) => added.push(c),
+                },
+                pendingIce: [{ candidate: 'a' }, { candidate: 'b' }, { candidate: 'c' }],
+                queue: [],
+                queueBytes: 0,
+                tracksAdded: true,
+                offering: false,
+            };
+            mesh.entries.set('p1', entry);
+            await mesh._applySessionDescription('p1', entry, { type: 'answer', sdp: 'v=0' });
+            added.should.have.length(3);
+            entry.pendingIce.should.be.empty();
+        });
+    });
 });

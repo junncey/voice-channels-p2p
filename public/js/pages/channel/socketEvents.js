@@ -140,15 +140,22 @@ export function createSocketEvents({
                 iceRefreshTimer = setTimeout(refreshIceServers, ICE_REFRESH_RETRY_MS);
                 return;
             }
-            const refused = s.mesh?.updateIceServers(iceServers) || 0;
-            if (refused > 0) {
-                // 部分活动 PC 拒绝了 setConfiguration（协商中的边缘情况）：
-                // 稍后重应用同一份新列表 —— 无需再拉取
-                clearTimeout(iceApplyRetryTimer);
-                iceApplyRetryTimer = setTimeout(() => s.mesh?.updateIceServers(iceServers), ICE_APPLY_RETRY_MS);
-            }
+            applyIceServers(iceServers);
             scheduleIceRefresh(iceServers);
         });
+    }
+
+    /**
+     * 把新列表推进每条存活连接；仍有 PC 拒绝（协商中的边缘情况）
+     * 时每 30s 链式重试，直到清零或下一份列表到来——一次性重试
+     * 在短 TTL 凭据部署里余量太薄。
+     */
+    function applyIceServers(iceServers) {
+        const refused = s.mesh?.updateIceServers(iceServers) || 0;
+        if (refused > 0) {
+            clearTimeout(iceApplyRetryTimer);
+            iceApplyRetryTimer = setTimeout(() => applyIceServers(iceServers), ICE_APPLY_RETRY_MS);
+        }
     }
 
     /** 服务器历史行 -> 可渲染行（join 与分页共用）。 */

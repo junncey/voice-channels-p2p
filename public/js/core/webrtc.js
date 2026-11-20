@@ -43,6 +43,13 @@ const DC_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
 const DC_BUFFER_LOW = 128 * 1024;
 const DRAIN_WAIT_MS = 60; // 泵轮询节奏
 const DRAIN_MAX_MS = 5000; // 单次等待绝不让传输停滞太久
+// 陈旧无应答 offer 的判定：发出这么久仍未收到 answer，视为已被
+// 服务器静默丢弃（对端 ghost 窗口内 relaySDP 没有落脚处）——
+// 覆盖正常信令 RTT，避免回滚掉仍在路上的 answer
+const OFFER_STUCK_MS = 8000;
+// remoteDescription 落座前缓存的 ICE 候选上限：异常/失控对端不得
+// 无限占用内存（正常 trickle 每对端几十个候选）
+const PENDING_ICE_MAX = 256;
 
 /**
  * 把 Opus fmtp 参数合并进 SDP 中每一条 opus/48000/2 fmtp 行。
@@ -327,11 +334,12 @@ export class Mesh {
         if (iceServers?.length && iceServersStamp(iceServers) !== this.iceStamp) this.updateIceServers(iceServers);
         if (this.entries.has(peerId)) return;
 
-        // iceCandidatePoolSize 预分配 host 候选：首次加入和每次重启
-        // 收集都快一拍（纯音频——这点开销可忽略）
+        // iceCandidatePoolSize 预分配 host 候选并预拨 STUN：首次加入
+        // 和每次重建的收集都快一拍（重连风暴频繁建 PC 时受益；
+        // 纯音频——这点开销可忽略）
         const pc = new RTCPeerConnection({
             iceServers: iceServers.length ? iceServers : this.iceServers,
-            iceCandidatePoolSize: 2,
+            iceCandidatePoolSize: 4,
         });
         const entry = { pc, dc: null, pendingIce: [], queue: [], queueBytes: 0, tracksAdded: false, offering: false };
         this.entries.set(peerId, entry);
@@ -368,6 +376,7 @@ export class Mesh {
                 const offer = await pc.createOffer();
                 this._mungeLocalSdp(offer);
                 await pc.setLocalDescription(offer);
+                entry.offerSentAt = Date.now(); // unstickStaleOffer 的陈旧判定基准
                 this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
             } catch (err) {
                 console.error('[mesh] offer failed', peerId, err);
@@ -432,14 +441,11 @@ export class Mesh {
     async _applySessionDescription(peer_id, entry, session_description) {
         const pc = entry.pc;
         await pc.setRemoteDescription(session_description);
-        // 冲刷在远端描述之前到达的 ICE 候选
-        for (const candidate of entry.pendingIce.splice(0)) {
-            try {
-                await pc.addIceCandidate(candidate);
-            } catch {
-                /* 过期候选，忽略 */
-            }
-        }
+        // 冲刷在远端描述之前到达的 ICE 候选——并行喂入：trickle
+        // 候选本就允许乱序落地（end-of-candidates 除外），串行
+        // 等待只会推迟弱网乱序场景下的打洞启动
+        const pending = entry.pendingIce.splice(0);
+        if (pending.length) await Promise.allSettled(pending.map((candidate) => pc.addIceCandidate(candidate)));
         if (session_description.type === 'offer') {
             // 应答之前先挂载我们的麦克风：带音频 m-line 的 offer
             // 立即以 sendrecv 应答，ICE 一连通媒体即流动——
@@ -470,6 +476,33 @@ export class Mesh {
      */
     async restartIce(peerId) {
         return this._sendOffer(peerId, { iceRestart: true });
+    }
+
+    /**
+     * 回滚一条陈旧的无应答 offer（恢复阶梯的解卡通道）：
+     * 对端 ghost 窗口内，服务器会静默丢弃发往它的 relaySDP，
+     * answer 永不到来，PC 永久卡在 have-local-offer——之后所有
+     * restartIce/renegotiate 都被 stable 检查拒绝，恢复轮次
+     * 全部空转。只在 offer 发出已超过 OFFER_STUCK_MS 时回滚
+     * （见常量注释）。
+     * @param {string} peerId
+     * @returns {Promise<boolean>} 已回滚时为 true
+     */
+    async unstickStaleOffer(peerId) {
+        const entry = this.entries.get(peerId);
+        if (!entry) return false;
+        const pc = entry.pc;
+        if (pc.signalingState !== 'have-local-offer') return false;
+        if (!entry.offerSentAt || Date.now() - entry.offerSentAt < OFFER_STUCK_MS) return false;
+        try {
+            await pc.setLocalDescription({ type: 'rollback' });
+            entry.offerSentAt = null;
+            console.warn('[mesh] rolled back a stale unanswered offer', peerId);
+            return true;
+        } catch (err) {
+            console.error('[mesh] stale offer rollback failed', peerId, err);
+            return false;
+        }
     }
 
     /**
@@ -558,6 +591,7 @@ export class Mesh {
             const offer = await pc.createOffer(offerOptions);
             this._mungeLocalSdp(offer);
             await pc.setLocalDescription(offer);
+            entry.offerSentAt = Date.now(); // unstickStaleOffer 的陈旧判定基准
             this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
             if (offerOptions.iceRestart) console.log('[mesh] ice restart offer sent', peerId);
             this._restampAdaptiveState(entry);
@@ -599,6 +633,9 @@ export class Mesh {
         const entry = this.entries.get(peer_id);
         if (!entry || !ice_candidate) return;
         if (!entry.pc.remoteDescription) {
+            // 异常/失控对端的洪泛不得无限占用内存（正常 trickle
+            // 每对端几十个候选）——超限静默丢弃
+            if (entry.pendingIce.length >= PENDING_ICE_MAX) return;
             entry.pendingIce.push(ice_candidate);
             return;
         }

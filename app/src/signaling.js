@@ -14,6 +14,32 @@ const limits = require('./limits');
 const { sanitizeExceptSecrets, isImageDataUrl, toJson } = require('./payload');
 const { createJoinFlow } = require('./joinFlow');
 
+// 信令中转节流：relaySDP/relayICE 只做成员资格校验，恶意/失控
+// 客户端可以向房间内每个成员洪水转发并被原样放大。正常打洞
+// 每对端几十个候选、重连风暴也就几百条——窗口阈值放得足够
+// 宽，只拦脚本级洪泛；超限断开（仅该 socket，不碰房间其余
+// 成员，与踢人同一拆除路径）。
+const RELAY_WINDOW_MS = 10000;
+const RELAY_MAX_EVENTS = 2000;
+
+/** 本条中转事件是否超出 socket 级预算；超限的那一条触发断开。 */
+function relayThrottled(socket, log) {
+    const now = Date.now();
+    if (!socket.relayWindow || now - socket.relayWindow.start >= RELAY_WINDOW_MS) {
+        socket.relayWindow = { start: now, count: 0 };
+    }
+    socket.relayWindow.count += 1;
+    if (socket.relayWindow.count <= RELAY_MAX_EVENTS) return false;
+    if (socket.relayWindow.count === RELAY_MAX_EVENTS + 1) {
+        log.warn('[' + socket.id + '] signaling relay flood, disconnecting', {
+            window_ms: RELAY_WINDOW_MS,
+            events: socket.relayWindow.count,
+        });
+        socket.disconnect(true);
+    }
+    return true;
+}
+
 /**
  * 把信令协议接到 socket.io 服务器上。依赖来自 server.js（装配点）：
  * 房间状态（`rooms`）、聊天 socket 域（`chatGateway`）、
@@ -104,6 +130,7 @@ function registerSignaling(
          * 向 peer 中转 ICE（peer_id = 目标会话 uuid）
          */
         socket.on('relayICE', async (config) => {
+            if (relayThrottled(socket, log)) return;
             if (!Validate.isValidData(config)) return;
             const { peer_id, ice_candidate } = config;
             const channel = sharedRoom(socket, peer_id);
@@ -119,6 +146,7 @@ function registerSignaling(
          * 向 peer 中转 SDP（peer_id = 目标会话 uuid）
          */
         socket.on('relaySDP', async (config) => {
+            if (relayThrottled(socket, log)) return;
             if (!Validate.isValidData(config)) return;
             const { peer_id, session_description } = config;
             const channel = sharedRoom(socket, peer_id);
