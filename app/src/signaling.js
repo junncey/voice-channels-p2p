@@ -60,6 +60,24 @@ function relayThrottled(socket, log, budget) {
     return true;
 }
 
+const SDP_TYPES = new Set(['offer', 'answer']);
+
+/** relaySDP 载荷形状/大小：正常 offer/answer 连同全部候选也就几 KB，
+ *  超限只能是恶意构造——中转按「条」计费、不按字节计，socket.io
+ *  2MB 包上限内的一个巨型载荷会被原样放大到目标成员。 */
+function validSdpPayload(desc) {
+    if (!desc || typeof desc !== 'object') return false;
+    if (!SDP_TYPES.has(desc.type)) return false;
+    return typeof desc.sdp === 'string' && desc.sdp.length > 0 && desc.sdp.length <= limits.SDP_MAX_CHARS;
+}
+
+/** relayICE 载荷形状/大小：candidate 行（含扩展属性）远小于此限。 */
+function validIcePayload(cand) {
+    if (!cand || typeof cand !== 'object') return false;
+    if (typeof cand.candidate !== 'string') return false;
+    return cand.candidate.length <= limits.ICE_CAND_MAX_CHARS;
+}
+
 /**
  * 把信令协议接到 socket.io 服务器上。依赖来自 server.js（装配点）：
  * 房间状态（`rooms`）、聊天 socket 域（`chatGateway`）、
@@ -153,6 +171,7 @@ function registerSignaling(
             if (relayThrottled(socket, log, relayBudget(socket, channelStore))) return;
             if (!Validate.isValidData(config)) return;
             const { peer_id, ice_candidate } = config;
+            if (!validIcePayload(ice_candidate)) return;
             const channel = sharedRoom(socket, peer_id);
             const target = channel && liveSessionSocket(channel, peer_id);
             if (!target) return;
@@ -169,6 +188,9 @@ function registerSignaling(
             if (relayThrottled(socket, log, relayBudget(socket, channelStore))) return;
             if (!Validate.isValidData(config)) return;
             const { peer_id, session_description } = config;
+            // 畸形/超大载荷静默丢弃（不回 relayUndelivered 回执——
+            // 回执语义是「合法载荷此刻投不出去」）
+            if (!validSdpPayload(session_description)) return;
             const channel = sharedRoom(socket, peer_id);
             const target = channel && liveSessionSocket(channel, peer_id);
             if (!target) {

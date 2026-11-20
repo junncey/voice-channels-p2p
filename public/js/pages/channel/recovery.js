@@ -586,8 +586,9 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
     const pathEarlyTimers = new Map(); // peerId -> 连接后的一次性检查
     let pathPollTimer = null;
     // relay 重打洞引擎（见 channel/relay.js）—— 读取恢复状态
-    // （peerRecovery）与本监视器的 connPaths 快照，均为注入
-    const relayUpgrade = createRelayUpgrade({ s, peerRecovery, connPaths });
+    // （peerRecovery）、ghost 宽限快照（ghostGraceUntil）与
+    // 本监视器的 connPaths 快照，均为注入
+    const relayUpgrade = createRelayUpgrade({ s, peerRecovery, connPaths, ghostGraceUntil });
     // 链路质量引擎（见 channel/quality.js）—— 同样的注入，
     // 由下方 checkPeerPath 喂养；其 lossStreaks 支撑不稳定徽章与 #debug
     const quality = createLinkQuality({ s, members, peerRecovery, connPaths, $, el, t });

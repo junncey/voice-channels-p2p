@@ -23,9 +23,9 @@ relay」的路径会永远停在 relay。引擎由恢复路径轮询喂养：
 cancel()。
 */
 
-export function createRelayUpgrade({ s, peerRecovery, connPaths }) {
-    const RELAY_UPGRADE_GRACE_MS = 12000; // 连接后 relay 持续这么久 → 尝试重新打洞
-    const RELAY_UPGRADE_RETRY_MS = 10000; // restart 之后先让新检查沉淀再下判断
+export function createRelayUpgrade({ s, peerRecovery, connPaths, ghostGraceUntil, timings = {} }) {
+    const RELAY_UPGRADE_GRACE_MS = timings.graceMs ?? 12000; // 连接后 relay 持续这么久 → 尝试重新打洞
+    const RELAY_UPGRADE_RETRY_MS = timings.retryMs ?? 10000; // restart 之后先让新检查沉淀再下判断
     const RELAY_UPGRADE_MAX_ATTEMPTS = 2;
     const RELAY_UPGRADE_TOTAL_MS = 45000; // 硬窗口，同时约束 restartIce 的推迟
     // peerId -> { timer, attempts, since, done, busy }
@@ -71,6 +71,16 @@ export function createRelayUpgrade({ s, peerRecovery, connPaths }) {
         // 对端已走、链路损坏、或轮不到我方发起：没什么可判的了。
         if (!s.mesh?.entries.has(peerId) || peerRecovery.has(peerId) || !s.selfUuid || s.selfUuid >= peerId) {
             cancel(peerId);
+            return;
+        }
+        // 对端 ghost 宽限内（恢复引擎 presence 探测的快照）：服务器会
+        // 丢弃发往它的一切 SDP——此刻 restart 的 offer 只会被吞，
+        // 而「已发出」照样烧掉一次尝试额度，两次烧完的 done 墓碑
+        // 会挡死这条链路之后的 relay 升级（直到下一次链路事件）。
+        // 顺延到宽限之后；期间恢复梯子的探测继续刷新快照
+        const graceLeft = (ghostGraceUntil?.get(peerId) || 0) - Date.now();
+        if (graceLeft > 0) {
+            scheduleRelayUpgradeRetry(peerId, Math.min(graceLeft + 500, RELAY_UPGRADE_RETRY_MS));
             return;
         }
         // connPaths 只由 5s 路径轮询写入，所以这份快照描述的可能

@@ -36,6 +36,12 @@ const REACTIONS_MAX_NAMES = 50;
 const MAX_IMAGES_PER_MESSAGE = 9;
 // 图片批次 id（客户端生成的字符串）的长度上限
 const IMG_BATCH_ID_MAX = 64;
+// 信令中转的 SDP 上限：纯音频 mesh 的 offer/answer 连同全部候选
+// 也就几 KB——超限只能是恶意构造（socket.io 的 2MB 包上限内
+// 一个载荷可被原样中转，预算按「条」计、不按字节计）
+const SDP_MAX_CHARS = 256 * 1024;
+// 信令中转的 ICE 候选字符串上限（candidate 行，含扩展属性）
+const ICE_CAND_MAX_CHARS = 2048;
 // 单图传输上限——镜像客户端上限（images.js 的 MAX_TRANSFER_CHARS）
 const IMAGE_MAX_CHARS = 1600 * 1024;
 // 自定义头像：同一 data-URL 白名单、更小的上限（客户端对应在 channel.js）
@@ -55,6 +61,8 @@ module.exports = {
     REACTIONS_MAX_NAMES,
     MAX_IMAGES_PER_MESSAGE,
     IMG_BATCH_ID_MAX,
+    SDP_MAX_CHARS,
+    ICE_CAND_MAX_CHARS,
     IMAGE_MAX_CHARS,
     AVATAR_MAX_CHARS,
     DEFAULT_MAX_PARTICIPANTS,

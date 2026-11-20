@@ -840,5 +840,55 @@ describe('test-server (signaling integration)', function () {
             });
             ackOk.should.be.true();
         });
+
+        it('should drop malformed or oversized relay payloads without relaying or receipt', async () => {
+            const room = freshRoom('shape');
+            const ua = crypto.randomUUID();
+            const ub = crypto.randomUUID();
+            const a = track(connect());
+            const b = track(connect());
+            a.emit('join', joinPayload(room, ua, 'alice'));
+            await once(a, 'serverInfo');
+            b.emit('join', joinPayload(room, ub, 'bob'));
+            await once(b, 'serverInfo');
+            await wait(100);
+
+            // 中转按「条」计费、不按字节计——socket.io 2MB 包上限内的
+            // 巨型载荷会被原样放大到目标成员，必须在入口按形状/大小拦下
+            const seenSdp = [];
+            const seenIce = [];
+            b.on('sessionDescription', (cfg) => seenSdp.push(cfg));
+            b.on('iceCandidate', (cfg) => seenIce.push(cfg));
+            const receipts = [];
+            a.on('relayUndelivered', (cfg) => receipts.push(cfg));
+
+            // 畸形 SDP：错 type / 缺 sdp / 非对象 / 超大 sdp（>256KB）
+            a.emit('relaySDP', { peer_id: ub, session_description: { type: 'pranswer', sdp: 'x' } });
+            a.emit('relaySDP', { peer_id: ub, session_description: { type: 'offer' } });
+            a.emit('relaySDP', { peer_id: ub, session_description: 'not-an-object' });
+            a.emit('relaySDP', { peer_id: ub, session_description: { type: 'offer', sdp: 'x'.repeat(300 * 1024) } });
+            // 畸形 ICE：缺 candidate / 非字符串 / 超长（>2048）
+            a.emit('relayICE', { peer_id: ub, ice_candidate: { sdpMid: '0' } });
+            a.emit('relayICE', { peer_id: ub, ice_candidate: { candidate: 42 } });
+            a.emit('relayICE', { peer_id: ub, ice_candidate: { candidate: 'x'.repeat(4096) } });
+            await wait(300);
+            seenSdp.length.should.equal(0);
+            seenIce.length.should.equal(0);
+            // 回执语义是「合法载荷此刻投不出去」——畸形载荷不该产生回执
+            receipts.length.should.equal(0);
+
+            // 合法载荷在同一对端上照常中转（校验没有误伤主路径）
+            a.emit('relaySDP', {
+                peer_id: ub,
+                session_description: { type: 'offer', sdp: 'v=0 ok' },
+            });
+            (await once(b, 'sessionDescription')).session_description.sdp.should.equal('v=0 ok');
+            a.emit('relayICE', {
+                peer_id: ub,
+                ice_candidate: { candidate: 'candidate:1 1 udp 1 127.0.0.1 1 typ host', sdpMid: '0' },
+            });
+            await once(b, 'iceCandidate');
+            seenIce.length.should.equal(1);
+        });
     });
 });
