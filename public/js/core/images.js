@@ -21,6 +21,13 @@ const SAFE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 /** 共享 data URL 白名单（服务端 limits.IMAGE_DATA_URL_RE 的镜像）。 */
 export const DATA_URL_RE = /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
+/** 传输重组 id —— crypto.randomUUID 仅安全上下文存在，非安全上下文
+ *  （局域网 http://IP）退回手拼；只需唯一，无需 uuid 形状。 */
+function newTransferId() {
+    if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+    return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /**
  * 把用户选择的文件读入 data URL——三处 FileReader promise
  * 封装（图片消息/头像裁剪/自定义音效）的共享实现。
@@ -96,7 +103,7 @@ async function compressToJpeg(dataUrl) {
  * 不节流地倾倒会在弱链路上造成可闻的通话卡顿。
  */
 export async function sendImageData({ send, from, mime, dataUrl, batch = '', ready }) {
-    const id = crypto.randomUUID();
+    const id = newTransferId();
     const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
     const total = Math.ceil(base64.length / CHUNK_CHARS);
     const tag = typeof batch === 'string' && batch.length <= 64 ? batch : '';

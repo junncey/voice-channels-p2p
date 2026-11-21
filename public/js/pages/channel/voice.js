@@ -11,6 +11,7 @@ core/audio.js）。共享页面状态经 `s` 存取器对象到达，
 channel.js 所有）；成员卡片助手经 `mem`（members.js）。
 */
 
+import { micApiAvailable } from '/js/pages/channel/micGrant.js';
 import { keyLabel, normalizePttKey } from '/js/core/utils.js';
 
 export function createVoice({ s, x, mem, members, audioEls, settings, channelId, screenLock, playSound, t, $, el }) {
@@ -473,7 +474,10 @@ export function createVoice({ s, x, mem, members, audioEls, settings, channelId,
         try {
             await reacquireMic();
         } catch {
-            x.toast(t('channel.errors.micDenied'), 'warn');
+            // 非安全上下文（局域网 http://IP）里 API 不存在 ≠ 权限被拒——
+            // 提示要能指路，而不是让用户反复重试一个不可能的授权
+            const key = micApiAvailable() ? 'channel.errors.micDenied' : 'channel.errors.micUnavailable';
+            x.toast(t(key), 'warn');
         }
     }
 

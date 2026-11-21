@@ -69,6 +69,7 @@
     "channel.errors.joinThrottled": "Too many attempts — retrying automatically in {n}s",
     "channel.errors.micDenied": "Microphone unavailable, joining as text only",
     "channel.errors.micPending": "Microphone permission not answered — joined as text only, click the mic button to grant it",
+    "channel.errors.micUnavailable": "This address is not a secure context (access via HTTPS or localhost required) — the browser blocks the microphone; joined as text only",
     "channel.errors.micLost": "Microphone disconnected — click the mic button to retry",
     "channel.micFallback": "Selected microphone unavailable, switched back to the default device",
     "channel.micRecovered": "Microphone reconnected",

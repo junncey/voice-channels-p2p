@@ -22,6 +22,7 @@ export function createComposer({
     t,
     $,
     el,
+    randomUuid,
 }) {
     const SEND_KEY_STORE = 'vc_send_key'; // 'enter' (default) | 'ctrlEnter'
     // 输入区发送键偏好（QQ 式）：Enter 或 Ctrl+Enter 发送，
@@ -339,7 +340,7 @@ export function createComposer({
             s.socket.emit('chat', { room_id: channelId, msg: text, ...replyField });
             return;
         }
-        const batch = crypto.randomUUID();
+        const batch = randomUuid();
         s.socket.emit('chat', { room_id: channelId, msg: text, batch, imgs: images.length, ...replyField });
         for (const img of images) s.socket.emit('chat', { room_id: channelId, batch, img });
     }
@@ -396,7 +397,7 @@ export function createComposer({
             return;
         }
 
-        const batch = crypto.randomUUID();
+        const batch = randomUuid();
         if (!trySendChat({ type: 'chat', from: s.selfName, msg: text, batch, imgs: payloads.length, reply })) return;
         s.chat.openBatch({ batch, name: s.selfName, text, count: payloads.length, self: true, reply });
         emitChatForHistory(

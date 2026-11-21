@@ -91,6 +91,39 @@ describe('test-frontend-utils (core/utils.js)', () => {
     });
 });
 
+describe('test-frontend-utils (randomUuid)', () => {
+    // Node 把 crypto 暴露为只读 getter：临时重定义要在 afterEach 还原，
+    // 否则后续套件（图片/聊天）拿不到 WebCrypto
+    const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+
+    function stubCrypto(value) {
+        Object.defineProperty(globalThis, 'crypto', { value, configurable: true, writable: true });
+    }
+
+    afterEach(() => {
+        if (originalCrypto) Object.defineProperty(globalThis, 'crypto', originalCrypto);
+    });
+
+    it('prefers crypto.randomUUID when the page is a secure context', () => {
+        const fixed = '11111111-2222-4333-8444-555555555555';
+        stubCrypto({ randomUUID: () => fixed });
+        utils.randomUuid().should.equal(fixed);
+    });
+
+    it('falls back to a v4-shaped uuid when randomUUID is absent', () => {
+        // 局域网 http://<IP> 是非安全上下文：randomUUID 不存在，
+        // 但 getRandomValues 仍可用。join 会校验 peer_uuid 形状，退回版必须同形
+        const webcrypto = require('crypto').webcrypto;
+        stubCrypto({ getRandomValues: (b) => webcrypto.getRandomValues(b) });
+        const v4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        const a = utils.randomUuid();
+        const b = utils.randomUuid();
+        a.should.match(v4);
+        b.should.match(v4);
+        a.should.not.equal(b);
+    });
+});
+
 describe('test-frontend-utils (hostAuth storage reads)', () => {
     // 迷你 JWT：payload 用 base64url 编码 {exp}
     const fakeJwt = (expMs) => {

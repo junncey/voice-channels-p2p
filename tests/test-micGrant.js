@@ -9,11 +9,11 @@ const { pathToFileURL } = require('url');
 const path = require('path');
 
 describe('test-micGrant', () => {
-    let acquireMic;
+    let acquireMic, micApiAvailable;
     let originalNavigator;
 
     before(async () => {
-        ({ acquireMic } = await import(
+        ({ acquireMic, micApiAvailable } = await import(
             pathToFileURL(path.join(__dirname, '..', 'public', 'js', 'pages', 'channel', 'micGrant.js'))
         ));
         originalNavigator = globalThis.navigator;
@@ -70,5 +70,26 @@ describe('test-micGrant', () => {
         release(lateStream);
         await new Promise((resolve) => setTimeout(resolve, 10));
         stopped.should.eql(['late']);
+    });
+
+    it('should report unavailable (not a denial) when the API is missing', async () => {
+        // 非安全上下文（局域网 http://IP）：navigator.mediaDevices 整个
+        // 是 undefined，getUserMedia 调用会同步抛 TypeError 逃出 try——
+        // 必须提前判定，否则 join 死在开 socket 之前
+        Object.defineProperty(globalThis, 'navigator', {
+            value: {},
+            configurable: true,
+            writable: true,
+        });
+        micApiAvailable().should.be.false();
+        const res = await acquireMic({ audio: true }, { timeoutMs: 50 });
+        (res.stream === null).should.be.true();
+        res.timedOut.should.be.false();
+        res.unavailable.should.be.true();
+    });
+
+    it('micApiAvailable is true when getUserMedia exists', () => {
+        stubGetUserMedia(() => Promise.resolve({ getTracks: () => [] }));
+        micApiAvailable().should.be.true();
     });
 });

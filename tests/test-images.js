@@ -108,4 +108,27 @@ describe('test-images (DC image protocol)', () => {
         done.should.be.ok();
         done.dataUrl.should.equal(`data:image/png;base64,${base64}`);
     });
+
+    it('should still send when crypto.randomUUID is absent (non-secure context)', async () => {
+        // 局域网 http://<IP> 访问时 randomUUID 不存在；传输 id 只需唯一，
+        // 退回手拼——不能因此抛错让整条发送链路断掉
+        const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+        Object.defineProperty(globalThis, 'crypto', {
+            value: { getRandomValues: (b) => require('crypto').webcrypto.getRandomValues(b) },
+            configurable: true,
+            writable: true,
+        });
+        try {
+            const dataUrl = `data:image/png;base64,${'Q'.repeat(20 * 1024)}`;
+            const frames = [];
+            await sendImageData({ send: (f) => frames.push(f), from: 'a', mime: 'image/png', dataUrl });
+            frames[0].type.should.equal('img-start');
+            frames[0].id.should.be.a.String().and.not.be.empty();
+            const ids = new Set(frames.filter((f) => f.type === 'img-chunk').map((f) => f.id));
+            ids.size.should.equal(1);
+            frames.at(-1).type.should.equal('img-end');
+        } finally {
+            if (originalCrypto) Object.defineProperty(globalThis, 'crypto', originalCrypto);
+        }
+    });
 });

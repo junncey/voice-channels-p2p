@@ -52,7 +52,7 @@ import { createOfflineBanner } from '/js/pages/channel/offline.js';
 import { createHostAuth, loadHostToken, loadChannelPw } from '/js/pages/channel/hostAuth.js';
 import { createSocketEvents } from '/js/pages/channel/socketEvents.js';
 import { createUi } from '/js/pages/channel/ui.js';
-import { $, el, randomNick, sanitizePeerVolumes, toast } from '/js/core/utils.js';
+import { $, el, randomNick, randomUuid, sanitizePeerVolumes, toast } from '/js/core/utils.js';
 
 const NICK_KEY = 'vc_nick';
 const AUDIO_SETTINGS_KEY = 'vc_audio_settings';
@@ -411,6 +411,7 @@ const composer = createComposer({
     t,
     $,
     el,
+    randomUuid,
 });
 const hostAuth = createHostAuth({ s, x, channelId, api, t, $ });
 const se = createSocketEvents({
@@ -646,7 +647,7 @@ async function joinInner({ textOnly: asTextOnly }) {
     for (const peerId of [...members.keys()]) mem.dropPeer(peerId, { silent: true });
 
     selfName = nick;
-    selfUuid = crypto.randomUUID();
+    selfUuid = randomUuid(); // 非安全上下文（局域网 http://IP）里 randomUUID 不存在
     localStorage.setItem(NICK_KEY, nick);
     textOnly = asTextOnly;
 
@@ -654,7 +655,7 @@ async function joinInner({ textOnly: asTextOnly }) {
         // 未应答的权限弹窗绝不能劫持整个 join：
         // 否则下方的 socket 代码永远不会执行（见 ./channel/micGrant.js）
         let grant = await acquireMic(voice.buildAudioConstraints());
-        if (!grant.stream && !grant.timedOut && settings.micDeviceId) {
+        if (!grant.stream && !grant.timedOut && !grant.unavailable && settings.micDeviceId) {
             // 记住的麦克风在两次会话之间消失了：过期的精确
             // deviceId 会永远失败 —— 清一次，改用默认设备重试
             // （仅本次会话，与 voice.js 通话中的回退一致）
@@ -665,7 +666,12 @@ async function joinInner({ textOnly: asTextOnly }) {
         rawMicStream = grant.stream;
         if (!grant.stream) {
             textOnly = true;
-            toast(t(grant.timedOut ? 'channel.errors.micPending' : 'channel.errors.micDenied'), 'warn');
+            const key = grant.timedOut
+                ? 'channel.errors.micPending'
+                : grant.unavailable
+                  ? 'channel.errors.micUnavailable'
+                  : 'channel.errors.micDenied';
+            toast(t(key), 'warn');
         }
     }
     if (rawMicStream) {

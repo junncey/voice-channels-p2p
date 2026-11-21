@@ -69,6 +69,7 @@
     "channel.errors.joinThrottled": "尝试过于频繁，{n} 秒后自动重试",
     "channel.errors.micDenied": "无法访问麦克风，将以仅文字模式加入",
     "channel.errors.micPending": "麦克风授权未响应，已以仅文字模式加入；点击麦克风按钮可授权",
+    "channel.errors.micUnavailable": "此地址非安全上下文（需 https 或 localhost 访问），浏览器已禁用麦克风；已以仅文字模式加入",
     "channel.errors.micLost": "麦克风已断开，点击麦克风按钮可重试",
     "channel.micFallback": "所选麦克风不可用，已切换回默认设备",
     "channel.micRecovered": "麦克风已重新连接",
