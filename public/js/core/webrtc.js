@@ -20,6 +20,10 @@
  *  - offer 相撞（双方同时恢复）用 perfect-negotiation 角色裁决：
  *    较小的 session uuid 是 impolite（保留自己的 offer），
  *    较大的回滚并应答（见 handleSessionDescription）。
+ *  - offer/answer 携带按 peer 单调递增的 sdp_seq（answer 原样回带
+ *    所应答 offer 的序号）：恢复引擎回滚重发 offer 或重建链路后，
+ *    旧 offer 的迟到 answer 会被序号校验拒之门外，而不是错配到
+ *    新 offer 上（见 handleSessionDescription 的守卫）。
  */
 
 const CHAT_DC_LABEL = 'mirotalk_chat_channel';
@@ -278,6 +282,13 @@ export class Mesh {
         this.iceStamp = '';
         /** peerId -> { pc, dc, dcTimer, pendingIce, queue, queueBytes, tracksAdded, offering, bitrateFloor, jitterTarget, renegotiateTimer } */
         this.entries = new Map();
+        /** peerId -> { sent, remote } —— SDP 代次账本：发往该 peer 的
+         *  offer 序号（answer 回带、迟到应答甄别）与已接受的最大远端
+         *  offer 序号（退化 offer 甄别）。按 peerId 而非 entry 存放：
+         *  rebuildPeer 换 PC、removePeer 乃至 B1 的 clear() 之后同
+         *  uuid 回归，序号都继续递增——旧轮次的迟到 SDP 永远对不上
+         *  新序号。仅 close()（页面拆除）清空。 */
+        this.sdpSeqs = new Map();
     }
 
     /** 设置/替换本地麦克风流（在 peer 连接前调用，或之后启用语音）。 */
@@ -377,7 +388,12 @@ export class Mesh {
                 this._mungeLocalSdp(offer);
                 await pc.setLocalDescription(offer);
                 entry.offerSentAt = Date.now(); // unstickStaleOffer 的陈旧判定基准
-                this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
+                entry.offerSeq = this._offerSeq(peerId); // 迟到 answer 的代次甄别基准
+                this.signaling.emit('relaySDP', {
+                    peer_id: peerId,
+                    session_description: pc.localDescription,
+                    sdp_seq: entry.offerSeq,
+                });
             } catch (err) {
                 console.error('[mesh] offer failed', peerId, err);
             } finally {
@@ -403,7 +419,7 @@ export class Mesh {
         }
     }
 
-    async handleSessionDescription({ peer_id, session_description }) {
+    async handleSessionDescription({ peer_id, session_description, sdp_seq }) {
         const entry = this.entries.get(peer_id);
         if (!entry || !session_description) return;
         const pc = entry.pc;
@@ -436,14 +452,45 @@ export class Mesh {
                 return;
             }
         }
+        // answer 侧守卫：setRemoteDescription(answer) 只在
+        // have-local-offer 下合法——其余状态里到达的 answer 定义上
+        // 就是陈旧/重复的（offer 已被 unstick 回滚、answer 已应用过、
+        // 或我们正在应答对端的 offer）。直接喂给浏览器只会得到
+        // InvalidStateError（"[mesh] session description failed …
+        // Called in wrong state: stable"），链路状态本身无需改动。
+        if (session_description.type === 'answer') {
+            if (pc.signalingState !== 'have-local-offer') {
+                console.warn('[mesh] stale answer ignored', peer_id, pc.signalingState);
+                return;
+            }
+            // 代次校验：恢复引擎会回滚无应答的 offer 并重发
+            // （unstickStaleOffer/retryStuckOffer）、也会整链路换 PC
+            // （rebuildPeer）——旧 offer 的迟到 answer 仍会在途，且
+            // 落在 have-local-offer 上时浏览器不校验它对应哪份
+            // offer，旧 ICE 凭据会静默套在新 offer 上（该轮打洞
+            // 永远配不上，之后真正的 answer 再撞上 stable 报错）。
+            // 对不上即陈旧应答，忽略。旧对端不带 seq（滚动升级
+            // 窗口）时此处自然放行，仅剩上面的状态守卫。
+            if (sdp_seq !== undefined && entry.offerSeq !== undefined && sdp_seq !== entry.offerSeq) {
+                console.warn('[mesh] stale answer ignored (seq mismatch)', peer_id, sdp_seq, '!=', entry.offerSeq);
+                return;
+            }
+        } else if (sdp_seq !== undefined && sdp_seq < (this.sdpSeqs.get(peer_id)?.remote ?? 0)) {
+            // 退化 offer：小于已接受最大代次的 offer 是对端回滚重发
+            // 链上晚到的旧 offer——应答它只会把协商拉回旧凭据。
+            // 同 seq 的重复投递（等于已见值）不受影响，照常应答，
+            // 幂等。
+            console.warn('[mesh] regressed offer ignored', peer_id, sdp_seq);
+            return;
+        }
         try {
-            await this._applySessionDescription(peer_id, entry, session_description);
+            await this._applySessionDescription(peer_id, entry, session_description, sdp_seq);
         } catch (err) {
             console.error('[mesh] session description failed', peer_id, err);
         }
     }
 
-    async _applySessionDescription(peer_id, entry, session_description) {
+    async _applySessionDescription(peer_id, entry, session_description, sdp_seq) {
         const pc = entry.pc;
         await pc.setRemoteDescription(session_description);
         // 冲刷在远端描述之前到达的 ICE 候选——并行喂入：trickle
@@ -452,6 +499,12 @@ export class Mesh {
         const pending = entry.pendingIce.splice(0);
         if (pending.length) await Promise.allSettled(pending.map((candidate) => pc.addIceCandidate(candidate)));
         if (session_description.type === 'offer') {
+            // 已接受的远端 offer 代次——此后更小的代次按退化重放拒收
+            //（见 handleSessionDescription）
+            if (sdp_seq !== undefined) {
+                const ledger = this._seqLedger(peer_id);
+                ledger.remote = Math.max(ledger.remote, sdp_seq);
+            }
             // 应答之前先挂载我们的麦克风：带音频 m-line 的 offer
             // 立即以 sendrecv 应答，ICE 一连通媒体即流动——
             // 本端发声之前不再需要反向 offer 轮次
@@ -466,7 +519,9 @@ export class Mesh {
             const answer = await pc.createAnswer();
             this._mungeLocalSdp(answer);
             await pc.setLocalDescription(answer);
-            this.signaling.emit('relaySDP', { peer_id, session_description: pc.localDescription });
+            // answer 原样回带所应答 offer 的代次（offer 未带 seq 时为
+            // undefined，socket.io 编码自然省略——旧对端零感知）
+            this.signaling.emit('relaySDP', { peer_id, session_description: pc.localDescription, sdp_seq });
         }
         this._restampAdaptiveState(entry);
     }
@@ -593,6 +648,23 @@ export class Mesh {
         return this.entries.has(peerId);
     }
 
+    /** 该 peer 的 SDP 代次账本（惰性创建；存放语义见字段注释）。 */
+    _seqLedger(peerId) {
+        let ledger = this.sdpSeqs.get(peerId);
+        if (!ledger) {
+            ledger = { sent: 0, remote: 0 };
+            this.sdpSeqs.set(peerId, ledger);
+        }
+        return ledger;
+    }
+
+    /** 分配发往该 peer 的下一条 offer 代次号（单调递增）。 */
+    _offerSeq(peerId) {
+        const ledger = this._seqLedger(peerId);
+        ledger.sent += 1;
+        return ledger.sent;
+    }
+
     /** ice 重启与普通重新协商共用的 offer 核心。 */
     async _sendOffer(peerId, offerOptions) {
         const entry = this.entries.get(peerId);
@@ -614,7 +686,12 @@ export class Mesh {
             this._mungeLocalSdp(offer);
             await pc.setLocalDescription(offer);
             entry.offerSentAt = Date.now(); // unstickStaleOffer 的陈旧判定基准
-            this.signaling.emit('relaySDP', { peer_id: peerId, session_description: pc.localDescription });
+            entry.offerSeq = this._offerSeq(peerId); // 迟到 answer 的代次甄别基准
+            this.signaling.emit('relaySDP', {
+                peer_id: peerId,
+                session_description: pc.localDescription,
+                sdp_seq: entry.offerSeq,
+            });
             if (offerOptions.iceRestart) console.log('[mesh] ice restart offer sent', peerId);
             this._restampAdaptiveState(entry);
             return true;
@@ -798,6 +875,7 @@ export class Mesh {
     close() {
         this.clear();
         this.localStream = null;
+        this.sdpSeqs.clear(); // 页面拆除：账本随会话终结（clear 刻意保留，见字段注释）
     }
 
     _addLocalTracks(entry) {

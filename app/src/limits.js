@@ -42,6 +42,10 @@ const IMG_BATCH_ID_MAX = 64;
 const SDP_MAX_CHARS = 256 * 1024;
 // 信令中转的 ICE 候选字符串上限（candidate 行，含扩展属性）
 const ICE_CAND_MAX_CHARS = 2048;
+// 信令中转的 SDP 代次号上限（offer/answer 与协商轮次的关联标记，
+// 见前端 webrtc.js 的 sdp_seq）——序号只用于配对，超出 int32 的
+// 值只能是恶意构造
+const SDP_SEQ_MAX = 0x7fffffff;
 // 单图传输上限——镜像客户端上限（images.js 的 MAX_TRANSFER_CHARS）
 const IMAGE_MAX_CHARS = 1600 * 1024;
 // 自定义头像：同一 data-URL 白名单、更小的上限（客户端对应在 channel.js）
@@ -63,6 +67,7 @@ module.exports = {
     IMG_BATCH_ID_MAX,
     SDP_MAX_CHARS,
     ICE_CAND_MAX_CHARS,
+    SDP_SEQ_MAX,
     IMAGE_MAX_CHARS,
     AVATAR_MAX_CHARS,
     DEFAULT_MAX_PARTICIPANTS,

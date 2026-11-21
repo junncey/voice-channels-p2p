@@ -508,6 +508,149 @@ describe('test-mesh-chat (mesh bookkeeping)', () => {
         });
     });
 
+    describe('SDP generation guards (stale answers / regressed offers)', () => {
+        /** 会走路的状态机 pc：记录每次描述调用并按 offer/answer/
+         *  rollback 推进 signalingState——比真实浏览器更宽松
+         *  （不校验 answer 对应哪份 offer），恰好复现待防的错配。 */
+        function seqPc(signalingState = 'stable') {
+            const calls = { remote: [], local: [] };
+            return {
+                calls,
+                signalingState,
+                connectionState: 'new',
+                localDescription: null,
+                remoteDescription: null,
+                async setRemoteDescription(desc) {
+                    calls.remote.push(desc.type);
+                    this.remoteDescription = desc;
+                    this.signalingState = desc.type === 'offer' ? 'have-remote-offer' : 'stable';
+                },
+                async setLocalDescription(desc) {
+                    calls.local.push(desc.type);
+                    if (desc.type === 'rollback') this.signalingState = 'stable';
+                    else {
+                        this.localDescription = desc;
+                        this.signalingState = desc.type === 'offer' ? 'have-local-offer' : 'stable';
+                    }
+                },
+                async createOffer() {
+                    return { type: 'offer', sdp: 'v=0 offer' };
+                },
+                async createAnswer() {
+                    return { type: 'answer', sdp: 'v=0 answer' };
+                },
+                getSenders: () => [],
+                getReceivers: () => [],
+                getTransceivers: () => [],
+            };
+        }
+
+        /** entries 由本组用例自行落座的 Mesh（信令 emit 被记录）。 */
+        function seqMesh(signalingState = 'have-local-offer', offerSeq) {
+            const sent = [];
+            const mesh = new Mesh({
+                signaling: { emit: (evt, payload) => sent.push(payload) },
+                handlers: {},
+            });
+            const pc = seqPc(signalingState);
+            const entry = { pc, pendingIce: [], queue: [], queueBytes: 0, tracksAdded: true, offering: false };
+            if (offerSeq !== undefined) entry.offerSeq = offerSeq;
+            mesh.entries.set('p1', entry);
+            return { mesh, entry, pc, sent };
+        }
+
+        const answerMsg = (seq) => ({
+            peer_id: 'p1',
+            session_description: { type: 'answer', sdp: 'v=0' },
+            ...(seq !== undefined ? { sdp_seq: seq } : {}),
+        });
+        const offerMsg = (seq, sdp = 'v=0') => ({
+            peer_id: 'p1',
+            session_description: { type: 'offer', sdp },
+            ...(seq !== undefined ? { sdp_seq: seq } : {}),
+        });
+
+        it('should ignore an answer landing on a stable PC (was an InvalidStateError)', async () => {
+            const { mesh, pc } = seqMesh('stable');
+            // 我们的 offer 早已被 unstick 回滚、或另一份 answer 已应用
+            // ——stable 下到达的 answer 定义上就是陈旧/重复的
+            await mesh.handleSessionDescription(answerMsg(1));
+            pc.calls.remote.should.eql([]); // 不触 setRemoteDescription，也不抛错
+        });
+
+        it('should reject a late answer to a superseded offer by seq, accept the matching one', async () => {
+            const { mesh, pc } = seqMesh('have-local-offer', 2);
+            // 旧 offer（回滚/重建前）的迟到 answer：不校验代次就会被
+            // 静默应用到当前 pending offer 上（旧 ICE 凭据错配）
+            await mesh.handleSessionDescription(answerMsg(1));
+            pc.calls.remote.should.eql([]);
+            await mesh.handleSessionDescription(answerMsg(2)); // 当前 offer 的真 answer
+            pc.calls.remote.should.eql(['answer']);
+        });
+
+        it('should fall back to the state guard alone for a seq-less legacy peer', async () => {
+            const { mesh, pc } = seqMesh('have-local-offer', 7);
+            await mesh.handleSessionDescription(answerMsg(undefined)); // 旧对端不带 sdp_seq
+            pc.calls.remote.should.eql(['answer']);
+        });
+
+        it('should echo the offer seq on our answer, reject regressed offers, re-answer replays', async () => {
+            const { mesh, pc, sent } = seqMesh('stable');
+            await mesh.handleSessionDescription(offerMsg(5));
+            pc.calls.remote.should.eql(['offer']);
+            const answers = sent.filter((p) => p.session_description.type === 'answer');
+            answers.should.have.length(1);
+            answers[0].sdp_seq.should.equal(5); // answer 原样回带所应答 offer 的代次
+            // 对端回滚重发链上晚到的旧 offer（seq 3 < 已接受 5）：拒收
+            await mesh.handleSessionDescription(offerMsg(3, 'v=0 stale'));
+            pc.calls.remote.should.eql(['offer']);
+            // 同 seq 的重复投递：幂等重应答（重复投递被容忍）
+            await mesh.handleSessionDescription(offerMsg(5, 'v=0 dup'));
+            pc.calls.remote.should.eql(['offer', 'offer']);
+        });
+
+        it('should keep the seq ledger across rebuildPeer (pre-rebuild answers rejected)', async () => {
+            const had = Object.hasOwn(globalThis, 'RTCPeerConnection');
+            const RealPC = globalThis.RTCPeerConnection;
+            // rebuildPeer 经 addPeer 构造真实 RTCPeerConnection——
+            // 断言期间装一个仅覆盖被用到面的假实现（finally 还原）
+            globalThis.RTCPeerConnection = class {
+                constructor() {
+                    Object.assign(this, seqPc('stable'));
+                }
+                createDataChannel(label) {
+                    return { label, readyState: 'connecting' };
+                }
+                close() {}
+            };
+            try {
+                const sent = [];
+                const mesh = new Mesh({
+                    signaling: { emit: (evt, payload) => sent.push(payload) },
+                    handlers: {},
+                });
+                const flush = () => new Promise((resolve) => setImmediate(resolve));
+                mesh.addPeer('p1', true, []); // 加入方路径：初始 offer
+                await flush();
+                mesh.rebuildPeer('p1'); // 恢复阶梯：整链路换 PC、立即重新 offer
+                await flush();
+                sent.filter((p) => p.session_description.type === 'offer')
+                    .map((p) => p.sdp_seq)
+                    .should.eql([1, 2]); // 账本跨重建递增，绝不重用旧序号
+                // 旧 PC 那份 offer（seq 1）的迟到 answer：新 PC 正
+                // pending seq 2——不校验代次就会错配到新 offer 上
+                const entry = mesh.entries.get('p1');
+                await mesh.handleSessionDescription(answerMsg(1));
+                entry.pc.calls.remote.should.eql([]);
+                await mesh.handleSessionDescription(answerMsg(2));
+                entry.pc.calls.remote.should.eql(['answer']);
+            } finally {
+                if (had) globalThis.RTCPeerConnection = RealPC;
+                else delete globalThis.RTCPeerConnection;
+            }
+        });
+    });
+
     describe('removePeer detaches stale-PC events (rebuild ladder survival)', () => {
         /** 接线形态照搬 addPeer：处理器存在时读当前 connectionState。 */
         function wiredPc(mesh, peerId) {

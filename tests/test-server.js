@@ -941,6 +941,27 @@ describe('test-server (signaling integration)', function () {
             });
             await once(b, 'iceCandidate');
             seenIce.length.should.equal(1);
+
+            // sdp_seq 代次号（offer/answer 关联标记）：合法整数原样透传
+            a.emit('relaySDP', {
+                peer_id: ub,
+                session_description: { type: 'answer', sdp: 'v=0 seq' },
+                sdp_seq: 7,
+            });
+            (await once(b, 'sessionDescription')).sdp_seq.should.equal(7);
+            a.emit('relaySDP', {
+                peer_id: ub,
+                session_description: { type: 'offer', sdp: 'v=0 seq0' },
+                sdp_seq: 0,
+            });
+            (await once(b, 'sessionDescription')).sdp_seq.should.equal(0); // 下界合法
+            // 畸形 seq 与畸形载荷同语义：整条静默丢弃、不回执
+            for (const bad of ['3', -1, 1.5, 0x80000000]) {
+                a.emit('relaySDP', { peer_id: ub, session_description: { type: 'offer', sdp: 'x' }, sdp_seq: bad });
+            }
+            await wait(300);
+            seenSdp.length.should.equal(3); // 只有上面三条合法 SDP
+            receipts.length.should.equal(0);
         });
     });
 });

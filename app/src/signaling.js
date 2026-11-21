@@ -1,5 +1,6 @@
 /*
-Socket.IO 信令——mesh P2P 协议核心（协议未变）。
+Socket.IO 信令——mesh P2P 协议核心（relaySDP 载荷新增可选 sdp_seq
+代次号，answer 原样回带、服务器只透传不解释——语义见前端 webrtc.js）。
 
 join → addPeer → relaySDP/relayICE → removePeer，外加房间作用域的
 peer 事件中转。join 的完整门禁流程（含防爆破冷却与 addPeer 通知）
@@ -76,6 +77,13 @@ function validIcePayload(cand) {
     if (!cand || typeof cand !== 'object') return false;
     if (typeof cand.candidate !== 'string') return false;
     return cand.candidate.length <= limits.ICE_CAND_MAX_CHARS;
+}
+
+/** relaySDP 的可选代次号（offer/answer 与协商轮次的关联，语义见
+ *  前端 webrtc.js 的 sdp_seq）：合法才透传；畸形值与畸形载荷同语义
+ *  ——整条静默丢弃，不回执。undefined（旧客户端不带）永远合法。 */
+function validSdpSeq(seq) {
+    return seq === undefined || (Number.isSafeInteger(seq) && seq >= 0 && seq <= limits.SDP_SEQ_MAX);
 }
 
 /**
@@ -187,10 +195,10 @@ function registerSignaling(
         socket.on('relaySDP', async (config) => {
             if (relayThrottled(socket, log, relayBudget(socket, channelStore))) return;
             if (!Validate.isValidData(config)) return;
-            const { peer_id, session_description } = config;
+            const { peer_id, session_description, sdp_seq } = config;
             // 畸形/超大载荷静默丢弃（不回 relayUndelivered 回执——
             // 回执语义是「合法载荷此刻投不出去」）
-            if (!validSdpPayload(session_description)) return;
+            if (!validSdpPayload(session_description) || !validSdpSeq(sdp_seq)) return;
             const channel = sharedRoom(socket, peer_id);
             const target = channel && liveSessionSocket(channel, peer_id);
             if (!target) {
@@ -208,6 +216,7 @@ function registerSignaling(
             target.emit('sessionDescription', {
                 peer_id: socket.channels[channel].uuid,
                 session_description: session_description,
+                sdp_seq, // 可选代次号；undefined 经 socket.io 编码自然省略
             });
         });
 
