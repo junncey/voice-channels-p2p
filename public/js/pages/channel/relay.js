@@ -34,6 +34,14 @@ export function createRelayUpgrade({ s, peerRecovery, connPaths, ghostGraceUntil
     const relayUpgrades = new Map();
 
     function note(peerId, info) {
+        // relay-only 重建的链路（同 NAT 恢复策略，见
+        // specs/same-nat-relay-recovery.md）：它的 PC 没有 host/srflx
+        // 候选，重新打洞在定义上不可能产出直连——不武装升级，
+        // 省掉两次徒劳 restart 的音频闪断
+        if (s.mesh?.entries.get(peerId)?.relayOnly) {
+            cancel(peerId);
+            return;
+        }
         if (!info || peerRecovery.has(peerId) || !s.selfUuid || s.selfUuid >= peerId) {
             // 链路已不在，或这一侧无权发起重新打洞
             cancel(peerId);

@@ -260,6 +260,29 @@ function iceServersStamp(iceServers) {
     return iceServers.map((server) => `${server?.urls}|${server?.username || ''}`).join(';');
 }
 
+/** iceServers 里是否配置了 TURN（relay-only PC 的降级守卫：
+ *  没有 TURN 时强制 relay 策略会收集不到任何候选，连接必死）。 */
+function hasTurnServer(iceServers) {
+    return iceServers.some((server) => [].concat(server?.urls || []).some((url) => /^turns?:/.test(String(url))));
+}
+
+/**
+ * 从 SDP candidate 串中解析 srflx 候选的地址（纯函数，为测试导出）。
+ * 同 NAT 判定只认 srflx——host 是内网地址、relay 是 TURN 服务器
+ * 地址，都不代表对端的公网出口。非 srflx 或畸形串返回 null。
+ * 串形态：`candidate:<foundation> <comp> <proto> <prio> <addr> <port> typ <type> ...`
+ * @param {string|undefined} candidate RTCIceCandidate.candidate
+ * @returns {string|null}
+ */
+export function candidateSrflxIp(candidate) {
+    if (typeof candidate !== 'string') return null;
+    const parts = candidate.split(/\s+/);
+    const typIdx = parts.indexOf('typ');
+    if (typIdx === -1 || parts[typIdx + 1] !== 'srflx') return null;
+    const ip = parts[4];
+    return ip || null;
+}
+
 export class Mesh {
     /**
      * @param {object}   options
@@ -289,6 +312,14 @@ export class Mesh {
          *  uuid 回归，序号都继续递增——旧轮次的迟到 SDP 永远对不上
          *  新序号。仅 close()（页面拆除）清空。 */
         this.sdpSeqs = new Map();
+        /** 本端 srflx 候选的公网 IP 集合（同 NAT 判定的一半，见
+         *  sameNatWith）；随本地候选收集累积，页面存续期间不清空 */
+        this.localSrflxIps = new Set();
+        /** peerId -> 对端 srflx 候选的公网 IP 集合（同 NAT 判定的
+         *  另一半）。生命周期对齐 sdpSeqs 先例：跨 rebuildPeer/clear
+         *  存活——重建后对端候选重新 trickle，知识自动刷新；仅
+         *  close() 清空。 */
+        this.remoteSrflxIps = new Map();
     }
 
     /** 设置/替换本地麦克风流（在 peer 连接前调用，或之后启用语音）。 */
@@ -335,8 +366,12 @@ export class Mesh {
      * @param {string}  peerId
      * @param {boolean} shouldCreateOffer 加入方一侧为 true
      * @param {Array}   iceServers 来自 addPeer 载荷
+     * @param {object}  [options]
+     * @param {boolean} [options.relayOnly] 请求 relay-only PC（同 NAT
+     *                 对等的恢复策略，见 sameNatWith 与恢复梯子）；
+     *                 未配置 TURN 时经降级守卫静默回退普通策略
      */
-    addPeer(peerId, shouldCreateOffer, iceServers = []) {
+    addPeer(peerId, shouldCreateOffer, iceServers = [], { relayOnly = false } = {}) {
         // 全新的凭据组随每一次 addPeer 而来（重连风暴也是）——
         // 立即应用到每条存活连接（否则恢复用的 iceRestart 抢在
         // 刷新定时器之前跑，会用早已过期的凭据收集候选），
@@ -345,18 +380,23 @@ export class Mesh {
         if (iceServers?.length && iceServersStamp(iceServers) !== this.iceStamp) this.updateIceServers(iceServers);
         if (this.entries.has(peerId)) return;
 
+        const effective = iceServers.length ? iceServers : this.iceServers;
         // iceCandidatePoolSize 预分配 host 候选并预拨 STUN：首次加入
         // 和每次重建的收集都快一拍（重连风暴频繁建 PC 时受益；
         // 纯音频——这点开销可忽略）
         const pc = new RTCPeerConnection({
-            iceServers: iceServers.length ? iceServers : this.iceServers,
+            iceServers: effective,
             iceCandidatePoolSize: 4,
+            ...(relayOnly && hasTurnServer(effective) ? { iceTransportPolicy: 'relay' } : {}),
         });
         const entry = { pc, dc: null, pendingIce: [], queue: [], queueBytes: 0, tracksAdded: false, offering: false };
+        entry.relayOnly = relayOnly && hasTurnServer(effective); // 实际生效标志（relay 升级引擎据此跳过）
         this.entries.set(peerId, entry);
 
         pc.onicecandidate = (event) => {
             if (event.candidate) {
+                const srflxIp = candidateSrflxIp(event.candidate.candidate);
+                if (srflxIp) this.localSrflxIps.add(srflxIp);
                 this.signaling.emit('relayICE', { peer_id: peerId, ice_candidate: event.candidate });
             }
         };
@@ -626,9 +666,12 @@ export class Mesh {
      * 但省去服务器往返。本侧 ontrack 会再次触发，
      * 既有 attachRemoteAudio 重新挂接播放。
      * @param {string} peerId
+     * @param {object} [options] { relayOnly } —— 同 NAT 且从未连上
+     *                 的链路由恢复梯子请求 relay-only 重建（见
+     *                 addPeer 的选项注释与降级守卫）
      * @returns {boolean} 新条目（及其 offer）是否已发出
      */
-    rebuildPeer(peerId) {
+    rebuildPeer(peerId, { relayOnly = false } = {}) {
         const prev = this.entries.get(peerId);
         if (!prev) return false;
         // 把自适应状态带过去：重建的链路在交换刚完成时最脆弱
@@ -639,7 +682,7 @@ export class Mesh {
         // jitterTarget 由 ontrack 逐 receiver 重新应用。
         const carry = { jitterTarget: prev.jitterTarget ?? null, bitrateFloor: prev.bitrateFloor || null };
         this.removePeer(peerId);
-        this.addPeer(peerId, true, this.iceServers);
+        this.addPeer(peerId, true, this.iceServers, { relayOnly });
         const entry = this.entries.get(peerId);
         if (entry) {
             entry.bitrateFloor = carry.bitrateFloor;
@@ -731,6 +774,18 @@ export class Mesh {
     async handleIceCandidate({ peer_id, ice_candidate }) {
         const entry = this.entries.get(peer_id);
         if (!entry || !ice_candidate) return;
+        // 对端的公网出口知识先于 remoteDescription 落座——同 NAT
+        // 判定（见 sameNatWith）在链路协商尚未完成时就要可用，
+        // 恢复梯子正是在「从未连上」时最需要它
+        const srflxIp = candidateSrflxIp(ice_candidate.candidate);
+        if (srflxIp) {
+            let ips = this.remoteSrflxIps.get(peer_id);
+            if (!ips) {
+                ips = new Set();
+                this.remoteSrflxIps.set(peer_id, ips);
+            }
+            ips.add(srflxIp);
+        }
         if (!entry.pc.remoteDescription) {
             // 异常/失控对端的洪泛不得无限占用内存（正常 trickle
             // 每对端几十个候选）——超限静默丢弃
@@ -743,6 +798,25 @@ export class Mesh {
         } catch {
             /* 忽略迟到/重复的候选 */
         }
+    }
+
+    /**
+     * 与该对端是否共享同一个公网出口（同 NAT 对等）：双方的
+     * srflx 候选 IP 集合均非空且有交集。事实层判定——策略
+     * （何时据此走 relay-only 重建）归恢复梯子所有（见
+     * specs/same-nat-relay-recovery.md）。任一侧 srflx 尚未
+     * 收集到（无 STUN / DNS 失败）时返回 false，行为与
+     * 未启用本判定时一致。
+     * @param {string} peerId
+     * @returns {boolean}
+     */
+    sameNatWith(peerId) {
+        const remote = this.remoteSrflxIps.get(peerId);
+        if (!remote?.size || !this.localSrflxIps.size) return false;
+        for (const ip of remote) {
+            if (this.localSrflxIps.has(ip)) return true;
+        }
+        return false;
     }
 
     /**
@@ -876,6 +950,8 @@ export class Mesh {
         this.clear();
         this.localStream = null;
         this.sdpSeqs.clear(); // 页面拆除：账本随会话终结（clear 刻意保留，见字段注释）
+        this.localSrflxIps.clear(); // 同 NAT 判定知识一并随页面终结
+        this.remoteSrflxIps.clear();
     }
 
     _addLocalTracks(entry) {

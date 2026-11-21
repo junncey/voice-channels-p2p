@@ -54,8 +54,10 @@ DataChannel 存活。
 
 export function createRecovery({ s, x, members, channelId, $, el, t, timings = {} }) {
     const RECOVERY_GRACE_MS = 5000;
-    const RECOVERY_ROUND_DELAYS = [3000, 6000, 12000];
-    const RECOVERY_TOTAL_MS = 20000; // 信令重连前的按对端窗口（轮次用完后的复查对准窗口终点）
+    // 梯子节拍可经 timings 注入（毫秒级单测用）——与下方
+    // RECOVERY_B1_RESET_MS 的注入先例同款
+    const RECOVERY_ROUND_DELAYS = timings.roundDelays ?? [3000, 6000, 12000];
+    const RECOVERY_TOTAL_MS = timings.totalMs ?? 20000; // 信令重连前的按对端窗口（轮次用完后的复查对准窗口终点）
     const RECOVERY_MAX_B1 = 2; // 询问用户之前的自动信令重连次数
     const RECOVERY_SCAN_MS = 10000;
     // 稳定这么久 → B1 预算回满（可经 timings.b1ResetMs 注入，测试用——
@@ -79,6 +81,11 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
     const REJOIN_RETRY_MIN_AGE_MS = 2000;
 
     const peerRecovery = new Map(); // peerId -> { timer, attempts, lastState, brokenAt, escalated, flappy }
+    // 本成员纪元内连接成功过的对端——同 NAT 判定（mesh.sameNatWith）
+    // 只对「从未连上」的链路升级为 relay-only 重建（见
+    // specs/same-nat-relay-recovery.md）：曾连上又断线的链路维持既有
+    // 梯子行为（直连路径存在过，普通重建仍值得一试）
+    const everConnected = new Set();
     const flapHeals = new Map(); // peerId -> FLAP_WINDOW_MS 内的 [healedAt, ...]
     let recoveryScanTimer = null;
     let b1Attempts = 0; // 自上个稳定期以来的自动信令重连次数
@@ -93,6 +100,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
 
         if (state === 'connected' || state === 'closed') {
             if (state === 'connected') {
+                everConnected.add(peerId); // relay-only 升级只留给从未连上的链路
                 // 一次已自愈的断线（10s 扫描重报健康对端时没有恢复记录
                 // —— rec 还在即意味着真实的一次周期）
                 if (rec) countFlapHeal(peerId);
@@ -314,8 +322,20 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
             // 失效时它根本不在恢复中，此前这里要白等 20s 才落到
             // B1）。双方同时耗尽轮次而同时重建的相撞由完美协商
             // 兜底，代价只是一方白建一个 PC
-            if (s.mesh?.rebuildPeer(peerId)) {
-                console.warn('[mesh] recovery: rebuilding the peer connection', peerId);
+            //
+            // 同 NAT 且从未连上（双方 srflx 同公网 IP——同一路由器/
+            // CGNAT 下的两台设备）：host 直连被拦、srflx 回环过不了
+            // CGNAT，普通全候选矩阵里唯一可行的 relay 配对又在重建
+            // 风暴中永远等不到缓慢的收集。这次重建直接换成
+            // relay-only PC（只收集 TURN 候选、检查全部从 relay 分配
+            // 发出）。事实归 mesh（sameNatWith），这里只做策略；
+            // 未配置 TURN 时由 mesh 的降级守卫静默回退普通策略
+            const relayOnly = !everConnected.has(peerId) && !!s.mesh?.sameNatWith?.(peerId);
+            if (s.mesh?.rebuildPeer(peerId, { relayOnly })) {
+                console.warn(
+                    '[mesh] recovery: rebuilding the peer connection' + (relayOnly ? ' (relay-only, same NAT)' : ''),
+                    peerId
+                );
                 scheduleRecoveryTick(peerId, 3000);
                 return;
             }
@@ -677,6 +697,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
         relayUpgrade.cancel(peerId);
         quality.forget(peerId);
         clearConnectingBadge(peerId);
+        everConnected.delete(peerId);
         clearTimeout(pathEarlyTimers.get(peerId));
         pathEarlyTimers.delete(peerId);
         connPaths.delete(peerId);
@@ -702,6 +723,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
         for (const timer of connectingTimers.values()) clearTimeout(timer);
         connectingTimers.clear();
         stuckConnecting.clear();
+        everConnected.clear();
         flapHeals.clear();
         ghostGraceUntil.clear();
         hideOutageBanner();

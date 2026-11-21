@@ -361,3 +361,101 @@ describe('test-recovery (flappy fast lane escalates at its 6s window, not +12s l
         rebuilds.should.have.length(1);
     });
 });
+
+describe('test-recovery (same-NAT never-connected links rebuild relay-only)', () => {
+    // specs/same-nat-relay-recovery.md：同 NAT（双方 srflx 同公网 IP）
+    // 且从未连上的链路，梯子升级到重建阶时请求 relay-only PC；
+    // 曾连上过的链路维持普通重建。节拍经 timings 注入压缩到毫秒级。
+    // SELF < PEER：本侧是低 uuid 先手方，restart 轮次立即发起
+    // （高 uuid 方要走 9s 破例窗口，压缩节拍压不动它）。
+    const SELF = 'aaaa-self';
+    const PEER = 'zzzz-peer';
+
+    function stubNode() {
+        return { classList: { add() {}, remove() {}, toggle() {} }, dataset: {}, textContent: '', append() {} };
+    }
+
+    /** 同 NAT 与否可配置的引擎（sameNat 为 undefined 时干脆不提供
+     *  该方法——模拟旧 stub / 旧 Mesh）。 */
+    function makeEngine(sameNat) {
+        const meshEntries = new Map();
+        const rebuilds = [];
+        const mesh = {
+            entries: meshEntries,
+            clear() {},
+            restartIce: () => Promise.resolve(true),
+            unstickStaleOffer: () => Promise.resolve(false),
+            rebuildPeer(peerId, opts) {
+                rebuilds.push({ peerId, opts });
+                return true;
+            },
+        };
+        if (sameNat !== undefined) mesh.sameNatWith = () => sameNat;
+        const recovery = mod.createRecovery({
+            s: {
+                selfUuid: SELF,
+                joined: true,
+                socket: { connected: true, disconnect() {}, connect() {}, timeout: () => ({ emit() {} }) },
+                mesh,
+                chat: { add() {} },
+            },
+            members: new Map(),
+            channelId: 'testroom',
+            $: () => stubNode(),
+            el: () => stubNode(),
+            t: (key) => key,
+            timings: { roundDelays: [10, 10, 10], totalMs: 40 },
+        });
+        return { meshEntries, rebuilds, recovery };
+    }
+
+    let mod;
+    let lastRecovery = null; // afterEach 清扫（梯子重建/B1 回填的定时器不得泄漏到后续套件）
+    before(async () => {
+        global.window = { addEventListener() {} };
+        global.document = { addEventListener() {} };
+        mod = await importBrowserModule('public/js/pages/channel/recovery.js');
+    });
+
+    afterEach(() => {
+        if (lastRecovery) {
+            lastRecovery.clearPeerRecovery();
+            lastRecovery.resetForTeardown();
+            lastRecovery = null;
+        }
+    });
+
+    /** 走完压缩梯子（roundDelays [10,10,10]、窗口 40ms）直到重建。 */
+    async function driveToRebuild(recovery, meshEntries) {
+        meshEntries.set(PEER, { pc: { connectionState: 'failed' } });
+        recovery.notePeerState(PEER, 'failed');
+        await sleep(150); // 轮 1-3（t≈0/10/20）→ 窗口复查（t≈30）→ 升级重建（t≈40）
+    }
+
+    it('requests a relay-only rebuild for a same-NAT link that never connected', async () => {
+        const { meshEntries, rebuilds, recovery } = makeEngine(true);
+        lastRecovery = recovery;
+        await driveToRebuild(recovery, meshEntries);
+        rebuilds.should.have.length(1);
+        rebuilds[0].peerId.should.equal(PEER);
+        rebuilds[0].opts.relayOnly.should.be.true();
+    });
+
+    it('keeps the normal rebuild for a link that has connected before', async () => {
+        const { meshEntries, rebuilds, recovery } = makeEngine(true);
+        lastRecovery = recovery;
+        // 曾连上过（哪怕后来断线）：relay-only 只留给从未连上的链路
+        recovery.notePeerState(PEER, 'connected');
+        await driveToRebuild(recovery, meshEntries);
+        rebuilds.should.have.length(1);
+        rebuilds[0].opts.relayOnly.should.be.false();
+    });
+
+    it('does not request relay-only for a cross-network peer (sameNat false)', async () => {
+        const { meshEntries, rebuilds, recovery } = makeEngine(false);
+        lastRecovery = recovery;
+        await driveToRebuild(recovery, meshEntries);
+        rebuilds.should.have.length(1);
+        rebuilds[0].opts.relayOnly.should.be.false();
+    });
+});

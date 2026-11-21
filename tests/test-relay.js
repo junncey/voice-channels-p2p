@@ -76,4 +76,14 @@ describe('test-relay (relay upgrade defers inside the peer ghost grace)', () => 
         await sleep(120); // 宽限 40ms 到点即发起
         restarts.should.have.length(1);
     });
+
+    it('never arms on a relay-only rebuilt link (no direct candidates exist)', async () => {
+        // 同 NAT 恢复策略重建的 relay-only PC 没有 host/srflx 候选，
+        // 重新打洞在定义上不可能产出直连——升级引擎不得武装
+        s.mesh.entries.get(PEER).relayOnly = true;
+        const relay = engine({ graceMs: 40, retryMs: 5000 });
+        relay.note(PEER, { state: 'connected', type: 'relay' });
+        await sleep(140); // 若被武装，40ms 的首跳早已发起 restart
+        restarts.should.eql([]);
+    });
 });
