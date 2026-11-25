@@ -313,9 +313,26 @@ export function createSocketEvents({
         });
 
         socket.on('addPeer', (cfg) => {
+            // 既有条目只配得上原地恢复（rejoin:true：服务器在幽灵宽限内
+            // 让同一 uuid 重新 join，双方的 PC 与 DataChannel 原样复用）。
+            // 非恢复的 addPeer 却命中既有条目 = 条目来自已经终结的会话
+            // 纪元：服务器只对 resume 给 rejoin:true，其余 join 之前旧
+            // 会话要么已过期、要么已被收割并广播 removePeer——对端手里
+            // 通向它的 PC 必然已拆。复用遗物最坏会永久卡死（停在 new +
+            // have-local-offer 的 offer 被复用后永远不会重发：梯子对过渡
+            // 态不动作，应答侧的待决 offer 还会让本端按 impolite 忽略
+            // 对端新 PC 的 offer），最好也只是白等一轮解卡。换成全新
+            // PC，按服务器指定的角色重新来
+            // （specs/p2p-recovery-boundaries.md §1）
+            const stale = cfg.rejoin !== true && s.mesh.entries.has(cfg.peer_id);
+            if (stale) {
+                rec.forgetPeer(cfg.peer_id); // 旧链路的梯子/升级/质量记录一并清账
+                s.mesh.removePeer(cfg.peer_id);
+            }
             const known = s.mesh.entries.has(cfg.peer_id);
             scheduleIceRefresh(cfg.iceServers); // 最新的凭证过期时间随每个 addPeer 送达
             s.mesh.addPeer(cfg.peer_id, cfg.should_create_offer, cfg.iceServers || []);
+            if (stale) rec.armConnectingBadge(cfg.peer_id); // syncMembers 只给新成员武装徽章
             mem.syncMembers(cfg.peers || {});
             // should_create_offer=false 意味着：我们是老成员，别人
             // 刚刚加入 —— 由我们播报（加入者会按每个既有成员各收
@@ -327,21 +344,20 @@ export function createSocketEvents({
                 if (name) s.chat.add({ text: t('chat.joined', { name }), system: true });
                 playSound('peerJoin');
             }
-            // 复用既有（可能已损坏）链路的 addPeer（resume 方的
-            // rejoin、老成员一侧的对端 rejoin、亦或对端 reap 后的
-            // 重新加入）：mesh 条目被复用，没有 offer 发出 ——
-            // 现在就把恢复阶梯架上去，而不是等下一轮 10s 扫描
-            // （webview 可能吞掉状态事件）。两侧对称：resume 方
-            // 与老成员都可能拿着一条断链路
-            if (known && (cfg.should_create_offer === true || cfg.rejoin === true)) {
+            // known 此时只可能是 resume（rejoin:true 的两侧：resume 方与
+            // 老成员一侧各自收到的 addPeer）：mesh 条目被复用，没有
+            // offer 发出 —— 现在就把恢复阶梯架上去，而不是等下一轮
+            // 10s 扫描（webview 可能吞掉状态事件）。两侧对称：resume
+            // 方与老成员都可能拿着一条断链路
+            if (known) {
                 const state = s.mesh.entries.get(cfg.peer_id)?.pc.connectionState;
                 if (state && state !== 'connected' && state !== 'closed') rec.notePeerState(cfg.peer_id, state);
+                // 对端刚从断线中回来，此刻信令必能投递——曾被它 ghost
+                // 窗口吞掉 answer 的 offer 立刻解卡重发（免
+                // OFFER_STUCK_MS 盲等）。老成员一侧与 resume 一侧都可能
+                // 卡着这样的 offer，两边都体检
+                rec.retryStuckOffer(cfg.peer_id);
             }
-            // rejoin=true 且链路已知（两侧对称）：对端刚从断线中回来，
-            // 此刻信令必能投递——曾被它 ghost 窗口吞掉 answer 的
-            // offer 立刻解卡重发（免 OFFER_STUCK_MS 盲等）。老成员
-            // 一侧与 resume 一侧都可能卡着这样的 offer，两边都体检
-            if (known && cfg.rejoin === true) rec.retryStuckOffer(cfg.peer_id);
             mem.updateOnlineCount();
         });
 

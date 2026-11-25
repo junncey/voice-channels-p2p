@@ -202,6 +202,14 @@ function registerSignaling(
             const channel = sharedRoom(socket, peer_id);
             const target = channel && liveSessionSocket(channel, peer_id);
             if (!target) {
+                // 例外——发送者自己还没加入任何频道：传输重连时
+                // socket.io-client 先冲刷断线期间缓冲的全部 emit、之后
+                // 才发 join，恢复梯子在断线期间发出的 offer 就这样以
+                // 「陌生人」的身份到达。投不出去的原因在发送者自己，
+                // 不是对端吞信令——回执只会把客户端引向一次毫无意义
+                // 的探测。静默丢弃；那份 offer 由 resume 路径解卡
+                // （specs/p2p-recovery-boundaries.md §3）
+                if (!Object.keys(socket.channels).length) return;
                 // 回执而非静默丢弃：SDP 目标此刻不可投递（对端 ghost
                 // 吞信令，或已离开）。客户端据此立刻做 presence 分流，
                 // 把「offer 卡死」的判定从 8s 超时盲等降为 RTT 级。
@@ -242,9 +250,16 @@ function registerSignaling(
          * 'gone' 让它立刻丢掉成员卡片；
          * 'ghost'（附 resume 宽限剩余毫秒）让阶梯继续治愈并推迟
          * 全量重建——resume 仍可能落地。
+         * 'unknown'：探测者自己的 join 尚未在该频道落座——此刻对
+         * 房间一无所知，任何确定性答案都是错的（答 'gone' 会让
+         * 客户端当场拆掉一个活着的成员）。客户端携带的 room_id
+         * 是判定依据；不带 room_id 的旧载荷走原路径。
          */
         socket.on('peerPresence', async (config, ack) => {
             if (typeof ack !== 'function' || !Validate.isValidData(config)) return;
+            if (typeof config.room_id === 'string' && !Object.hasOwn(socket.channels, config.room_id)) {
+                return ack({ present: 'unknown', graceLeftMs: 0 });
+            }
             const channel = sharedRoom(socket, config.peer_id);
             ack(channel ? sessionPresence(channel, config.peer_id) : { present: 'gone', graceLeftMs: 0 });
         });

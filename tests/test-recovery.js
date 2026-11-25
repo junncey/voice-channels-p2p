@@ -375,9 +375,12 @@ describe('test-recovery (same-NAT never-connected links rebuild relay-only)', ()
         return { classList: { add() {}, remove() {}, toggle() {} }, dataset: {}, textContent: '', append() {} };
     }
 
+    const OTHER = 'mmmm-peer2'; // 另一条同网链路（SELF < OTHER：本侧同为先手方）
+
     /** 同 NAT 与否可配置的引擎（sameNat 为 undefined 时干脆不提供
-     *  该方法——模拟旧 stub / 旧 Mesh）。 */
-    function makeEngine(sameNat) {
+     *  该方法——模拟旧 stub / 旧 Mesh）；relayAvail 模拟 TURN 是否
+     *  配置（relay-only 的降级守卫）。 */
+    function makeEngine(sameNat, { relayAvail = true } = {}) {
         const meshEntries = new Map();
         const rebuilds = [];
         const mesh = {
@@ -385,6 +388,7 @@ describe('test-recovery (same-NAT never-connected links rebuild relay-only)', ()
             clear() {},
             restartIce: () => Promise.resolve(true),
             unstickStaleOffer: () => Promise.resolve(false),
+            relayOnlyAvailable: () => relayAvail,
             rebuildPeer(peerId, opts) {
                 rebuilds.push({ peerId, opts });
                 return true;
@@ -426,10 +430,16 @@ describe('test-recovery (same-NAT never-connected links rebuild relay-only)', ()
     });
 
     /** 走完压缩梯子（roundDelays [10,10,10]、窗口 40ms）直到重建。 */
-    async function driveToRebuild(recovery, meshEntries) {
-        meshEntries.set(PEER, { pc: { connectionState: 'failed' } });
+    async function driveToRebuild(recovery, meshEntries, entry = { pc: { connectionState: 'failed' } }) {
+        meshEntries.set(PEER, entry);
         recovery.notePeerState(PEER, 'failed');
         await sleep(150); // 轮 1-3（t≈0/10/20）→ 窗口复查（t≈30）→ 升级重建（t≈40）
+    }
+
+    /** 把第二条链路也挂到梯子上（它同样 failed，且同样在同 NAT 后面）。 */
+    function breakSecondLink(recovery, meshEntries) {
+        meshEntries.set(OTHER, { pc: { connectionState: 'failed' } });
+        recovery.notePeerState(OTHER, 'failed');
     }
 
     it('requests a relay-only rebuild for a same-NAT link that never connected', async () => {
@@ -457,5 +467,44 @@ describe('test-recovery (same-NAT never-connected links rebuild relay-only)', ()
         await driveToRebuild(recovery, meshEntries);
         rebuilds.should.have.length(1);
         rebuilds[0].opts.relayOnly.should.be.false();
+    });
+
+    it('still requests the relay-only rebuild when other links are broken (a third same-NAT device)', async () => {
+        // 第三台同网设备入房：它的每条链路都对端同 NAT、从未连上。多链路
+        // 同时失败此前被一律解读为「我们自己的网络问题」→ 跳过按链路
+        // 重建直落 B1，而 B1 之后一切照旧——直到预算耗尽。同 NAT 是
+        // 逐对端的拓扑证据，不是本端掉线
+        const { meshEntries, rebuilds, recovery } = makeEngine(true);
+        lastRecovery = recovery;
+        breakSecondLink(recovery, meshEntries);
+        await driveToRebuild(recovery, meshEntries);
+        rebuilds
+            .filter((r) => r.peerId === PEER)
+            .map((r) => r.opts.relayOnly)
+            .should.eql([true]);
+        recovery.debugState().b1Attempts.should.equal(0);
+    });
+
+    it('keeps B1 (no per-link rebuild) for several broken links when relay-only is not actionable', async () => {
+        // 未配置 TURN：relay-only 经降级守卫退化为普通重建——多条链路
+        // 同时失败仍指向自己的网络，既有判定原样保留
+        const { meshEntries, rebuilds, recovery } = makeEngine(true, { relayAvail: false });
+        lastRecovery = recovery;
+        breakSecondLink(recovery, meshEntries);
+        await driveToRebuild(recovery, meshEntries);
+        rebuilds.should.eql([]);
+        recovery.debugState().b1Attempts.should.equal(1);
+    });
+
+    it('keeps a relay-only link relay-only across a later rebuild', async () => {
+        // 经 relay-only 重建才连上的链路再次断线、轮次耗尽：它从来没有过
+        // 直连路径，「曾连上 → 普通重建值得一试」的前提并不成立——
+        // 退回全候选策略只会重演当初连不上的那 20 秒，然后落到 B1
+        const { meshEntries, rebuilds, recovery } = makeEngine(true);
+        lastRecovery = recovery;
+        recovery.notePeerState(PEER, 'connected'); // 本纪元内连上过
+        await driveToRebuild(recovery, meshEntries, { pc: { connectionState: 'failed' }, relayOnly: true });
+        rebuilds.should.have.length(1);
+        rebuilds[0].opts.relayOnly.should.be.true();
     });
 });

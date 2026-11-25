@@ -17,6 +17,9 @@ import { createLinkQuality } from '/js/pages/channel/quality.js';
     并截断 socket 退避的尾巴
   - presence 探测：服务器确认已死的会话从阶梯中除名
   - 「连接中…」徽章：offer 永远无人应答的幽灵成员
+  - 让路：对端整条链路重建（来 offer 的 DTLS 指纹换了）时以既有
+    PC 应答，自己的重建顺延一个窗口——双方同时重建的相撞里，
+    跟着重建会让两端各执一份无人应答的 offer
   - 连接路径监视（P2P 与 TURN relay 徽章 + rtt）
   - 入向链路质量 / 出向丢包适应 / 抖动加深 /
     僵尸+质量重启（引擎拆到 channel/quality.js ——
@@ -84,7 +87,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
     // 本成员纪元内连接成功过的对端——同 NAT 判定（mesh.sameNatWith）
     // 只对「从未连上」的链路升级为 relay-only 重建（见
     // specs/same-nat-relay-recovery.md）：曾连上又断线的链路维持既有
-    // 梯子行为（直连路径存在过，普通重建仍值得一试）
+    // 梯子行为（直连路径存在过，普通重建仍值得一试）。例外是上次就
+    // 靠 relay-only 连上的链路（entry.relayOnly）：它没有过直连路径
     const everConnected = new Set();
     const flapHeals = new Map(); // peerId -> FLAP_WINDOW_MS 内的 [healedAt, ...]
     let recoveryScanTimer = null;
@@ -307,7 +311,25 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
         // 拿到全新 PeerConnection（完整 ICE+DTLS 重查）——
         // 若用 B1，mesh 里其他所有链路都要为这一条陪葬。
         // 两条以上链路同时失败则像是全网问题：仍用 B1。
-        if (!rec.rebuilt && onlyBrokenLink(peerId)) {
+        //
+        // 例外——同 NAT 对等（双方 srflx 同公网 IP——同一路由器/
+        // CGNAT 下的两台设备）：host 直连被拦、srflx 回环过不了
+        // CGNAT，普通全候选矩阵里唯一可行的 relay 配对又在重建
+        // 风暴中永远等不到缓慢的收集。这次重建直接换成
+        // relay-only PC（只收集 TURN 候选、检查全部从 relay 分配
+        // 发出）。事实归 mesh（sameNatWith），这里只做策略；
+        // 未配置 TURN 时由 mesh 的降级守卫静默回退普通策略。
+        // 适用对象（specs/same-nat-relay-recovery.md）：本纪元从未
+        // 连上的链路，以及上次就靠 relay-only 才连上的链路
+        // （entry.relayOnly——它没有过直连路径，退回全候选只是
+        // 重演连不上的那 20s）
+        const relayOnly =
+            !!s.mesh?.sameNatWith?.(peerId) && (!everConnected.has(peerId) || !!s.mesh?.entries.get(peerId)?.relayOnly);
+        // relay-only 能生效时不受 onlyBrokenLink 约束：同 NAT 是逐对端
+        // 的拓扑证据，不是「本端掉线」——第三台同网设备的每条链路都该
+        // 各自重建，而不是直落 B1。无 TURN 时它只是伪装的普通重建，
+        // 多链路同时失败的既有判定照旧
+        if (!rec.rebuilt && ((relayOnly && s.mesh.relayOnlyAvailable()) || onlyBrokenLink(peerId))) {
             rec.rebuilt = true;
             rec.brokenAt = Date.now(); // 给重建的链路一个新的沉淀窗口
             // 全新 PC = 全新 ICE+DTLS，等价初次加入——配齐整副
@@ -320,17 +342,8 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
             // 而能走到这一阶的高 uuid 方已在 restart 层等完了
             // 先手窗口与破例轮次——对端仍无动作（单侧 consent
             // 失效时它根本不在恢复中，此前这里要白等 20s 才落到
-            // B1）。双方同时耗尽轮次而同时重建的相撞由完美协商
-            // 兜底，代价只是一方白建一个 PC
-            //
-            // 同 NAT 且从未连上（双方 srflx 同公网 IP——同一路由器/
-            // CGNAT 下的两台设备）：host 直连被拦、srflx 回环过不了
-            // CGNAT，普通全候选矩阵里唯一可行的 relay 配对又在重建
-            // 风暴中永远等不到缓慢的收集。这次重建直接换成
-            // relay-only PC（只收集 TURN 候选、检查全部从 relay 分配
-            // 发出）。事实归 mesh（sameNatWith），这里只做策略；
-            // 未配置 TURN 时由 mesh 的降级守卫静默回退普通策略
-            const relayOnly = !everConnected.has(peerId) && !!s.mesh?.sameNatWith?.(peerId);
+            // B1）。双方同时耗尽轮次而同时重建时，后到一方由
+            // notePeerRebuilt 让路（见下方）
             if (s.mesh?.rebuildPeer(peerId, { relayOnly })) {
                 console.warn(
                     '[mesh] recovery: rebuilding the peer connection' + (relayOnly ? ' (relay-only, same NAT)' : ''),
@@ -352,6 +365,23 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
     function onlyBrokenLink(peerId) {
         for (const id of peerRecovery.keys()) if (id !== peerId) return false;
         return true;
+    }
+
+    /** 对端刚刚整条链路重建（Mesh 事实：来 offer 的 DTLS 指纹换了，
+     *  见 webrtc.js 的 onPeerRebuilt）。我们以既有 PC 应答它——这本身
+     *  就是一次全新 ICE+DTLS 的按链路重建，自己的重建因此没有意义：
+     *  给这份新协商一个完整的沉淀窗口。不停下的话，升级节拍恰好落在
+     *  旧 PC 应答这份 offer 的间隙里时会跟着重建——旧 PC 的 answer 随
+     *  close 作废，而新 PC 的 offer 又被 impolite 的对端按完美协商忽略，
+     *  两端各执一份无人应答的 offer，直到双双落到 B1
+     *  （specs/p2p-recovery-boundaries.md §2）。rebuilt 不置位：这份
+     *  协商若仍失败，本端自己的重建仍是下一阶。已 escalated 的梯子
+     *  不动——B1 仍是出路，对端重建成功则 connected 照常取消记录。 */
+    function notePeerRebuilt(peerId) {
+        const rec = peerRecovery.get(peerId);
+        if (!rec || rec.escalated) return;
+        rec.brokenAt = Date.now();
+        rec.attempts = 0;
     }
 
     // -------------------------------------------------------------------------
@@ -749,6 +779,7 @@ export function createRecovery({ s, x, members, channelId, $, el, t, timings = {
         markSessionRestored,
         onRelayUndelivered,
         retryStuckOffer,
+        notePeerRebuilt,
         get selfReconnecting() {
             return selfReconnecting;
         },

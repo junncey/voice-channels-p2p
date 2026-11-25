@@ -963,5 +963,60 @@ describe('test-server (signaling integration)', function () {
             seenSdp.length.should.equal(3); // 只有上面三条合法 SDP
             receipts.length.should.equal(0);
         });
+
+        it('should not receipt relaySDP from a sender whose own join has not landed', async () => {
+            // 传输重连时 socket.io 先冲刷断线期间缓冲的信令、后发 join——
+            // 服务器此刻看到的是一个尚未加入任何频道的 socket。回执的
+            // 语义是「合法载荷投不进对端」，而这里投不出去的原因是发送者
+            // 自己还没落座：回执只会把客户端引向一次毫无意义的探测
+            const x = track(connect());
+            const receipts = [];
+            x.on('relayUndelivered', (cfg) => receipts.push(cfg));
+            x.emit('relaySDP', {
+                peer_id: crypto.randomUUID(),
+                session_description: { type: 'offer', sdp: 'v=0 buffered while offline' },
+            });
+            await wait(300);
+            receipts.should.have.length(0);
+        });
+
+        it('should answer "unknown" to a probe sent while the prober own join is still in flight', async () => {
+            // 同一场景的另一半：join 正在线程池里校验频道密码（异步间隙），
+            // 客户端的 presence 探测已经到达。答 'gone' 会让客户端当场拆掉
+            // 一个活得好好的成员（恢复引擎的 gone 分支 = dropPeer）
+            const room = 'tlocked';
+            const ub = crypto.randomUUID();
+            const b = track(connect());
+            b.emit('join', { ...joinPayload(room, ub, 'bob'), channel_password: 'secret-pw' });
+            await once(b, 'serverInfo');
+
+            const late = track(connect());
+            const probe = (peer_id) =>
+                new Promise((resolve) =>
+                    late
+                        .timeout(4000)
+                        .emit('peerPresence', { room_id: room, peer_id }, (err, res) => resolve(err ? null : res))
+                );
+            late.emit('join', { ...joinPayload(room, crypto.randomUUID(), 'late'), channel_password: 'secret-pw' });
+            (await probe(ub)).present.should.equal('unknown');
+
+            await once(late, 'serverInfo'); // join 随后照常落座
+            (await probe(ub)).present.should.equal('live'); // 落座后是真实答案
+        });
+
+        it('should still answer gone to a joined member probing a stranger', async () => {
+            // 精确性：探测者在房间里、目标不存在——这才是 'gone' 的本义
+            const a = track(connect());
+            a.emit('join', joinPayload('troom', crypto.randomUUID(), 'stranger-prober'));
+            await once(a, 'serverInfo');
+            const res = await new Promise((resolve) =>
+                a
+                    .timeout(4000)
+                    .emit('peerPresence', { room_id: 'troom', peer_id: crypto.randomUUID() }, (err, r) =>
+                        resolve(err ? null : r)
+                    )
+            );
+            res.present.should.equal('gone');
+        });
     });
 });

@@ -27,6 +27,9 @@ relayOnly = 本成员纪元内从未 connected  ∧  mesh.sameNatWith(peerId)
 ```
 
 - **只对「从未连上」的链路升级**：曾连上又断线的链路说明直连路径存在过，普通重建仍值得一试。
+- **例外：经 relay-only 才连上的链路保持 relay-only**。它的「曾连上」并不代表直连路径存在过——退回全候选策略只会重演当初连不上的那 20s，然后落到 B1。当前条目的 `entry.relayOnly` 即为证据。
+- **不受 `onlyBrokenLink` 约束**。梯子的「多条链路同时失败 = 本端网络问题 → 直接 B1」是通用启发式；同 NAT 是逐对端的拓扑证据，与几条链路断开无关。第三台同网设备入房时它的每条链路都到不了彼此，修复前全部跳过按链路重建直落 B1——而 B1 之后一切照旧，直到预算耗尽。
+- **仅当 relay-only 能真正生效时才破例**：未配置 TURN（`Mesh.relayOnlyAvailable()` 为假）时 relay-only 会经降级守卫退化成普通重建，多条链路断开的既有判定原样保留（仍走 B1）。
 - 无 TURN 配置时由 `hasTurnServer()` 守卫**静默回退普通策略** —— 强制 `iceTransportPolicy: 'relay'` 而没有 TURN 会收集不到任何候选，连接必死。
 - 触发点在梯子耗尽普通轮次后的 `rebuildPeer` 一步，日志：`[mesh] recovery: rebuilding the peer connection (relay-only, same NAT) <peerId>`。
 
@@ -37,6 +40,7 @@ relayOnly = 本成员纪元内从未 connected  ∧  mesh.sameNatWith(peerId)
 | `Mesh.addPeer(peerId, shouldCreateOffer, iceServers, { relayOnly })` | 生效时 PC 以 `iceTransportPolicy: 'relay'` 创建                                                                        |
 | `Mesh.rebuildPeer(peerId, { relayOnly })`                            | 透传给 `addPeer`，自适应状态（`jitterTarget` / `bitrateFloor`）照旧搬运                                                |
 | `entry.relayOnly`                                                    | 记录**实际生效**标志（有 TURN 且请求了 relay-only），供其它模块读取                                                    |
+| `Mesh.relayOnlyAvailable()`                                          | 当前 iceServers 里是否配有 TURN——策略层判断「relay-only 能否生效」的事实入口                                           |
 | `relay.js` 的 `note()`                                               | 跳过 `relayOnly` 链路：其 PC 没有 host/srflx 候选，重新打洞在定义上不可能产出直连，只会换来两次徒劳 restart 的音频闪断 |
 
 ## 验收场景（`tests/test-same-nat.js`、`test-recovery.js`、`test-relay.js`）
@@ -47,6 +51,8 @@ relayOnly = 本成员纪元内从未 connected  ∧  mesh.sameNatWith(peerId)
 4. `rebuildPeer({relayOnly})` 在有 TURN 时落到 `iceTransportPolicy: 'relay'`；无 TURN 回退普通策略；不带选项时行为不变。
 5. 恢复梯子：同 NAT 且从未连上 → 请求 relay-only 重建；曾连上 → 普通重建；跨网对端 → 不请求。
 6. relay 升级引擎对 relay-only 链路从不武装。
+7. 另有链路同在梯子上（`onlyBrokenLink` 为假）时，同 NAT 链路仍请求 relay-only 重建、不落 B1；无 TURN 时保持 B1。
+8. 曾连上且当前条目为 relay-only 的链路，后续重建仍请求 relay-only。
 
 线上判据：同网两台设备入房后，成员卡链路徽章显示「中转」，console 出现上述 relay-only 日志，且该链路**不再**出现 `relay upgrade: ice restart sent`。
 

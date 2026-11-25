@@ -283,6 +283,19 @@ export function candidateSrflxIp(candidate) {
     return ip || null;
 }
 
+/**
+ * 从 SDP 里取 DTLS 指纹（a=fingerprint 行的值，大写归一）——纯函数，
+ * 为测试导出。指纹是 PC 证书的哈希：ICE restart 只换 ice-ufrag、
+ * 指纹不变，全新 PeerConnection 才会带来新指纹。读不出返回 null。
+ * @param {string|undefined} sdp
+ * @returns {string|null}
+ */
+export function sdpFingerprint(sdp) {
+    if (typeof sdp !== 'string') return null;
+    const match = /^a=fingerprint:\S+\s+([0-9A-Fa-f:]+)\s*$/m.exec(sdp);
+    return match ? match[1].toUpperCase() : null;
+}
+
 export class Mesh {
     /**
      * @param {object}   options
@@ -532,7 +545,21 @@ export class Mesh {
 
     async _applySessionDescription(peer_id, entry, session_description, sdp_seq) {
         const pc = entry.pc;
+        // 对端重建检测的基准：本 PC 此前已协商的远端指纹（仅 offer 相关）
+        const prevPrint = session_description.type === 'offer' ? sdpFingerprint(pc.remoteDescription?.sdp) : null;
         await pc.setRemoteDescription(session_description);
+        // 一份 offer 带来了不同的 DTLS 指纹 = 对端换上了全新的
+        // PeerConnection（rebuildPeer）。这份 offer 在我们的旧 PC 上
+        // 以 ICE restart + 新 DTLS 落座，本身就是一次按链路重建——
+        // 把事实交给恢复梯子（它据此让自己的重建让路，见
+        // specs/p2p-recovery-boundaries.md §2：双方同时重建时，后到
+        // 一方若在旧 PC 应答这份 offer 的间隙里跟着重建，旧 PC 的
+        // answer 随 close 作废，新 PC 的 offer 又被 impolite 对端忽略，
+        // 两端各执一份无人应答的 offer）。ICE restart（同指纹）、
+        // 首份远端描述与读不出指纹的 SDP 都无结论
+        if (prevPrint && prevPrint !== sdpFingerprint(session_description.sdp) && this.handlers.onPeerRebuilt) {
+            this.handlers.onPeerRebuilt(peer_id);
+        }
         // 冲刷在远端描述之前到达的 ICE 候选——并行喂入：trickle
         // 候选本就允许乱序落地（end-of-candidates 除外），串行
         // 等待只会推迟弱网乱序场景下的打洞启动
@@ -952,6 +979,12 @@ export class Mesh {
         this.sdpSeqs.clear(); // 页面拆除：账本随会话终结（clear 刻意保留，见字段注释）
         this.localSrflxIps.clear(); // 同 NAT 判定知识一并随页面终结
         this.remoteSrflxIps.clear();
+    }
+
+    /** 当前 iceServers 里是否配有 TURN——relay-only 策略能否真正生效的
+     *  事实入口（与 addPeer 的降级守卫同源，见 same-nat-relay-recovery）。 */
+    relayOnlyAvailable() {
+        return hasTurnServer(this.iceServers);
     }
 
     _addLocalTracks(entry) {

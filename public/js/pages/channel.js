@@ -779,6 +779,11 @@ function meshHandlers() {
             // 链路刚稳定就做第一次路径读取；此后靠轮询保鲜
             if (state === 'connected') rec.checkPeerPath(peerId, rec.PATH_FIRST_CHECK_MS);
         },
+        // 对端整条链路重建（来 offer 的 DTLS 指纹换了）：梯子让自己的
+        // 重建让路，以既有 PC 应答它
+        onPeerRebuilt(peerId) {
+            rec.notePeerRebuilt(peerId);
+        },
     };
 }
 
